@@ -2,13 +2,106 @@
 //  Cascade AI — Shell Tool
 // ─────────────────────────────────────────────
 
-import { exec, execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { type ChildProcess, type SpawnOptions, execFile, spawn } from 'node:child_process';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
 
-const execAsync = promisify(exec);
-const execFileAsync = promisify(execFile);
+export interface Ran { stdout: string; stderr: string; code: number; timedOut: boolean }
+
+/**
+ * Runs a command in a process group of its own, so that a console Ctrl-C
+ * event it raises (on Windows, one goes to every process on the console)
+ * never reaches Cascade: one did, and Cascade quit in the middle of a run.
+ * On a timeout or a cancelled run the whole tree is stopped, not just the
+ * shell, so a server it started doesn't stay behind holding its port.
+ */
+export function runInOwnGroup(
+  spec: { command: string } | { file: string; args: string[] },
+  opts: { cwd: string; env?: NodeJS.ProcessEnv; timeout: number; signal?: AbortSignal },
+): Promise<Ran> {
+  return new Promise((resolve, reject) => {
+    let timedOut = false;
+    let cancelled = false;
+    let overflowed = false;
+    // stdin closed: a command that waits for input gets end-of-input at once,
+    // rather than hanging until its timeout. Output piped, never inherited.
+    const common: SpawnOptions = { cwd: opts.cwd, windowsHide: true, detached: true, stdio: ['ignore', 'pipe', 'pipe'], ...(opts.env ? { env: opts.env } : {}) };
+    const child = 'command' in spec ? spawn(spec.command, { ...common, shell: true }) : spawn(spec.file, spec.args, common);
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
+    let size = 0;
+    const collect = (into: Buffer[]) => (chunk: Buffer): void => {
+      if (overflowed) return;
+      size += chunk.length;
+      if (size > MAX_OUTPUT_BYTES) { overflowed = true; stopTree(child); return; }
+      into.push(chunk);
+    };
+    child.stdout?.on('data', collect(out));
+    child.stderr?.on('data', collect(err));
+    const timer = setTimeout(() => { timedOut = true; stopTree(child); }, opts.timeout);
+    const onAbort = (): void => { cancelled = true; stopTree(child); };
+    const finish = (code: number | null, failure?: Error): void => {
+      clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', onAbort);
+      if (cancelled) {
+        const stopped = new Error('The command was stopped: the run was cancelled.');
+        stopped.name = 'AbortError';
+        reject(stopped);
+        return;
+      }
+      if (failure) { reject(failure); return; }
+      const stderr = Buffer.concat(err).toString('utf8') + (overflowed ? `\n[output passed ${MAX_OUTPUT_BYTES / 1024 / 1024} MB; the command was stopped]` : '');
+      resolve({ stdout: Buffer.concat(out).toString('utf8'), stderr, code: code ?? 1, timedOut });
+    };
+    child.on('error', (e) => finish(null, e));
+    child.on('close', (code) => finish(code));
+    if (opts.signal?.aborted) onAbort();
+    else opts.signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/** Output kept from a command, stdout and stderr together, as exec's default allowed. */
+const MAX_OUTPUT_BYTES = 1024 * 1024;
+
+/** Stops a command and everything it started. */
+export function stopTree(child: ChildProcess): void {
+  const pid = child.pid;
+  if (!pid) return;
+  if (process.platform === 'win32') {
+    execFile('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true }, () => { /* gone already */ });
+    return;
+  }
+  try { process.kill(-pid, 'SIGTERM'); } catch { /* gone already */ }
+  setTimeout(() => { try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } }, 2000).unref();
+}
+
+/**
+ * A command that would stop Cascade itself: by its program's name (Cascade
+ * runs as node), or by its own or its parent's process id. A run cleaning up
+ * a dev server with `taskkill /IM node.exe /F` ended the session in silence.
+ */
+export function stopsCascade(command: string, pids: number[] = [process.pid, process.ppid]): boolean {
+  const c = command.toLowerCase();
+  const byName = [
+    /\btaskkill\b[^|;&]*\/im\s+["']?(?:node|cascade)(?:\.exe)?["']?(?:\s|$)/,
+    /\b(?:stop-process|spps|kill)\b[^|;&]*-(?:processname|name)\s+["']?(?:node|cascade)["']?(?:\s|$|,)/,
+    /\bwmic\b[^|;&]*name\s*=\s*['"]?(?:node|cascade)(?:\.exe)?['"]?[^|;&]*\b(?:delete|terminate)\b/,
+    /\bget-process\b[^|;&]*\b(?:node|cascade)\b[^;&]*\|\s*(?:stop-process|spps|kill)\b/,
+  ];
+  if (byName.some((p) => p.test(c))) return true;
+  // pkill / killall naming node: read word by word, as a nested pattern for
+  // "any flags, then node" can backtrack without end on a long command (CodeQL).
+  const killsNode = c.split(/[|;&\n]/).some((segment) => {
+    const words = segment.trim().split(/\s+/);
+    const at = words.findIndex((w) => /(^|[\\/])(pkill|killall)$/.test(w));
+    return at >= 0 && words.slice(at + 1).some((w) => /^["']?(node|nodejs|cascade)["']?$/.test(w));
+  });
+  if (killsNode) return true;
+  const ids = pids.filter((p) => Number.isInteger(p) && p > 1).map(String);
+  if (!ids.length) return false;
+  const pidRe = new RegExp(`(?:\\b(?:kill|taskkill|stop-process|spps)\\b[^|;&]*?)(?:/pid\\s+|-id\\s+|-\\w+\\s+|\\s)(${ids.join('|')})(?:\\s|$|,)`);
+  return pidRe.test(c);
+}
 
 export class ShellTool extends BaseTool {
   readonly name = 'shell';
@@ -56,16 +149,13 @@ export class ShellTool extends BaseTool {
     let note: string | void;
     try {
       // windowsHide: prevent a console window flash per command on Windows.
-      // Output is piped (exec default), never inherited — it cannot write
-      // over the live TUI.
-      const { stdout, stderr } = launch && posix
-        ? await execFileAsync(launch.file, launch.args, { cwd: launch.cwd, env: launch.env, timeout, windowsHide: true, signal: options.signal })
-        : await execAsync(command, { cwd, timeout, windowsHide: true, signal: options.signal, ...(launch ? { env: launch.env } : {}) });
-      output = [stdout, stderr].filter(Boolean).join('\n').trim() || '(no output)';
-    } catch (err) {
-      if (!(err instanceof Error && 'stdout' in err && 'stderr' in err)) throw err;
-      const e = err as Error & { stdout: string; stderr: string; code: number };
-      output = `Exit ${e.code ?? 1}:\n${[e.stdout, e.stderr].filter(Boolean).join('\n').trim()}`;
+      // Output is piped, never inherited — it cannot write over the live TUI.
+      const ran = launch && posix
+        ? await runInOwnGroup({ file: launch.file, args: launch.args }, { cwd: launch.cwd, env: launch.env, timeout, ...(options.signal ? { signal: options.signal } : {}) })
+        : await runInOwnGroup({ command }, { cwd, timeout, ...(launch ? { env: launch.env } : {}), ...(options.signal ? { signal: options.signal } : {}) });
+      const text = [ran.stdout, ran.stderr].filter(Boolean).join('\n').trim();
+      output = ran.code === 0 && !ran.timedOut ? text || '(no output)' : `Exit ${ran.code}:\n${text}`;
+      if (ran.timedOut) output += `\n[stopped after ${Math.round(timeout / 1000)}s: it timed out, and the command and everything it started were stopped]`;
     } finally {
       note = await launch?.done?.();
     }
@@ -90,6 +180,9 @@ export class ShellTool extends BaseTool {
       if (pattern.test(command)) {
         throw new Error(`Command blocked: matches dangerous pattern`);
       }
+    }
+    if (stopsCascade(command)) {
+      throw new Error(`Command refused: it would stop Cascade itself, which runs as node (process ${process.pid}). Stop the program you mean by its own process id, or by the port it listens on.`);
     }
 
     // User blocklist (substring match)

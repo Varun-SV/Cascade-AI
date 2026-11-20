@@ -35,6 +35,10 @@ import { statsCommand } from './commands/stats.js';
 import { applySetup, runSetupWizard } from './setup/index.js';
 import { McpClient } from '../mcp/client.js';
 import { restoreTerminal } from './terminal.js';
+import {
+  ExitGuard, currentGuard, describe, guardEvents, previousEndingNotice, setCurrentGuard, signalExitCode, wasQuitByUser,
+} from './exit-guard.js';
+import { STATE, statePath } from '../config/project-state.js';
 
 dotenv.config();
 
@@ -91,19 +95,70 @@ function leaveAltScreen(): void {
 // cleanup as a clean quit. An `uncaughtException` handler would be the wrong
 // tool — it would have to re-throw or exit explicitly to keep the failure, and
 // this needs no say in whether the process dies, only in what it leaves behind.
-process.on('exit', () => {
+process.on('exit', (code) => {
+  // The REPL's ending, written down: unless something before this already
+  // said why, it is the exit code that tells.
+  const guard = currentGuard();
+  if (guard) {
+    if (wasQuitByUser() && code === 0) guard.end({ clean: true, reason: 'You quit Cascade.', code });
+    else guard.end({
+      clean: false, code,
+      reason: code === 0
+        ? 'Cascade\'s process ended with nothing left for it to do, without being asked to quit.'
+        : `Cascade's process exited with code ${code}.`,
+    });
+  }
   leaveAltScreen();
   restoreTerminal(process.stdin, process.stdout);
   McpClient.killAllProcesses();
 });
-process.on('SIGINT', () => {
+
+/**
+ * A stop signal. While the REPL runs, the terminal is in raw mode, so the
+ * person's own Ctrl+C reaches it as a key and never as SIGINT: a SIGINT then
+ * came from another program, on Windows most often a console Ctrl-C event
+ * from a command Cascade itself ran. It is ignored, and said. Any other stop
+ * signal ends Cascade, with the reason written down and shown.
+ */
+function onStopSignal(signal: NodeJS.Signals): void {
+  const guard = currentGuard();
+  if (guard && signal === 'SIGINT') {
+    guardEvents.emit('notice', 'Cascade was sent an interrupt signal by another program (most likely a command it was running) and carried on. To quit, press Ctrl+C twice or type /exit.');
+    return;
+  }
+  if (guard) {
+    guard.end({ clean: false, signal, code: signalExitCode(signal), reason: `It was sent ${signal}: another program or the system asked it to stop.` });
+    leaveAltScreen();
+    restoreTerminal(process.stdin, process.stdout);
+    process.stderr.write(chalk.yellow(`\n  Cascade stopped: it was sent ${signal}. Details: ${guard.path}\n`));
+  }
   McpClient.killAllProcesses();
-  process.exit(0);
-});
-process.on('SIGTERM', () => {
-  McpClient.killAllProcesses();
-  process.exit(0);
-});
+  process.exit(guard ? signalExitCode(signal) : 0);
+}
+process.on('SIGINT', () => onStopSignal('SIGINT'));
+process.on('SIGTERM', () => onStopSignal('SIGTERM'));
+process.on('SIGHUP', () => onStopSignal('SIGHUP'));
+if (process.platform === 'win32') process.on('SIGBREAK', () => onStopSignal('SIGBREAK'));
+
+/**
+ * While the REPL runs: a stray rejection in a background task is written
+ * down and shown, and the session goes on. An uncaught exception still ends
+ * it (what it left half-done can't be trusted), but says why first.
+ */
+function guardReplErrors(guard: ExitGuard): void {
+  process.on('unhandledRejection', (reason) => {
+    const text = guard.survive(reason);
+    guardEvents.emit('notice', `An error in a background task was caught, and Cascade carried on: ${text.split('\n')[0]}`);
+  });
+  process.on('uncaughtException', (err) => {
+    guard.end({ clean: false, code: 1, reason: `An error Cascade did not handle: ${describe(err).split('\n')[0]}`, error: describe(err) });
+    leaveAltScreen();
+    restoreTerminal(process.stdin, process.stdout);
+    process.stderr.write(chalk.red(`\n  Cascade stopped because of an error: ${describe(err).split('\n')[0]}\n  Details: ${guard.path}\n`));
+    McpClient.killAllProcesses();
+    process.exit(1);
+  });
+}
 
 const program = new Command();
 
@@ -391,7 +446,11 @@ async function startRepl(options: {
   // Taken BEFORE the setup wizard may reload the config, which would consume
   // the notice with nothing to show it. Rendered inside the REPL below, since
   // the screen clear between here and Ink erases anything printed now.
-  const startupNotice = cm.takeRetiredNotice();
+  // How the last session here ended, and the record for this one.
+  const guard = new ExitGuard(statePath(workspacePath, STATE.exitLog), CASCADE_VERSION);
+  const lastEnding = previousEndingNotice(guard.previous());
+  const retired = cm.takeRetiredNotice();
+  const startupNotice = [lastEnding, retired].filter(Boolean).join('\n') || undefined;
 
   // First-run detection: no providers configured → launch setup wizard
   const needsSetup = !hasUsableProvider(config.providers);
@@ -420,6 +479,10 @@ async function startRepl(options: {
     process.stdout.write('\x1B[2J\x1B[H');
   }
 
+  guard.begin();
+  setCurrentGuard(guard);
+  guardReplErrors(guard);
+
   // Render ink REPL
   const { waitUntilExit } = render(
     React.createElement(Repl, {
@@ -434,7 +497,22 @@ async function startRepl(options: {
     { exitOnCtrlC: false },
   );
 
-  await waitUntilExit();
+  // The session lasts until the person ends it. Node ends a process with
+  // nothing left to wait on, and an approval's timer doesn't count (it is
+  // unref'd); if the screen ever let go of the keyboard while one was
+  // showing, Cascade would have closed without a word. This holds it open.
+  const keepAlive = setInterval(() => { /* holds the session open */ }, 1 << 30);
+  try {
+    await waitUntilExit();
+  } catch (err) {
+    // Ink unmounted on an error while drawing the screen.
+    guard.end({ clean: false, code: 1, reason: `The screen failed to draw: ${describe(err).split('\n')[0]}`, error: describe(err) });
+    leaveAltScreen();
+    process.stderr.write(chalk.red(`\n  Cascade stopped: the screen failed to draw (${describe(err).split('\n')[0]}). Details: ${guard.path}\n`));
+    process.exit(1);
+  } finally {
+    clearInterval(keepAlive);
+  }
   leaveAltScreen();
   process.exit(0);
 }

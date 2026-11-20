@@ -58,6 +58,19 @@ describe('Cascade.setBrowserController — the gate on acting for real', () => {
     expect(c.getToolRegistry().hasTool('browser_control')).toBe(true);
   });
 
+  it('a run that can browse can also find real pictures, even with web search off', () => {
+    // A hosted run with the web toggle off has an empty enabledTools, so
+    // find_image never registered, and a browsing run asked for pictures was
+    // offered only generate_image: paid, and made up.
+    const c = cascadeWith({ agentBrowserControl: true, enabledTools: [] });
+    c.setBrowserController(controller);
+    expect(c.getToolRegistry().hasTool('find_image')).toBe(true);
+    expect(c.getToolRegistry().hasTool('annotate_image')).toBe(true);
+    const off = cascadeWith({ agentBrowserControl: true, enabledTools: [], disabledTools: ['find_image'] });
+    off.setBrowserController(controller);
+    expect(off.getToolRegistry().hasTool('find_image')).toBe(false);
+  });
+
   it('still honours disabledTools when the setting is on', () => {
     // disabledTools reaches tools registered outside the enabledTools
     // allowlist, and this is one of them.
@@ -1072,6 +1085,33 @@ describe('secretValuesIn — what the process jail keeps out of a command\'s env
 
 // The host was handed a local-only subtask's request like any other, with
 // nothing to tell it that the input may carry what the subtask read.
+describe('Cascade.reconfigure: Auto routing settings apply on the next run (Codex on 27db466)', () => {
+  it('turning facts off reaches the router workers ask (Codex on 4daf87b)', async () => {
+    const c = new Cascade({ ...baseConfig } as never, '/tmp');
+    (c as unknown as { initialized: boolean }).initialized = true;
+    expect(c.getRouter().getKnowledgeConfig().factsExtraction).toBe(true);
+    await c.reconfigure({ ...baseConfig, knowledge: { factsExtraction: false } } as never);
+    expect(c.getRouter().getKnowledgeConfig().factsExtraction).toBe(false);
+  });
+
+  it('makes the analyzer again for a new bias, makes one when Auto is turned on, and drops it when off', async () => {
+    const c = new Cascade({ ...baseConfig, cascadeAuto: false } as never, '/tmp');
+    const analyzer = () => (c as unknown as { taskAnalyzer?: { bias?: string } }).taskAnalyzer;
+    const routerAnalyzer = () => (c.getRouter() as unknown as { taskAnalyzer?: unknown }).taskAnalyzer;
+    expect(analyzer()).toBeUndefined();
+    await c.reconfigure({ ...baseConfig, cascadeAuto: true, autoBias: 'cost' } as never);
+    const first = analyzer();
+    expect(first).toBeDefined();
+    expect(routerAnalyzer()).toBe(first);
+    await c.reconfigure({ ...baseConfig, cascadeAuto: true, autoBias: 'quality' } as never);
+    expect(analyzer()).not.toBe(first);
+    expect(routerAnalyzer()).toBe(analyzer());
+    await c.reconfigure({ ...baseConfig, cascadeAuto: false } as never);
+    expect(analyzer()).toBeUndefined();
+    expect(routerAnalyzer()).toBeUndefined();
+  });
+});
+
 describe('approvalRequestFor', () => {
   it('says when the request is a local-only subtask\'s, so a host can withhold its input', async () => {
     const { approvalRequestFor } = await import('./cascade.js');
@@ -1082,6 +1122,21 @@ describe('approvalRequestFor', () => {
     expect(approvalRequestFor({ ...req, localOnly: true } as never).localOnly).toBe(true);
     expect(approvalRequestFor(req as never).localOnly).toBeUndefined();
     expect(approvalRequestFor(req as never).input).toEqual({ command: 'ls' });
+  });
+
+  it("a local-only call's risk keeps its kind but not words taken from its input (Codex on 53bc237)", async () => {
+    const { approvalRequestFor } = await import('./cascade.js');
+    const { assessRisk } = await import('./permissions/risk.js');
+    const input = { command: "pkill -f 'PRIVATE_PROJECT_IDENTIFIER'" };
+    const req = {
+      id: 'r1', requestedBy: 't3', parentT2Id: 't2', toolName: 'shell', input,
+      isDangerous: true, subtaskContext: 's', sectionContext: 's', risk: assessRisk('shell', input, '/proj'),
+    };
+    expect(req.risk.reason).toContain('PRIVATE_PROJECT_IDENTIFIER');
+    const shown = approvalRequestFor({ ...req, localOnly: true } as never);
+    expect(shown.risk).toEqual({ level: 'risky', category: 'processes', reason: 'stops processes or containers' });
+    expect(JSON.stringify(shown.risk)).not.toContain('PRIVATE');
+    expect(approvalRequestFor(req as never).risk?.reason).toContain('PRIVATE_PROJECT_IDENTIFIER');
   });
 
   it('tells the person when only they can allow it, rather than that the tiers could not decide', async () => {

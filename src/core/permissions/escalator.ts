@@ -77,12 +77,38 @@ export class PermissionEscalator extends EventEmitter {
    * each piece of advice was a model call per request, and the web never showed it.
    */
   private adviseOnDangerous: boolean;
+  /**
+   * The project is checkpointed around the run (CascadeRunOptions.undoable).
+   * Then, in autonomous mode, a dangerous tool's call that is not risky (see
+   * Risk: it reads, or makes a change the checkpoint can undo) goes ahead,
+   * and an "always" answer covers one kind of risk of one tool — "shell that
+   * deletes" — rather than the whole tool.
+   */
+  private undoable: boolean;
+  /** Whether the run's checkpoint records these files (CascadeRunOptions.checkpointed). */
+  private checkpointed?: (paths: string[]) => Promise<boolean>;
 
-  constructor(approvalTimeoutMs = 600_000, autonomous = false, adviseOnDangerous = false) {
+  /** How to tell whether a file a call writes is in the run's checkpoint. */
+  setCheckpointCoverage(fn: (paths: string[]) => Promise<boolean>): void {
+    this.checkpointed = fn;
+  }
+
+  constructor(approvalTimeoutMs = 600_000, autonomous = false, adviseOnDangerous = false, undoable = false) {
     super();
     this.approvalTimeoutMs = approvalTimeoutMs;
     this.autonomous = autonomous;
     this.adviseOnDangerous = adviseOnDangerous;
+    this.undoable = undoable;
+  }
+
+  /**
+   * What an "always" answer is remembered under. With checkpoints, a risky
+   * call's grant is for its kind of risk: allowing `rm -r build/` for the run
+   * must not also allow `git push --force`.
+   */
+  private grantKey(req: PermissionRequest): string {
+    if (!this.undoable || !req.risk) return req.toolName;
+    return `${req.toolName}#${req.risk.level === 'risky' ? req.risk.category ?? 'unclassified' : 'undoable'}`;
   }
 
   /** Toggle autonomous auto-approval at runtime (e.g. from /auto). */
@@ -111,6 +137,20 @@ export class PermissionEscalator extends EventEmitter {
 
   private async decide(req: PermissionRequest, signal?: AbortSignal): Promise<PermissionDecision> {
     if (signal?.aborted) return withdrawn(req);
+    // An undoable call is only undoable if the checkpoint records what it
+    // writes: a file the .gitignore leaves out (local-data/, .env) would be
+    // overwritten with nothing to put it back. Settled first, so an earlier
+    // "allow for this run" is looked up under what the call really is.
+    if (this.autonomous && this.undoable && req.risk?.level === 'recoverable' && req.risk.writes?.length && this.checkpointed) {
+      const recorded = await this.checkpointed(req.risk.writes).catch(() => false);
+      if (signal?.aborted) return withdrawn(req);
+      if (!recorded) {
+        req.risk = {
+          level: 'risky', category: 'unrecorded',
+          reason: `writes a file the checkpoint doesn't record (the project's .gitignore leaves it out), so /undo couldn't put it back`,
+        };
+      }
+    }
     // ── 1. Check the task-wide cache (USER/T1 "always") ────────────
     // Checked BEFORE the per-T2 cache so a grant covers every sibling worker
     // in the run, regardless of which T2 section raises the same tool next.
@@ -120,18 +160,19 @@ export class PermissionEscalator extends EventEmitter {
     // requests those models never see: only a person's grant — or a refusal,
     // which costs nothing to honour — carries over to it.
     const stands = (approved: boolean, byModel: boolean) => !((req.localOnly || req.askPerson) && byModel && approved);
-    if (!req.forceReprompt && this.taskWideCache.has(req.toolName)
-      && stands(this.taskWideCache.get(req.toolName)!, this.modelDecided.has(`task:${req.toolName}`))) {
+    const grant = this.grantKey(req);
+    if (!req.forceReprompt && this.taskWideCache.has(grant)
+      && stands(this.taskWideCache.get(grant)!, this.modelDecided.has(`task:${grant}`))) {
       return {
         requestId: req.id,
-        approved: this.taskWideCache.get(req.toolName)!,
+        approved: this.taskWideCache.get(grant)!,
         always: true,
         decidedBy: 'T1',
         reasoning: 'Cached from a previous task-wide decision in this session',
       };
     }
 
-    const cacheKey = `${req.parentT2Id}:${req.toolName}`;
+    const cacheKey = `${req.parentT2Id}:${grant}`;
 
     // ── 1b. Check the per-T2 session cache ────────────
     // Untrusted callers (forceReprompt) skip the cache so a prior `always`
@@ -176,6 +217,19 @@ export class PermissionEscalator extends EventEmitter {
         reasoning: 'Autonomous mode — non-dangerous tool auto-approved',
       };
     }
+    // ── 2b'. Autonomous mode with checkpoints: a dangerous tool's call that
+    // only reads, or only changes what the checkpoint can put back, goes
+    // ahead. A risky one — deleting, sending, rewriting history, installing,
+    // outside the project… — still asks. An untrusted tool always asks.
+    if (this.autonomous && this.undoable && req.risk && req.risk.level !== 'risky' && !req.forceReprompt) {
+      return {
+        requestId: req.id,
+        approved: true,
+        always: false,
+        decidedBy: 'T1',
+        reasoning: `Auto mode: ${req.risk.reason}`,
+      };
+    }
 
     // ── 2c. Dangerous: the user's, and nobody's advice is asked ──
     // The tiers below never decide a dangerous call; they only add advice.
@@ -210,8 +264,8 @@ export class PermissionEscalator extends EventEmitter {
         if (signal?.aborted) return withdrawn(req);
         if (t1Decision !== null) {
           if (t1Decision.always) {
-            this.taskWideCache.set(req.toolName, t1Decision.approved);
-            this.modelDecided.add(`task:${req.toolName}`);
+            this.taskWideCache.set(this.grantKey(req), t1Decision.approved);
+            this.modelDecided.add(`task:${this.grantKey(req)}`);
           }
           return t1Decision;
         }
@@ -263,8 +317,8 @@ export class PermissionEscalator extends EventEmitter {
         if (decision.always) {
           // Task-wide: a user's "Always" should cover every sibling worker in
           // this run, not just future requests under the same parent T2.
-          this.taskWideCache.set(req.toolName, decision.approved);
-          this.modelDecided.delete(`task:${req.toolName}`);
+          this.taskWideCache.set(this.grantKey(req), decision.approved);
+          this.modelDecided.delete(`task:${this.grantKey(req)}`);
         }
         resolve(decision);
       };
@@ -291,6 +345,9 @@ export class PermissionEscalator extends EventEmitter {
 
       signal?.addEventListener('abort', onAbort, { once: true });
       // Emit event so cascade.ts / REPL can pick it up
+      // Whether this run has a checkpoint, so the question can say truly
+      // whether /undo could take the change back.
+      req.undoable = this.undoable;
       this.emit('permission:user-required', req);
     });
   }

@@ -49,6 +49,78 @@ function promptHidden(question: string): Promise<string> {
   });
 }
 
+// ── The account actions, as text: for the REPL's /settings, /login and /sync ──
+
+/** Who is signed in, in a line; null when nobody is. */
+export async function accountLine(): Promise<string | null> {
+  const client = CloudClient.fromSession();
+  if (!client) return null;
+  try {
+    const me = await client.me();
+    return `${me.name || me.email || 'signed in'}${me.email && me.name ? ` (${me.email})` : ''}${me.plan ? ` · ${me.plan}` : ''}`;
+  } catch (err) {
+    return `signed in, but the account could not be reached: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+/** Sign in with the device code: `show` is told the page and code, and the browser is opened. */
+export async function signIn(show: (text: string) => void, server?: string): Promise<string> {
+  const client = new CloudClient(resolveServerUrl(server));
+  try {
+    const session = await client.runDeviceLogin((d) => {
+      show(`To sign in, open ${d.verificationUri} and enter ${d.userCode}. Your browser should open there now; Cascade waits here until you approve.`);
+      openBrowser(`${d.verificationUri}?code=${encodeURIComponent(d.userCode)}`);
+    });
+    return `✓ Signed in as ${session.user.name || session.user.email || session.user.id}.`;
+  } catch (err) {
+    return `Couldn't sign in: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+export async function signOut(): Promise<string> {
+  const client = CloudClient.fromSession();
+  if (!client) return 'Not signed in.';
+  await client.logout();
+  return '✓ Signed out on this machine.';
+}
+
+/** Encrypt this machine's settings with `pass` and upload them. */
+export async function pushSettings(workspace: string, pass: string): Promise<string> {
+  const client = CloudClient.fromSession();
+  if (!client) return 'Sign in first (/login).';
+  if (!pass) return 'Cancelled: no passphrase.';
+  try {
+    const cm = new ConfigManager(workspace);
+    await cm.load();
+    const r = await client.pushSecrets(await encryptJSON(gatherSyncBundle(cm.getConfig()), pass));
+    return `✓ Synced your keys and settings (v${r.version}), encrypted with your passphrase. On another machine: /sync pull.`;
+  } catch (err) {
+    return `Couldn't sync: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+/** Download the synced settings and apply them here. */
+export async function pullSettings(workspace: string, pass: string): Promise<string> {
+  const client = CloudClient.fromSession();
+  if (!client) return 'Sign in first (/login).';
+  if (!pass) return 'Cancelled: no passphrase.';
+  let blob;
+  try { ({ blob } = await client.pullSecrets()); } catch (err) { return `Couldn't reach your account: ${err instanceof Error ? err.message : String(err)}`; }
+  if (!blob) return 'Nothing synced to your account yet: /sync push on the machine that has your keys.';
+  let bundle: SyncBundle;
+  try { bundle = await decryptJSON<SyncBundle>(blob, pass); } catch { return 'Could not decrypt: check your passphrase and try again.'; }
+  try {
+    const cm = new ConfigManager(workspace);
+    await cm.load();
+    const cleanup: RetiredProviderCleanup = { removed: [], clearedPins: [] };
+    await cm.updateConfig(applySyncBundle(bundle, cm.getConfig(), cleanup));
+    return `✓ Applied your synced settings. Your keys are ready here.${didCleanupChangeAnything(cleanup) ? `
+${describeCleanup(cleanup)}` : ''}`;
+  } catch (err) {
+    return `Could not apply your synced settings: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
 export async function loginCommand(opts: { server?: string } = {}): Promise<void> {
   const serverUrl = resolveServerUrl(opts.server);
   const client = new CloudClient(serverUrl);

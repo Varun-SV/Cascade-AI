@@ -5,6 +5,7 @@
 import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { mcpServersIn } from '../../tools/mcp.js';
 import { Box, Static, Text, useApp, useInput, useStdout } from 'ink';
+import { ExitGuard, currentGuard, guardEvents, markQuitByUser, noteActivity } from '../exit-guard.js';
 import { SafeTextInput } from '../components/SafeTextInput.js';
 import { sanitizeTerminalInput, containsMouseSequence } from '../utils/terminal-input.js';
 import { randomUUID } from 'node:crypto';
@@ -24,10 +25,18 @@ import type {
   Theme,
   Message,
 } from '../../types.js';
-import { GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE } from '../../constants.js';
+import { CASCADE_VERSION, GLOBAL_CONFIG_DIR, GLOBAL_RUNTIME_DB_FILE } from '../../constants.js';
 import { statePath, STATE } from '../../config/project-state.js';
 import { writeProjectConfig } from '../../config/write-config.js';
 import { Cascade, type DecisionLogEntry } from '../../core/cascade.js';
+import { Checkpoints, type Checkpoint } from '../../core/checkpoints.js';
+import { SettingsPanel } from './components/SettingsPanel.js';
+import { CascadeView, stepSelection } from './cascade-view/CascadeView.js';
+import { ActivityLog } from './cascade-view/activity.js';
+import { SECTIONS, changedText, findSetting, parseValue, redactSecrets, tryChange, type SectionId, type SettingItem } from '../settings/spec.js';
+import { accountLine, pullSettings, pushSettings, signIn, signOut } from '../commands/cloud.js';
+import { ConfigManager } from '../../config/index.js';
+import { describeCheckpoints, describeUndo } from './checkpoint-text.js';
 import { MemoryStore } from '../../memory/store.js';
 import { CloudClient } from '../../cloud/client.js';
 import { cloudTurnAccounting, settledRunReport, type CloudRunReport } from '../../cloud/run-report.js';
@@ -44,7 +53,7 @@ import { SlashCommandRegistry } from '../slash/index.js';
 import { computeAdaptiveLayoutMode, computeLiveAreaBudget, computeTranscriptRows, flattenTranscript, windowTranscript } from './layout.js';
 import { disableMouseReporting } from '../utils/terminal-input.js';
 import { writeClipboardSync } from '../utils/clipboard.js';
-import { AgentTree, type TierNode } from './components/AgentTree.js';
+import type { TierNode } from './components/AgentTree.js';
 import { TimelinePanel } from './components/TimelinePanel.js';
 import { StatusBar } from './components/StatusBar.js';
 import { HintBar } from './components/HintBar.js';
@@ -53,7 +62,6 @@ import { ModelsDisplay, type ModelPickerSelection } from './components/ModelsDis
 import { CostTracker } from './components/CostTracker.js';
 import { CompactStatus } from './components/CompactStatus.js';
 import { ChatMessage } from './components/ChatMessage.js';
-import { PeerFeed } from './components/PeerFeed.js';
 import { PlanApproval, type PlanApprovalRequest } from './components/PlanApproval.js';
 
 // Keep only the most recent peer-comms events — a long run can produce
@@ -310,6 +318,42 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const [commandRunning, setCommandRunning] = useState(false);
   // AbortController for the in-progress run, so Ctrl+C / ESC can cancel the task.
   const runAbortRef = useRef<AbortController | null>(null);
+  // The project recorded before and after each run, for /undo.
+  const checkpointsRef = useRef<Checkpoints | null>(null);
+  checkpointsRef.current ??= new Checkpoints(workspacePath, statePath(workspacePath, STATE.checkpoints));
+  /** The last run's after-record, still being written: /undo and the next run wait for it. */
+  const checkpointEndRef = useRef<Promise<unknown>>(Promise.resolve());
+  const [lastCheckpoint, setLastCheckpoint] = useState<Checkpoint | null>(null);
+  /** /settings, open at a section or a search; null when closed. */
+  const [settingsView, setSettingsView] = useState<{ section?: SectionId; search?: string } | null>(null);
+  /** A setting changed during a run: the live Cascade takes it once the run ends. */
+  const pendingReconfigureRef = useRef(false);
+  const reconfiguringRef = useRef<Promise<unknown>>(Promise.resolve());
+  /**
+   * An /undo under way: it rewrites the project's files, so a run (and
+   * another /undo) waits for it to finish before it starts.
+   */
+  const undoingRef = useRef<Promise<unknown>>(Promise.resolve());
+  /**
+   * Hand the config to the live session. Kept in reconfiguringRef, which a
+   * run awaits before it starts: new provider settings clear the router's
+   * bindings, and a prompt sent right after /settings must find them made
+   * again. One at a time, in the order they were asked for.
+   */
+  const reconfigureNow = useCallback((): Promise<unknown> => {
+    const next = reconfiguringRef.current.then(() => cascadeRef.current?.reconfigure(config));
+    reconfiguringRef.current = next.catch(() => undefined);
+    return next;
+  }, [config]);
+  const slashCommandRef = useRef<((text: string) => Promise<void>) | null>(null);
+  // The live cascade view: what each node is doing, the node picked with ↑↓
+  // (null follows the busiest), a clock for the run's timers.
+  const activityRef = useRef(new ActivityLog());
+  const [activityVersion, setActivityVersion] = useState(0);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
+  const [runEndedAt, setRunEndedAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   // Ref mirror of cancelAttempted — read synchronously in the key handler so a
   // rapid double-press isn't dropped by a stale React state value.
   const cancelArmedRef = useRef(false);
@@ -361,6 +405,32 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   // turn, and the whole thing is best-effort: it never blocks or breaks a run,
   // and `CASCADE_NO_CLOUD_SYNC=1` opts out.
   const cloudMirrorRef = useRef<{ client: CloudClient; convId: string | null } | null>(null);
+  /**
+   * Sign in or out from inside the REPL, keeping the cloud mirror in step:
+   * it was set up only as the REPL started, so a /login after that synced
+   * nothing until a restart. A new sign-in mirrors from the next turn, into
+   * a new cloud chat.
+   */
+  /**
+   * Which sign-in the cloud mirror belongs to: moved on by every sign-in or
+   * sign-out. A run's uploads, queued until its report settles, go only if
+   * it is still the same, so a run never lands in an account signed in after it.
+   */
+  const authGenRef = useRef(0);
+  const signInHere = useCallback(async (show: (text: string) => void): Promise<string> => {
+    const out = await signIn(show);
+    if (out.startsWith('✓')) {
+      authGenRef.current += 1;
+      try { const cloud = CloudClient.fromSession(); cloudMirrorRef.current = cloud ? { client: cloud, convId: null } : null; } catch { /* stays local */ }
+    }
+    return out;
+  }, []);
+  const signOutHere = useCallback(async (): Promise<string> => {
+    const out = await signOut();
+    authGenRef.current += 1;
+    cloudMirrorRef.current = null;
+    return out;
+  }, []);
   const ensureCloudConversation = useCallback(async (mirror: { client: CloudClient; convId: string | null }, title: string): Promise<string> => {
     if (mirror.convId) return mirror.convId;
     const convo = await mirror.client.createConversation(title.slice(0, 72));
@@ -417,8 +487,12 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
    * the turns in the order they happened.
    */
   const cloudQueueRef = useRef<Promise<unknown>>(Promise.resolve());
-  const queueCloud = useCallback((send: () => Promise<unknown>) => {
-    cloudQueueRef.current = cloudQueueRef.current.then(send).catch(() => { /* best-effort mirror */ });
+  const queueCloud = useCallback((send: (sameAccount: () => boolean) => Promise<unknown>, authGen = authGenRef.current) => {
+    // Dropped if the account changed since the run began (authGen): its
+    // prompt and answer belong to the account it ran under. `send` checks
+    // again after each wait (its report), right before it uploads.
+    const sameAccount = () => authGenRef.current === authGen;
+    cloudQueueRef.current = cloudQueueRef.current.then(() => (sameAccount() ? send(sameAccount) : undefined)).catch(() => { /* best-effort mirror */ });
   }, []);
 
   /**
@@ -487,6 +561,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     const existing = treeNodesRef.current.get(event.tierId);
     const node: FlatTreeNode = { id: event.tierId, role: event.role ?? existing?.role ?? 'T3', label: event.label ?? existing?.label ?? event.tierId, status: event.status ?? existing?.status ?? 'IDLE', currentAction: event.currentAction ?? existing?.currentAction, progressPct: event.progressPct ?? existing?.progressPct, parentId: event.parentId ?? existing?.parentId, nodeId: event.nodeId ?? existing?.nodeId, dependsOn: event.dependsOn ?? existing?.dependsOn, waveId: event.waveId ?? existing?.waveId, blockedBy: event.blockedBy ?? existing?.blockedBy, children: [] };
     treeNodesRef.current.set(event.tierId, node);
+    if (event.status) activityRef.current.status(event.tierId, event.status);
     const store = storeRef.current;
     if (store) {
       const runtimeNode: RuntimeNode = { tierId: node.id, sessionId: sessionIdRef.current, parentId: node.parentId, role: node.role, label: node.label, status: node.status, currentAction: node.currentAction, progressPct: node.progressPct, updatedAt: new Date().toISOString(), workspacePath, isGlobal: false, output: event.output };
@@ -495,6 +570,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     }
     const history = nodeLogsRef.current.get(node.id) ?? [];
     nodeLogsRef.current.set(node.id, [...history.slice(-24), [node.status, node.currentAction].filter(Boolean).join(' — ')]);
+    // For the exit record: what was going on, should the process stop.
+    noteActivity(`"${(lastUserPrompt.current ?? '').slice(0, 120)}" — last step: ${node.role} ${node.label}${node.currentAction ? `: ${node.currentAction}` : ''}`);
     rebuildTree();
   }, [rebuildTree, workspacePath]);
 
@@ -552,6 +629,12 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         message: { id: randomUUID(), role: 'system', content: `⚠ ${startupNotice}`, timestamp: new Date().toISOString() },
       });
     }
+    // A signal ignored, a background error survived: said, not swallowed.
+    const onGuardNotice = (text: string) => dispatch({
+      type: 'ADD_MESSAGE',
+      message: { id: randomUUID(), role: 'system', content: `⚠ ${text}`, timestamp: new Date().toISOString() },
+    });
+    guardEvents.on('notice', onGuardNotice);
     store.createSession({ id: sessionIdRef.current, title: 'Cascade Session', createdAt: startedAtRef.current, updatedAt: startedAtRef.current, identityId: config.defaultIdentityId ?? 'default', workspacePath, messages: [], metadata: { totalTokens: 0, totalCostUsd: 0, modelsUsed: [], toolsUsed: [], taskCount: 0 } });
     persistRuntimeSession('ACTIVE');
     // Signed in? Prepare to mirror finished turns into a shared cloud session
@@ -564,6 +647,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     cascadeRef.current.init().catch(err => setStartupWarning(`Init failed: ${err.message}`));
     validateConfiguredModels(config).then(setStartupWarning);
     return () => {
+      guardEvents.off('notice', onGuardNotice);
       persistRuntimeSession('COMPLETED');
       // Close any MCP servers / telemetry the Cascade orchestrator opened so
       // we don't leak child processes when the REPL exits.
@@ -583,6 +667,13 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     }
   }, [slashCompletions.length, slashIndex]);
 
+  // The run's timers tick once a second while it works, and stand still after.
+  useEffect(() => {
+    if (!state.isExecuting) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [state.isExecuting]);
+
   // New messages snap the alt-screen transcript back to the newest line.
   useEffect(() => {
     setHistoryOffset(0);
@@ -593,6 +684,56 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   // repaint while the user is away wipes any in-progress mouse selection —
   // when nothing is executing and nobody is typing, the screen must stay
   // perfectly still so native drag-select + right-click copy work.
+
+  /** Change one setting: in the config, on disk, and in the live session. */
+  const applySetting = useCallback(async (item: SettingItem, value: unknown): Promise<string> => {
+    // Checked on a copy first: a value the schema refuses is reported, and
+    // neither the live config nor the file is touched.
+    const checked = tryChange(config, item, value);
+    if (!checked.ok) return `Couldn't save it. ${checked.error}`;
+    // The keys as they were: one another Cascade saved meanwhile is kept.
+    const base = config.providers.map((p) => ({ ...p }));
+    item.set?.(config, value);
+    const written = writeProjectConfig(workspacePath, config as never, undefined, base);
+    if (!written.ok) return `Couldn't save ${item.label}: ${written.error}`;
+    if (item.id === 'theme') setTheme(getTheme(String(value)));
+    const running = runAbortRef.current !== null;
+    if (item.applies !== 'restart') {
+      if (running) pendingReconfigureRef.current = true;
+      else await reconfigureNow().catch((err: unknown) => setStartupWarning(`Settings: ${err instanceof Error ? err.message : String(err)}`));
+    }
+    return `${changedText(item, config)}${running && item.applies !== 'restart' ? ' Applies from the next run.' : ''}`;
+  }, [config, workspacePath, reconfigureNow]);
+
+  /** Read the config again from disk (after /sync pull) and hand it to the live session. */
+  const reloadConfig = useCallback(async () => {
+    const cm = new ConfigManager(workspacePath);
+    await cm.load();
+    Object.assign(config, cm.getConfig());
+    if (runAbortRef.current) pendingReconfigureRef.current = true;
+    else await reconfigureNow();
+  }, [config, workspacePath, reconfigureNow]);
+
+  const runSettingAction = useCallback(async (item: SettingItem, passphrase: string | undefined, progress: (text: string) => void): Promise<string> => {
+    switch (item.action) {
+      case 'models': setSettingsView(null); setIsShowingModels(true); return 'Opening the model picker.';
+      case 'login': {
+        const who = await accountLine();
+        if (who && !who.startsWith('signed in, but')) return `Already signed in: ${who}. Sign out first to switch accounts.`;
+        return signInHere(progress);
+      }
+      case 'logout': return signOutHere();
+      case 'sync-push': return pushSettings(workspacePath, passphrase ?? '');
+      case 'sync-pull': {
+        const out = await pullSettings(workspacePath, passphrase ?? '');
+        if (out.startsWith('✓')) await reloadConfig().catch(() => undefined);
+        return out;
+      }
+      case 'mcp': setSettingsView(null); void slashCommandRef.current?.('/mcp'); return 'Listing your MCP servers.';
+      case 'checkpoints': { await checkpointEndRef.current; setSettingsView(null); void slashCommandRef.current?.('/checkpoints'); return 'Listing checkpoints.'; }
+      default: return 'Nothing to do.';
+    }
+  }, [workspacePath, reloadConfig]);
 
   const handleSlashCommand = useCallback(async (trimmed: string) => {
     const result = await slashRef.current.handle(trimmed, {
@@ -606,7 +747,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         persistMessage('assistant', safeText, timestamp);
       },
       onClear: () => dispatch({ type: 'CLEAR' }),
-      onExit: () => exit(),
+      onExit: () => { markQuitByUser(); exit(); },
       onThemeChange: (name) => setTheme(getTheme(name)),
       onExport: async (fmt) => {
         const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -627,6 +768,56 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
           try { await fs.writeFile(filePath, content, 'utf-8'); } catch (err) { console.error(`Restore failed: ${filePath}`, err); }
         }
         return `Restored ${snapshots.length} files to their initial session state.`;
+      },
+      onUndo: async (args: string[]) => {
+        if (runAbortRef.current) return 'A run is in progress. Stop it first (Esc or Ctrl+C), then /undo.';
+        const n = Math.max(1, Number.parseInt(args.find((a) => /^\d+$/.test(a)) ?? '1', 10));
+        const undoing = undoingRef.current.then(async () => {
+          await checkpointEndRef.current;
+          return describeUndo(await checkpointsRef.current!.undo(n, args.includes('--force')));
+        });
+        undoingRef.current = undoing.catch(() => undefined);
+        try {
+          return await undoing;
+        } catch (err) {
+          return `Couldn't undo: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      },
+      onSettings: async (args: string[]) => {
+        if (!args.length) { setSettingsView({}); return 'Opening settings. ←→ moves between sections, Esc closes.'; }
+        const [name, ...rest] = args;
+        const section = SECTIONS.find((sec) => sec.id === name!.toLowerCase() || sec.title.toLowerCase().startsWith(name!.toLowerCase()));
+        if (section && !rest.length) { setSettingsView({ section: section.id }); return `Opening settings: ${section.title}.`; }
+        const item = findSetting(name!);
+        if (!item) { setSettingsView({ search: args.join(' ') }); return `No setting is called "${name}"; showing what matches.`; }
+        if (!rest.length || item.kind === 'action' || item.kind === 'secret') {
+          // A key is typed in the panel, never on the command line, where it would stay in the history.
+          setSettingsView({ search: item.label });
+          return item.kind === 'secret' && rest.length ? 'Keys are entered in the panel, so they stay out of your input history. Press Enter on it there.' : `Opening settings at ${item.label}.`;
+        }
+        const parsed = parseValue(item, rest.join(' '));
+        if (!parsed.ok) return parsed.error;
+        return applySetting(item, parsed.value);
+      },
+      onLogin: async () => {
+        const who = await accountLine();
+        if (who && !who.startsWith('signed in, but')) return `Already signed in: ${who}.`;
+        return signInHere((text) => {
+          const timestamp = new Date().toISOString();
+          dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'system', content: text, timestamp } });
+        });
+      },
+      onLogout: async () => signOutHere(),
+      onSync: async (args: string[]) => {
+        const sub = (args[0] ?? '').toLowerCase();
+        if (sub !== 'push' && sub !== 'pull') return 'Usage: /sync push (upload this machine\'s keys) or /sync pull (get them here). Both ask for your sync passphrase.';
+        // The passphrase is typed in the panel, masked, never into the input line.
+        setSettingsView({ search: sub === 'push' ? 'upload this machine' : 'get my keys' });
+        return 'Press Enter on it, then type your sync passphrase.';
+      },
+      onCheckpoints: async () => {
+        await checkpointEndRef.current;
+        return describeCheckpoints(checkpointsRef.current!.list());
       },
       onSteer: (args: string[]) => {
         const text = args.join(' ').trim();
@@ -737,11 +928,16 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
             return 'Invalid amount. Usage: /budget set 1.00';
           }
           router.setSessionBudget(amount);
+          // The REPL's copy too: a later /settings change hands Cascade the
+          // whole config, and a cap missing from it would be dropped.
+          config.budget = { ...config.budget, sessionBudgetUsd: amount };
           return `✔ Session budget set to $${amount.toFixed(2)}. Cascade will stop new tasks once this limit is reached.`;
         }
 
         if (args[0] === 'clear') {
           router.setSessionBudget(null);
+          const { sessionBudgetUsd: _cleared, ...rest } = config.budget ?? {};
+          config.budget = rest as typeof config.budget;
           return '✔ Session budget cap removed.';
         }
 
@@ -796,13 +992,17 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         const sub = (args[0] ?? '').toLowerCase();
         if (sub === 'on' || sub === 'enable') {
           cascade.setAutonomy('auto');
-          return '✔ Autonomous mode ON — plans auto-approve and non-dangerous tools run without prompts. Dangerous tools still ask, and budget caps still stop runaway cost.';
+          // The REPL's copy too: a later /settings change hands it to Cascade
+          // whole, and a stale mode in it would quietly undo this.
+          config.autonomy = 'auto';
+          return '✔ Auto mode on. Cascade works on its own, and asks only before something /undo can\'t take back: deleting files, sending anything off this computer (push, publish, deploy, email), rewriting git history, installs and system changes, writing outside the project, dropping database data, stopping processes, changing permissions, or a command it can\'t read. Every run is checkpointed: /undo takes it back. Budget caps still apply.';
         }
         if (sub === 'off' || sub === 'disable') {
           cascade.setAutonomy('manual');
-          return '✔ Autonomous mode OFF — plan and tool approvals will prompt as usual.';
+          config.autonomy = 'manual';
+          return '✔ Auto mode off. Cascade asks before each change, and before running its plan if you set that in /settings.';
         }
-        return `Autonomous mode: ${cascade.getAutonomy() === 'auto' ? 'ON' : 'OFF'}\nToggle with  /auto on  or  /auto off`;
+        return `Auto mode is ${cascade.getAutonomy() === 'auto' ? 'on' : 'off'}. /auto on or /auto off; /settings autonomy for the rest.`;
       },
       onPlan: async (args) => {
         const cascade = cascadeRef.current;
@@ -864,7 +1064,8 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'assistant', content: safeOutput, timestamp } });
       persistMessage('assistant', safeOutput, timestamp);
     }
-  }, [workspacePath, exit, state.messages, identities, currentIdentityId, persistMessage]);
+  }, [workspacePath, exit, state.messages, identities, currentIdentityId, persistMessage, applySetting]);
+  slashCommandRef.current = handleSlashCommand;
 
   const handleSubmit = useCallback(async (userInput: string) => {
     if (slashCompletions.length > 0) {
@@ -876,11 +1077,15 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       }
     }
     const trimmed = userInput.trim();
-    if (!trimmed) return;
+    if (!trimmed) {
+      // Enter on an empty line while a run works: stop following the picked node.
+      if (state.isExecuting) setSelectedNodeId(null);
+      return;
+    }
     if (state.isExecuting) {
       if (slashRef.current.isSlashCommand(trimmed)) {
         setInput('');
-        dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'user', content: trimmed, timestamp: new Date().toISOString() } });
+        dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'user', content: redactSecrets(trimmed), timestamp: new Date().toISOString() } });
         setCommandRunning(true);
         try { await handleSlashCommand(trimmed); } finally { setCommandRunning(false); }
         return;
@@ -898,7 +1103,11 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     if (slashRef.current.isSlashCommand(trimmed)) {
       // Echo the command immediately so there's a visual cue it was sent, and
       // show a running indicator while async commands (e.g. /plan) do their work.
-      dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'user', content: trimmed, timestamp: new Date().toISOString() } });
+      // A key typed into it is masked: the chat is sent to the model later.
+      dispatch({ type: 'ADD_MESSAGE', message: { id: randomUUID(), role: 'user', content: redactSecrets(trimmed), timestamp: new Date().toISOString() } });
+      // Cleared first: a command that opens a panel (/settings, /model) takes
+      // the keyboard, and the line would stay behind it with its suggestions open.
+      setInput('');
       setCommandRunning(true);
       try { await handleSlashCommand(trimmed); } finally { setCommandRunning(false); }
       return;
@@ -921,6 +1130,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       return;
     }
     treeNodesRef.current.clear(); rebuildTree(); setTreeScrollOffset(0);
+    activityRef.current.clear();
+    setSelectedNodeId(null);
+    setRunStartedAt(Date.now());
+    setRunEndedAt(null);
     dispatch({ type: 'CLEAR_PEER_EVENTS' });
     const onRoot = ({ role }: RootTierEvent) => {
       const tierId = role === 'T1' ? 'T1' : `${role.toLowerCase()}-root` as 't2-root' | 't3-root';
@@ -957,6 +1170,14 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier, costByFeature: stats.costByFeature, savedUsd: savings.savedUsd, savedPct: savings.savedPct });
       statusThrottleTimeout = null;
     };
+    // What each node does, for the cascade view: redrawn at most every 100 ms.
+    let activityTimer: NodeJS.Timeout | null = null;
+    const activityChanged = () => {
+      if (!activityTimer) activityTimer = setTimeout(() => { activityTimer = null; setActivityVersion((v) => v + 1); }, 100);
+    };
+    cascade.on('tool:call', (ev: { id: string; tierId: string; toolName: string; input?: Record<string, unknown> }) => { activityRef.current.toolCall(ev); activityChanged(); });
+    cascade.on('tool:result', (ev: { id: string; tierId: string; toolName: string; output?: string; error?: string }) => { activityRef.current.toolResult(ev); activityChanged(); });
+    cascade.on('tier:thinking', (ev: { tierId: string; call?: number; text?: string; done?: boolean }) => { activityRef.current.think(ev); activityChanged(); });
     cascade.on('tier:root', onRoot);
     cascade.on('stream:token', onStream);
     cascade.on('tier:status', (ev: TierStatusEvent) => {
@@ -1076,11 +1297,24 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       }, after);
       return () => report;
     };
+    let checkpoint: Checkpoint | null = null;
+    const authGen = authGenRef.current;
     try {
       runAbortRef.current = new AbortController();
+      // Record the project first, so this run can be undone; a run that
+      // can't be checkpointed goes ahead, and auto mode then asks about
+      // every change, as before.
+      await checkpointEndRef.current;
+      await reconfiguringRef.current;
+      await undoingRef.current;
+      checkpoint = await checkpointsRef.current!.begin(trimmed).catch(() => null);
+      setLastCheckpoint(checkpoint);
       const result = await cascade.run({
         prompt: trimmed,
         workspacePath,
+        undoable: checkpoint !== null,
+        // …and whether a file a call names is one the checkpoint records.
+        ...(checkpoint ? { checkpointed: (paths: string[]) => checkpointsRef.current!.covers(paths) } : {}),
         signal: runAbortRef.current.signal,
         identityId: currentIdentityId,
         conversationHistory: toConversationHistory(state.messages),
@@ -1122,13 +1356,13 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       const reportFor = runReportLater(result.durationMs, titled);
       // When it finished: a send queued behind a slow one still counts on this day.
       const endedAt = Date.now();
-      queueCloud(async () => {
+      queueCloud(async (sameAccount) => {
         const report = await reportFor();
-        if (!report) return;
+        if (!report || !sameAccount()) return;
         // A stopped run returns what it had written so far: kept, as a stop.
         if (output) return mirrorTurnToCloud(trimmed, { content: output, ...cloudTurnAccounting(report) }, stopped ? 'stopped' : 'answered', endedAt);
         return recordRunSpendInCloud(stopped ? 'stopped' : 'answered', report, endedAt);
-      });
+      }, authGen);
       // One-line run receipt — the delegation economics in scrollback.
       const receipt = formatRunReceipt(result, stats.totalCostUsd, savings);
       if (receipt) {
@@ -1142,15 +1376,17 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       const outcome = runAbortRef.current?.signal.aborted ? 'stopped' : 'failed';
       const reportFor = runReportLater(0);
       const endedAt = Date.now();
-      queueCloud(async () => {
+      queueCloud(async (sameAccount) => {
         const report = await reportFor();
-        if (report) await recordRunSpendInCloud(outcome, report, endedAt);
-      });
+        if (report && sameAccount()) await recordRunSpendInCloud(outcome, report, endedAt);
+      }, authGen);
     }
     finally {
       if (streamThrottleTimeout) { clearTimeout(streamThrottleTimeout); streamThrottleTimeout = null; }
       if (statusThrottleTimeout) { clearTimeout(statusThrottleTimeout); statusThrottleTimeout = null; }
       if (peerThrottleTimeout) { clearTimeout(peerThrottleTimeout); peerThrottleTimeout = null; }
+      setActivityVersion((v) => v + 1);
+      setRunEndedAt(Date.now());
       decisionLogRef.current = cascade.getDecisionLog();
       cascade.removeAllListeners();
       setPlanApprovalRequest(null);
@@ -1165,7 +1401,18 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
           }
         });
       }
+      if (checkpoint) {
+        const begun = checkpoint;
+        checkpointEndRef.current = checkpointsRef.current!.end(begun).then(setLastCheckpoint, () => undefined);
+      }
       runAbortRef.current = null;
+      if (pendingReconfigureRef.current) {
+        pendingReconfigureRef.current = false;
+        // Kept, and awaited before the next run starts: new provider settings
+        // clear the router's bindings, and a run begun before they are made
+        // again would find none.
+        void reconfigureNow().catch(() => undefined);
+      }
       cancelArmedRef.current = false;
       setCancelAttempted(false);
       setCancelling(false);
@@ -1179,9 +1426,9 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     // Tab, number keys, Esc) to the picker's own useInput so navigation
     // isn't hijacked — this is the root-cause fix for the "only ↑ worked
     // in the model selector" regression.
-    if (isShowingModels) {
+    if (isShowingModels || settingsView) {
       if (key.ctrl && _input === 'c') {
-        if (quitAttempted) { exit(); return; }
+        if (quitAttempted) { markQuitByUser(); exit(); return; }
         setQuitAttempted(true);
       }
       return;
@@ -1202,6 +1449,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       }
       // Idle → quit Cascade (double-press confirm).
       if (quitAttempted) {
+        markQuitByUser();
         exit();
         return;
       }
@@ -1236,6 +1484,11 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       setHistoryOffset((prev) => Math.min(Math.max(0, key.pageUp ? prev + step : prev - step), maxOffset));
       return;
     }
+    if (state.isExecuting && !input && state.agentTree && (key.upArrow || key.downArrow)) {
+      setSelectedNodeId((cur) => stepSelection(state.agentTree!, cur, activityRef.current, key.upArrow ? -1 : 1));
+      return;
+    }
+    if (state.isExecuting && !input && key.tab) { dispatch({ type: 'TOGGLE_COMMS' }); return; }
     if (key.upArrow && !input.includes('\n')) {
       if (slashCompletions.length > 0) { setSlashIndex(p => (p <= 0 ? slashCompletions.length - 1 : p - 1)); return; }
       const nextIndex = historyIndex === null ? 0 : Math.min(historyIndex + 1, inputHistory.length - 1);
@@ -1385,6 +1638,9 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         workspacePath={workspacePath}
         isExecuting={state.isExecuting}
         activeTier={state.agentTree?.status === 'ACTIVE' ? 'T1' : undefined}
+        autonomy={cascadeRef.current?.getAutonomy() ?? (config.autonomy === 'auto' ? 'auto' : 'manual')}
+        checkpoint={lastCheckpoint?.n ?? null}
+        {...(runStartedAt !== null ? { elapsedMs: (runEndedAt ?? now) - runStartedAt } : {})}
       />
 
       {startupWarning && (
@@ -1412,6 +1668,19 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         </Box>
       )}
 
+      {settingsView && (
+        <SettingsPanel
+          config={config}
+          theme={theme}
+          {...(settingsView.section ? { initialSection: settingsView.section } : {})}
+          {...(settingsView.search !== undefined ? { initialSearch: settingsView.search } : {})}
+          onChange={applySetting}
+          onAction={runSettingAction}
+          onClose={() => setSettingsView(null)}
+          active={!state.approvalRequest && !planApprovalRequest}
+        />
+      )}
+
       {isShowingModels && (
         <Box paddingX={1}>
           <ModelsDisplay
@@ -1434,17 +1703,20 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
           isStreaming={state.isStreaming}
         />
       ) : (
-        <AgentTree
+        // The cascade: the tree, and beside it (under it when narrow) what
+        // the picked or busiest node is doing. Comms show in its panel.
+        <CascadeView
           root={state.agentTree}
+          activity={activityRef.current}
+          version={activityVersion}
+          selectedId={selectedNodeId}
+          width={width}
+          maxRows={Math.max(6, liveBudget.treeMaxRows + (state.showComms ? liveBudget.commsMaxEvents : 0))}
           theme={theme}
-          scrollOffset={treeScrollOffset}
-          maxRows={adaptiveMode === 'medium' ? Math.min(4, liveBudget.treeMaxRows) : liveBudget.treeMaxRows}
+          peerEvents={state.peerEvents}
+          showComms={state.showComms}
+          now={runEndedAt ?? now}
         />
-      )}
-
-      {/* Agent-to-agent comms feed — the radio chatter between workers */}
-      {adaptiveMode === 'wide' && state.showComms && liveBudget.commsMaxEvents > 0 && (
-        <PeerFeed events={state.peerEvents} theme={theme} maxRows={liveBudget.commsMaxEvents} />
       )}
 
       {adaptiveMode === 'wide' && state.showDetails && liveBudget.showTimeline && (
@@ -1513,7 +1785,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         </Box>
       )}
       {/* ── Hint bar — keyboard shortcuts, hidden during execution ── */}
-      <HintBar theme={theme} isExecuting={state.isExecuting} />
+      <HintBar theme={theme} isExecuting={state.isExecuting} picked={selectedNodeId !== null} comms={state.showComms} />
 
       <Box borderStyle="round" borderColor={(quitAttempted || cancelAttempted || cancelling) ? 'red' : (state.isStreaming ? theme.colors.accent : theme.colors.border)} paddingX={2} flexDirection="column">
         {cancelling ? (
@@ -1536,7 +1808,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         <Box flexDirection="row">
           <Text color={theme.colors.primary} bold>› {queuedMessages.length > 0 ? <Text color={theme.colors.accent}>[QUEUED] </Text> : ''}</Text>
           <SafeTextInput
-            focus={!state.approvalRequest && !planApprovalRequest && !isShowingModels}
+            focus={!state.approvalRequest && !planApprovalRequest && !isShowingModels && !settingsView}
             value={input}
             manageMouseReporting={false}
             onChange={(val) => {
@@ -1734,6 +2006,20 @@ async function diagnoseRuntime(config: CascadeConfig, workspacePath: string): Pr
 }
 
 async function showRecentLogs(args: string[], workspacePath: string): Promise<string> {
+  if (args[0] === 'exit') {
+    // How the session before this one ended (see exit-guard.ts).
+    // The running session's guard read the last ending before writing its own;
+    // a fresh read of the file would find this session's "still running" record.
+    const record = currentGuard()?.previous() ?? new ExitGuard(statePath(workspacePath, STATE.exitLog), CASCADE_VERSION).previous();
+    if (!record) return 'No record of how an earlier session ended.';
+    return [
+      `Last session ended ${record.at} after ${record.uptimeSec}s (Cascade ${record.version}, pid ${record.pid}): ${record.clean ? 'you quit it.' : 'unexpectedly.'}`,
+      `Why: ${record.reason}`,
+      ...(record.running ? [`Working on: ${record.running}`] : []),
+      ...(record.error ? [`Error:\n${record.error}`] : []),
+      ...(record.survived?.length ? [`Errors it carried on past:\n${record.survived.join('\n')}`] : []),
+    ].join('\n');
+  }
   const limit = Number.parseInt(args[0] ?? '10', 10) || 10;
   const store = new MemoryStore(statePath(workspacePath, STATE.memoryDb));
   try {

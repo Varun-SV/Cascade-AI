@@ -459,6 +459,10 @@ export const STATE = {
   tmp: 'tmp',
   screenshots: 'screenshots',
   private: 'private',
+  /** Why the last CLI session ended, written as it ends (see cli/exit-guard.ts). */
+  exitLog: 'last-exit.json',
+  /** Per-run checkpoints of the workspace's files, for /undo (see core/checkpoints.ts). */
+  checkpoints: 'checkpoints',
 } as const;
 
 /**

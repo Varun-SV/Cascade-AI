@@ -1145,6 +1145,42 @@ export interface ApprovalRequest {
    * read, so a host that shows it off this machine withholds it.
    */
   localOnly?: boolean;
+  /** How risky this one call is, where Cascade could tell: see Risk. */
+  risk?: Risk;
+  /** Whether the run has a checkpoint /undo could take this back with; false when it has none. */
+  undoable?: boolean;
+}
+
+/**
+ * How risky one tool call is (src/core/permissions/risk.ts):
+ *   safe         reads only.
+ *   recoverable  changes the project in a way the run's checkpoint can undo.
+ *   risky        something a checkpoint can't undo, or can't be told apart from one.
+ */
+export type RiskLevel = 'safe' | 'recoverable' | 'risky';
+export type RiskCategory =
+  | 'delete'
+  | 'leaves-machine'
+  | 'git-history'
+  | 'install-system'
+  | 'outside-project'
+  | 'database'
+  | 'processes'
+  | 'permissions'
+  | 'unrecorded'
+  | 'unclassified';
+export interface Risk {
+  level: RiskLevel;
+  /** For a risky call: which kind of risk. */
+  category?: RiskCategory;
+  /** In plain words, why. */
+  reason: string;
+  /**
+   * For an undoable call: the files it names as what it writes, absolute.
+   * Undoable only if the run's checkpoint records them; one the project's
+   * .gitignore leaves out is not (see CascadeRunOptions.checkpointed).
+   */
+  writes?: string[];
 }
 
 export interface ApprovalResponse {
@@ -1172,6 +1208,10 @@ export interface PermissionRequest {
   input: Record<string, unknown>;
   /** Whether the tool is flagged as dangerous */
   isDangerous: boolean;
+  /** How risky this one call is (src/core/permissions/risk.ts). */
+  risk?: Risk;
+  /** Whether the run has a checkpoint /undo could take this back with. */
+  undoable?: boolean;
   /** What the T3 subtask is trying to accomplish */
   subtaskContext: string;
   /** What the parent T2 section's goal is */
@@ -1280,6 +1320,21 @@ export interface CascadeRunOptions {
   conversationHistory?: ConversationMessage[];
   streamCallback?: (chunk: StreamChunk) => void;
   approvalCallback?: (request: ApprovalRequest) => Promise<boolean | { approved: boolean; always: boolean }>;
+  /**
+   * The host checkpoints the project around this run, so a change to it can
+   * be undone. In auto mode (`autonomy: 'auto'`) a call that only makes such
+   * a change then goes ahead without asking; only a risky one asks (see
+   * Risk), and a person's "allow for this run" covers that kind of risk, not
+   * the whole tool.
+   */
+  undoable?: boolean;
+  /**
+   * With `undoable`: whether the run's checkpoint records every one of these
+   * files (absolute paths). A write to one it doesn't (the project's
+   * .gitignore leaves it out) is asked about in auto mode, like any other
+   * change /undo couldn't put back.
+   */
+  checkpointed?: (paths: string[]) => Promise<boolean>;
   /**
    * An optional `AbortSignal` to cancel the run mid-execution.
    * When aborted, all tiers (T1 → T2 → T3) stop at the next safe checkpoint

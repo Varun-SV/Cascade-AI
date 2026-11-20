@@ -683,6 +683,11 @@ export class CascadeRouter extends EventEmitter {
   }
 
   async init(config: CascadeConfig): Promise<void> {
+    // Bindings are made from the provider settings (key, endpoint, deployment)
+    // and kept per model. Taking new settings (Cascade.reconfigure: a key
+    // changed in /settings) drops them, so the next call binds with the new
+    // credentials instead of billing, or failing on, the old ones.
+    if (this.config && JSON.stringify(this.config.providers) !== JSON.stringify(config.providers)) this.providers.clear();
     this.config = config;
 
     const availableProviders = await this.detectAvailableProviders(config.providers);
@@ -801,7 +806,16 @@ export class CascadeRouter extends EventEmitter {
 
     // Fill any tiers without explicit overrides.
     for (const tier of ['T1', 'T2', 'T3'] as TierRole[]) {
-      if (this.tierModels.has(tier)) continue;
+      // A tier already chosen keeps its model, bound again with the current
+      // provider settings: new settings drop the bindings (above), and a tier
+      // left unbound failed every call with "No provider for model". One
+      // whose provider is gone altogether is chosen afresh.
+      const kept = this.tierModels.get(tier);
+      if (kept && config.providers.some((p) => p.type === kept.provider)) {
+        this.ensureProvider(kept, config.providers);
+        continue;
+      }
+      this.tierModels.delete(tier);
       // 1. A benchmarked model from the tier's priority chain wins when present.
       // 2. Otherwise, the rank-appropriate Azure deployment for this tier.
       // 3. Otherwise, the generic "any available model" fallback.
@@ -1845,6 +1859,15 @@ export class CascadeRouter extends EventEmitter {
   }
 
   /** Project-knowledge settings (config.knowledge). Facts extraction on by default. */
+  /**
+   * Take settings that need no re-detection of providers (Cascade.reconfigure
+   * for, say, knowledge.factsExtraction): read from here on each call, not
+   * bound at init.
+   */
+  adoptConfig(config: CascadeConfig): void {
+    this.config = config;
+  }
+
   getKnowledgeConfig(): { factsExtraction: boolean } {
     return { factsExtraction: this.config?.knowledge?.factsExtraction !== false };
   }
@@ -1921,8 +1944,10 @@ export class CascadeRouter extends EventEmitter {
     this.pendingFeedbackSource = source;
   }
 
-  setTaskAnalyzer(analyzer: TaskAnalyzer): void {
+  /** The analyzer Auto routes subtasks with; undefined turns per-subtask routing off. */
+  setTaskAnalyzer(analyzer: TaskAnalyzer | undefined): void {
     this.taskAnalyzer = analyzer;
+    if (!analyzer) return;
     // Ordering between setFeedbackSource and setTaskAnalyzer is not guaranteed
     // by callers, so a source supplied first is applied on arrival.
     if (this.pendingFeedbackSource) analyzer.setFeedbackSource(this.pendingFeedbackSource);

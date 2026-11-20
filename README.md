@@ -635,12 +635,13 @@ Type any of these inside the REPL:
 | `/compact` | Summarize and compress context now |
 | `/export [markdown\|json]` · `/copy [n]` | Export the session; copy the last (or nth-last) response |
 | `/retry` | Retry the last prompt |
-| `/rollback` | Undo all file changes made in this session |
+| `/undo [n] [--force]` · `/checkpoints` | Take back the last run (or the last n): files put back, files it made removed. Each run is checkpointed before and after |
+| `/rollback` | Undo every file the file tools changed in this session |
 | **Running work** | |
 | `/plan <prompt>` | Preview the plan without running it |
 | `/replan [guidance]` | One corrective re-plan pass on the last task |
 | `/steer <correction>` | Steer the workers of a running task |
-| `/auto [on\|off\|status]` | Autonomous mode: safe tools run silently, dangerous ones still ask |
+| `/auto [on\|off\|status]` | Auto mode: Cascade works on its own and asks only before what `/undo` can't take back (deleting, pushing or publishing, rewriting git history, installs, writing outside the project, dropping data, stopping processes, permissions, unreadable commands) |
 | `/continue [tokens]` | Resume the last task that hit its token budget, with a raised one (a `/budget` session cap must be raised or cleared first) |
 | `/budget [set <$> \| clear]` | Session budget cap |
 | **Seeing inside** | |
@@ -651,6 +652,8 @@ Type any of these inside the REPL:
 | `/logs` · `/diagnose` | Recent runtime logs; a summary of configured providers, models and sessions (it does not test keys or connections) |
 | `/audit` | Check the audit log's hash chain |
 | **Models and setup** | |
+| `/settings [section \| name value]` | Every setting in one panel: models and keys, account and sync, autonomy, context, budget, tools, privacy, theme. `/settings mode auto` sets one directly |
+| `/login` · `/logout` · `/sync push\|pull` | Cascade Cloud account, and your keys synced between machines (encrypted with your passphrase) |
 | `/model` | Pick a provider and model for a tier (or Auto) |
 | `/model-info` · `/models` · `/providers` | Active models per tier; available models; configured providers |
 | `/rate good\|bad` | Rate the last task, to improve Auto-routing |

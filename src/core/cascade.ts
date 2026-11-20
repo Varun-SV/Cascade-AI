@@ -14,6 +14,7 @@ import type { EscalationContext,
   ConversationMessage,
   ImageAttachment,
   PermissionRequest,
+  Risk,
   StreamChunk,
   TaskComplexity,
   TierRole,
@@ -60,6 +61,7 @@ import { AuditLogger } from '../audit/log.js';
 import { AuditLogger as EncryptedAuditLogger } from './audit/audit-logger.js';
 import { MemoryStore } from '../memory/store.js';
 import { PermissionEscalator } from './permissions/escalator.js';
+import { RISK_LABELS } from './permissions/risk.js';
 import { validateConfig } from '../config/validate.js';
 import { Telemetry, noopTelemetry } from '../telemetry/index.js';
 import { TaskAnalyzer } from './router/task-analyzer.js';
@@ -1043,6 +1045,41 @@ export class Cascade extends EventEmitter {
     this.config = { ...this.config, autonomy: mode };
   }
 
+  /**
+   * Take new settings between runs (/settings). What is read as each run
+   * starts — autonomy, approvals, budget, memory, context — applies from the
+   * next run; a change to the providers, their keys or the tier models also
+   * has the router look again at what it can reach. The session's spend and
+   * stats are kept. Tools and MCP servers are set up once, as Cascade starts:
+   * a change to those applies from the next start. Not to be called during a run.
+   */
+  async reconfigure(next: CascadeConfig): Promise<void> {
+    const before = this.config;
+    this.config = validateConfig(next) as CascadeConfig;
+    const routerReads = (c: CascadeConfig) => JSON.stringify([c.providers, c.models, c.rateLimits, c.localConcurrency, c.autoBias, c.budget]);
+    if (this.initialized && routerReads(before) !== routerReads(this.config)) await this.router.init(this.config);
+    // Everything else the router reads per call (knowledge.factsExtraction…)
+    // it reads from its own copy, which has to be this one too.
+    else if (this.initialized) this.router.adoptConfig(this.config);
+    // Auto's analyzer holds its bias from when it was made: made again (or
+    // dropped) when Auto or its bias changes, so the next run routes by it.
+    if (before.cascadeAuto !== this.config.cascadeAuto || before.autoBias !== this.config.autoBias) this.refreshTaskAnalyzer();
+  }
+
+  private refreshTaskAnalyzer(): void {
+    if (this.config.cascadeAuto !== true) {
+      this.taskAnalyzer = undefined;
+      this.router.setTaskAnalyzer(undefined);
+      return;
+    }
+    if (!this.perfTracker) {
+      this.perfTracker = new ModelPerformanceTracker(this.config.routing?.perfStatsPath, { readOnly: this.config.routing?.learnFromOutcomes === false });
+      void this.perfTracker.load();
+    }
+    this.taskAnalyzer = new TaskAnalyzer(this.perfTracker, this.config.autoBias ?? 'balanced');
+    this.router.setTaskAnalyzer(this.taskAnalyzer);
+  }
+
   getAutonomy(): 'manual' | 'auto' {
     return this.config.autonomy === 'auto' ? 'auto' : 'manual';
   }
@@ -1205,10 +1242,20 @@ export class Cascade extends EventEmitter {
       // `browserVision`: the picture is for the report, not for the model.
       reportImages: { assets: this.imageAssets, sink: this.imageSink(this.workspacePath) },
     }));
-    // A capture is something to mark up: offer annotate_image if nothing else did.
-    if (!this.toolRegistry.hasTool('annotate_image') && !(this.config.tools?.disabledTools ?? []).includes('annotate_image')) {
-      const [annotate] = buildReportImageTools({ assets: this.imageAssets, sink: this.imageSink(this.workspacePath) }, { web: false, imageSource: true });
-      if (annotate) { annotate.setWorkspaceRoot(this.workspacePath); this.toolRegistry.register(annotate); }
+    // A capture is something to mark up: offer annotate_image if nothing else
+    // did. And a run that can browse the web can find real pictures on it:
+    // find_image fetches public pages and Commons from here, not through the
+    // person's browser. Without it, a browsing run asked for a picture was
+    // offered only generate_image, the paid and made-up one.
+    // Outside the enabledTools allowlist, like browser_control itself (a
+    // hosted run with web search off has an empty one); disabledTools, the
+    // person's own "not this tool", still applies.
+    const disabled = this.config.tools?.disabledTools ?? [];
+    const allowed = (name: string) => !this.toolRegistry.hasTool(name) && !disabled.includes(name);
+    for (const tool of buildReportImageTools({ assets: this.imageAssets, sink: this.imageSink(this.workspacePath) }, { web: true, imageSource: true })) {
+      if (!allowed(tool.name)) continue;
+      tool.setWorkspaceRoot(this.workspacePath);
+      this.toolRegistry.register(tool);
     }
   }
 
@@ -2201,7 +2248,8 @@ ${prompt}`
     options = await this.applyExtendedContext(options);
 
     // Create a fresh permission escalator for this task run
-    const escalator = new PermissionEscalator(this.config.approvalTimeoutMs ?? 600_000, this.config.autonomy === 'auto', this.config.approvalAdvice === true);
+    const escalator = new PermissionEscalator(this.config.approvalTimeoutMs ?? 600_000, this.config.autonomy === 'auto', this.config.approvalAdvice === true, options.undoable === true);
+    if (options.checkpointed) escalator.setCheckpointCoverage(options.checkpointed);
 
     // Wire escalator's user-required event → approvalCallback or direct event
     escalator.on('permission:user-required', async (req: PermissionRequest) => {
@@ -2993,6 +3041,11 @@ export function approvalRequestFor(req: PermissionRequest): ApprovalRequest & { 
         : `T3 Worker "${req.subtaskContext}" wants to run "${req.toolName}".`,
     isDangerous: req.isDangerous,
     ...(req.localOnly ? { localOnly: true } : {}),
+    // A local-only call's reason can quote its input ("stops processes: pkill
+    // -f 'private-name'"), which hosts withhold off this machine: its kind of
+    // risk goes, in words that come from no input.
+    ...(req.risk ? { risk: req.localOnly ? withoutInput(req.risk) : req.risk } : {}),
+    ...(req.undoable !== undefined ? { undoable: req.undoable } : {}),
     escalationContext: {
       requestedBy: req.requestedBy,
       parentT2Id: req.parentT2Id,
@@ -3000,6 +3053,15 @@ export function approvalRequestFor(req: PermissionRequest): ApprovalRequest & { 
       sectionContext: req.sectionContext,
       taskContext: req.taskContext,
     },
+  };
+}
+
+/** A risk said without anything taken from the call's input. */
+function withoutInput(risk: Risk): Risk {
+  return {
+    level: risk.level,
+    ...(risk.category ? { category: risk.category } : {}),
+    reason: risk.category ? RISK_LABELS[risk.category] : risk.level === 'safe' ? 'only reads' : 'changes files in the project (checkpointed)',
   };
 }
 

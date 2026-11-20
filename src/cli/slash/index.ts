@@ -20,6 +20,17 @@ export interface SlashCommandContext {
   onThemeChange: (theme: string) => void;
   onExport: (format: 'markdown' | 'json') => Promise<void>;
   onRollback: () => Promise<string | void>;
+  /** Puts back what the last run (or the last n) changed: /undo [n] [--force]. */
+  onUndo: (args: string[]) => Promise<string> | string;
+  /** /settings: the panel; /settings <section>; /settings <name> <value> sets one directly. */
+  onSettings: (args: string[]) => Promise<string> | string;
+  /** Sign in to Cascade Cloud, or out. */
+  onLogin: () => Promise<string> | string;
+  onLogout: () => Promise<string> | string;
+  /** /sync push | pull: your keys and settings, through your account. */
+  onSync: (args: string[]) => Promise<string> | string;
+  /** Lists the runs that can be undone. */
+  onCheckpoints: () => Promise<string> | string;
   /** Injects live steering guidance into the currently running task's workers. */
   onSteer: (args: string[]) => string | Promise<string>;
   onBranch: () => Promise<void>;
@@ -167,8 +178,47 @@ export class SlashCommandRegistry {
     });
 
     this.register({
+      command: '/settings',
+      description: 'All settings: models and keys, account and sync, autonomy, context, budget, tools, privacy, theme (/settings budget; /settings mode auto)',
+      args: ['[section | name [value]]'],
+      handler: async (args, ctx) => ({ output: await ctx.onSettings(args), handled: true }),
+    });
+
+    this.register({
+      command: '/login',
+      description: 'Sign in to Cascade Cloud (opens your browser)',
+      handler: async (_args, ctx) => ({ output: await ctx.onLogin(), handled: true }),
+    });
+
+    this.register({
+      command: '/logout',
+      description: 'Sign out of Cascade Cloud on this machine',
+      handler: async (_args, ctx) => ({ output: await ctx.onLogout(), handled: true }),
+    });
+
+    this.register({
+      command: '/sync',
+      description: 'Sync your keys and settings through your account: /sync push | pull',
+      args: ['push|pull'],
+      handler: async (args, ctx) => ({ output: await ctx.onSync(args), handled: true }),
+    });
+
+    this.register({
+      command: '/undo',
+      description: 'Undo the last run\'s changes to your files (/undo 3: the last three runs; --force: also files you changed since)',
+      args: ['[n]', '[--force]'],
+      handler: async (args, ctx) => ({ output: await ctx.onUndo(args), handled: true }),
+    });
+
+    this.register({
+      command: '/checkpoints',
+      description: 'List the runs /undo can take back, and what each changed',
+      handler: async (_args, ctx) => ({ output: await ctx.onCheckpoints(), handled: true }),
+    });
+
+    this.register({
       command: '/rollback',
-      description: 'Undo all file changes in this session',
+      description: 'Undo every file the file tools changed in this session (/undo also covers commands, run by run)',
       handler: async (_args, ctx) => {
         const out = await ctx.onRollback();
         return { output: out || 'File changes rolled back.', handled: true };
@@ -263,7 +313,7 @@ export class SlashCommandRegistry {
 
     this.register({
       command: '/logs',
-      description: 'Show recent runtime logs',
+      description: 'Show recent runtime logs (/logs exit: how the last session ended)',
       handler: async (args, ctx) => ({ output: await ctx.onLogs(args), handled: true }),
     });
 

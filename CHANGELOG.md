@@ -5,6 +5,80 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.91.0 - 2026-11-19
+
+### Added
+- **Auto mode asks only about what can't be undone.** Each call is now judged
+  on what it does, not which tool it uses. Reading (`ls`, `git status`, `cat`)
+  and changes a checkpoint can put back (editing files in the project,
+  running tests and builds, commits) go ahead. Auto mode stops to ask before:
+  - deleting files;
+  - sending anything off the computer (push, publish, deploy, POST, email);
+  - rewriting or discarding git history;
+  - installs and system changes (packages, sudo, PATH, services, scheduled tasks);
+  - writing outside the project;
+  - destroying database data (DROP, TRUNCATE, DELETE without WHERE, migration resets);
+  - stopping processes or containers;
+  - changing permissions or ownership;
+  - commands it can't read before they run (`eval`, `curl | sh`, encoded PowerShell);
+  - writing a file a checkpoint doesn't record (one your `.gitignore` leaves
+    out), or one whose name a script works out only as it runs.
+
+  Shell commands are read part by part, including inside `sh -c`, `cmd /c`,
+  `$(…)` and `npx`. "Allow for this run" now covers that kind of risk (say,
+  deleting), not the whole shell. The question says who asks, exactly what,
+  why, and whether `/undo` can take it back.
+- **Every run is checkpointed, and `/undo` takes it back.** The project is
+  recorded before and after each run, in a git repository of Cascade's own in
+  the project's state folder. Your own git is never touched. `/undo` puts back
+  the files the last run changed and removes the ones it made; `/undo 3` takes
+  back three runs. A file you changed by hand since is left alone unless you
+  add `--force`. `/checkpoints` lists the runs. Files your `.gitignore` leaves
+  out aren't recorded, and stay as they are, even if the run edits the
+  `.gitignore`. A run Cascade stopped before recording its end is undone only
+  with `--force`. The last 50 runs are kept; the space of older ones is
+  reclaimed. A run you start while `/undo` is still working waits for it.
+- **`/settings`: every setting in one panel.** Eight sections: models and
+  keys, account and sync, autonomy and approvals, context and memory, budget,
+  tools and browser, privacy, appearance. Arrows move, Enter changes, `/`
+  searches. Keys and the sync passphrase are typed masked and only ever shown
+  as `set ••••1234`. Shortcuts: `/settings budget` opens a section,
+  `/settings mode auto` sets a value. Changes apply from the next run without
+  a restart, except tool settings, which say so.
+- **`/login`, `/logout` and `/sync push|pull` inside the REPL**, with the
+  sign-in code and the passphrase handled there.
+- **A new live view of the cascade.** The run's tree is the main view, with
+  each node's state, its time, and how many of T1's sections are done. Beside
+  it on a wide terminal (under it on a narrow one) is what the picked or
+  busiest node is doing: its latest thought, each tool call as it happens,
+  lines written, and test results. Agent comms are in plain words. `↑↓` picks
+  a node during a run, Enter follows the busiest again, Tab shows comms. The
+  header shows the mode, the run's checkpoint, the tiers' models, spend and
+  run time.
+
+### Fixed
+- **Cascade no longer stops in the middle of a long run without a word.**
+  - Commands now run in a process group of their own. A command's Ctrl-C
+    event used to reach Cascade on Windows, and Cascade quit.
+  - A stray interrupt from another program is now ignored and noted on screen.
+  - A command that would stop Cascade itself (`taskkill /IM node.exe`) is
+    refused, with a way to stop the right program.
+  - A timed-out command now stops everything it started.
+  - Any other ending is written down: `/logs exit` says how the last session
+    ended, and the next start says so if it wasn't you.
+- Opening a panel from a command (`/settings`, `/model`) clears the input
+  line, instead of leaving it and its suggestions behind the panel.
+- **A requested picture that can't be made no longer costs the answer.** A
+  browsing run asked for "real images from the internet" could end with the
+  worker's own correction note ("call generate_image…") as its answer, and
+  the research gone. Now:
+  - A run that can browse also gets `find_image`, even with web search off.
+  - A screenshot taken with `browser_control`'s `capture` counts as a picture.
+  - Real pictures are tried before generated ones.
+  - A correction round that comes back empty keeps the answer it was meant
+    to improve.
+  - A missing picture is reported as a plain note under the answer.
+
 ## 0.90.0 - 2026-11-19
 
 ### Added
