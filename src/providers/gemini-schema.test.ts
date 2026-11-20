@@ -158,3 +158,30 @@ describe('gemini schema sanitisation', () => {
     walk(sanitizeGeminiSchema(nasty), '$');
   });
 });
+
+describe('an array always says what it holds (Gemini 400: "properties[paths].items: missing field")', () => {
+  it('an array with no items gets string items', () => {
+    const out = toGeminiParameters({ type: 'object', properties: { paths: { type: 'array', description: 'Files to read' } }, required: ['paths'] });
+    expect((out!['properties'] as Record<string, unknown>)['paths']).toEqual({ type: 'array', description: 'Files to read', items: { type: 'string' } });
+  });
+
+  it('items that clean to nothing ({} or a $ref) are replaced too', () => {
+    expect(sanitizeGeminiSchema({ type: 'array', items: {} })).toEqual({ type: 'array', items: { type: 'string' } });
+    expect(sanitizeGeminiSchema({ type: 'array', items: { $ref: '#/defs/Path' } })).toEqual({ type: 'array', items: { type: 'string' } });
+  });
+
+  it('a nullable array, and arrays nested in arrays and objects, all get items', () => {
+    expect(sanitizeGeminiSchema({ type: ['array', 'null'] })).toEqual({ type: 'array', nullable: true, items: { type: 'string' } });
+    expect(sanitizeGeminiSchema({ type: 'array', items: { type: 'array' } })).toEqual({ type: 'array', items: { type: 'array', items: { type: 'string' } } });
+    const deep = sanitizeGeminiSchema({ type: 'object', properties: { edits: { type: 'array', items: { type: 'object', properties: { lines: { type: 'array' } } } } } });
+    expect(JSON.stringify(deep)).toBe('{"type":"object","properties":{"edits":{"type":"array","items":{"type":"object","properties":{"lines":{"type":"array","items":{"type":"string"}}}}}}}');
+  });
+
+  it('a tuple form takes its first entry for every item', () => {
+    expect(sanitizeGeminiSchema({ type: 'array', items: [{ type: 'number' }, { type: 'string' }] })).toEqual({ type: 'array', items: { type: 'number' } });
+  });
+
+  it('control: an array that says what it holds is left as it is', () => {
+    expect(sanitizeGeminiSchema({ type: 'array', items: { type: 'integer' } })).toEqual({ type: 'array', items: { type: 'integer' } });
+  });
+});
