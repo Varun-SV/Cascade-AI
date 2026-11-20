@@ -38,6 +38,7 @@ import { restoreTerminal } from './terminal.js';
 import {
   ExitGuard, currentGuard, describe, guardEvents, previousEndingNotice, setCurrentGuard, signalExitCode, wasQuitByUser,
 } from './exit-guard.js';
+import { onCrashNote } from '../utils/crash-note.js';
 import { STATE, statePath } from '../config/project-state.js';
 
 dotenv.config();
@@ -482,6 +483,8 @@ async function startRepl(options: {
   guard.begin();
   setCurrentGuard(guard);
   guardReplErrors(guard);
+  // Native code about to run (a sandbox): named in the record, should it crash.
+  onCrashNote((doing) => guard.noteNative(doing));
 
   // Render ink REPL
   const { waitUntilExit } = render(

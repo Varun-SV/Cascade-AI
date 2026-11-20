@@ -74,4 +74,23 @@ describe('ExitGuard', () => {
     expect(signalExitCode('SIGTERM')).toBe(143);
     expect(signalExitCode('SIGHUP')).toBe(129);
   });
+
+  it('names the native code it was running when the process died there, and forgets it once that is over', () => {
+    const file = fresh();
+    const guard = new ExitGuard(file, '1.0.0');
+    guard.begin();
+    guard.noteNative('running the agent-written tool dynamic_x in the isolated-vm sandbox');
+    // Killed here, as a native crash leaves it.
+    const crashed = new ExitGuard(file, '1.0.0').previous();
+    expect(crashed).toMatchObject({ clean: false, running: expect.stringContaining('dynamic_x') });
+    expect(previousEndingNotice(crashed)).toMatch(/while running the agent-written tool dynamic_x.*Most likely that crashed/);
+    guard.noteNative(null);
+    const after = new ExitGuard(file, '1.0.0').previous();
+    expect(after?.running).toBeUndefined();
+    expect(after?.reason).toMatch(/stopped without warning: another program ended it/);
+    // A clean end is not overwritten by a late note.
+    guard.end({ clean: true, reason: 'quit' });
+    guard.noteNative('late');
+    expect(new ExitGuard(file, '1.0.0').previous()).toMatchObject({ clean: true, reason: 'quit' });
+  });
 });

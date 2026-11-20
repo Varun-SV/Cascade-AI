@@ -878,7 +878,7 @@ Cascade also has an encrypted keystore — the OS keychain (macOS Keychain, Wind
 - **Hash-chained audit log** — entries are encrypted and chained with SHA-256; `/audit` checks the chain. That catches an edited or removed entry in the middle, but not a removed tail, a chain recomputed by someone with write access, or a deleted database: the chain has no key and no anchor outside the log.
 - **Budget kill-switch** — a run stops at its token budget, and `/continue` resumes it with a raised one. A session spending cap set with `/budget set` stops runs too; `/continue` does not lift it, so raise it or `/budget clear` first.
 
-> Agent-written tools always run confined — in the `isolated-vm` isolate where the addon is installed, and otherwise in a WebAssembly sandbox (QuickJS) that every install has, the desktop app included. It runs on a thread of its own, capped in memory and terminated at its deadline, and its code reaches the machine only through `callTool` and `fetch`. There is no unconfined fallback: if the sandbox cannot start, the tool does not run.
+> Agent-written tools always run confined — in the `isolated-vm` isolate where the addon is installed, and otherwise in a WebAssembly sandbox (QuickJS) that every install has, the desktop app included. On Windows the default (`auto`) uses the WebAssembly sandbox: `isolated-vm` is a native addon, and a crash in it closes Cascade with no chance to save. Set the sandbox to `isolate` to use it there anyway. It runs on a thread of its own, capped in memory and terminated at its deadline, and its code reaches the machine only through `callTool` and `fetch`. There is no unconfined fallback: if the sandbox cannot start, the tool does not run.
 
 ### .cascadeignore
 

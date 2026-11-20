@@ -10,7 +10,8 @@ import path from 'node:path';
 
 import { ToolRegistry } from './registry.js';
 import { BaseTool } from './base.js';
-import { DYNAMIC_HOST_CALLS, ToolCreator, hostCallBudget, normalizeToolSchema, readCapped, sandboxModeOf, type GeneratedToolSpec } from './tool-creator.js';
+import { DYNAMIC_HOST_CALLS, ToolCreator, hostCallBudget, normalizeToolSchema, readCapped, sandboxModeOf, usesIsolate, type GeneratedToolSpec } from './tool-creator.js';
+import { onCrashNote } from '../utils/crash-note.js';
 import { runInWasmSandbox } from './sandbox/wasm-sandbox.js';
 import { generateDiff, diffSummary } from './diff.js';
 import { PermissionEscalator } from '../core/permissions/escalator.js';
@@ -264,6 +265,39 @@ describe('ToolCreator — the WebAssembly sandbox', () => {
       expect(await reg.execute(name, {}, opts), String(configured)).toBe('undefined undefined');
     }
     expect(sandboxModeOf('worker')).toBe('wasm');
+  });
+
+  // On Windows a person's CLI died the moment an agent-written tool started:
+  // no error, no exit handler, as a crash in a native addon looks.
+  it('auto keeps to the WebAssembly sandbox on Windows; asked for by name, isolated-vm still runs there', () => {
+    expect(usesIsolate('auto', 'win32')).toBe(false);
+    expect(usesIsolate('auto', 'linux')).toBe(true);
+    expect(usesIsolate('auto', 'darwin')).toBe(true);
+    expect(usesIsolate('isolate', 'win32')).toBe(true);
+    expect(usesIsolate('wasm', 'linux')).toBe(false);
+  });
+
+  it('says what it is about to run in native code, and that it is over, even when the tool fails', async () => {
+    const notes: Array<string | null> = [];
+    onCrashNote((d) => notes.push(d));
+    try {
+      for (const [name, code] of [['dynamic_note_ok', "return 'ok';"], ['dynamic_note_bad', "throw new Error('nope');"]] as const) {
+        const reg = makeRegistry();
+        await new ToolCreator(mockRouter({
+          name, description: name, inputSchema: { type: 'object', properties: {} }, executeCode: code, isDangerous: false,
+        }), reg, ws, true, 'isolate').createTool(name, name);
+        await reg.execute(name, {}, opts).catch(() => undefined);
+      }
+    } finally {
+      onCrashNote(null);
+    }
+    // isolated-vm may not load on every machine; where it does, each run is bracketed.
+    if (notes.length) {
+      expect(notes).toEqual([
+        expect.stringContaining('dynamic_note_ok in the isolated-vm sandbox'), null,
+        expect.stringContaining('dynamic_note_bad in the isolated-vm sandbox'), null,
+      ]);
+    }
   });
 
   // A tool calling itself, or two calling each other, started a sandbox
