@@ -67,6 +67,8 @@ import { PlanApproval, type PlanApprovalRequest } from './components/PlanApprova
 // Keep only the most recent peer-comms events — a long run can produce
 // thousands and the feed only ever shows the last handful.
 const PEER_EVENT_BUFFER = 50;
+/** Routers given the cost:untracked notice listener: one each, for the session. */
+const routersNoticed = new WeakSet<object>();
 
 // Show only the last N lines of a streaming buffer in the live area so a
 // long generation can't push the rest of the TUI off-screen. The full text
@@ -1197,9 +1199,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
     cascade.on('tier:thinking', (ev: { tierId: string; call?: number; text?: string; done?: boolean }) => { activityRef.current.think(ev); activityChanged(); });
     // Once per model: its calls are counted in tokens but not in cost, so the cost
     // shown is partial from here on. Said when it happens, not left for /cost.
-    // On the router, which lives as long as the session: taken off again with this
-    // run's other listeners (below), or every prompt would add one more, and a
-    // model first met on the Nth run would be announced N times.
+    // On the router, which lives as long as the session, and so once per router
+    // rather than once per run: a call that settles after the run (the session's
+    // title, say) is covered too, and a model first met on the Nth run is still
+    // announced once. The router emits this only the first time per model.
     const router = cascade.getRouter();
     const onUntracked = (ev: { modelId: string; provider: string }): void => {
       const capped = config.budget?.maxCostPerRunUsd != null || config.budget?.sessionBudgetUsd != null;
@@ -1207,7 +1210,10 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         + (capped ? ' Your cost budget can\'t see this spend either; the token cap still applies.' : '');
       dispatch({ type: 'ADD_NOTICE', message: { id: randomUUID(), role: 'system', content, timestamp: new Date().toISOString() } });
     };
-    router.on('cost:untracked', onUntracked);
+    if (!routersNoticed.has(router)) {
+      routersNoticed.add(router);
+      router.on('cost:untracked', onUntracked);
+    }
     cascade.on('tier:root', onRoot);
     cascade.on('stream:token', onStream);
     cascade.on('tier:status', (ev: TierStatusEvent) => {
@@ -1422,7 +1428,6 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       setRunEndedAt(Date.now());
       decisionLogRef.current = cascade.getDecisionLog();
       cascade.removeAllListeners();
-      router.off('cost:untracked', onUntracked);
       setPlanApprovalRequest(null);
       const finalStats = cascade.getRouter().getStats();
       const currentSession = storeRef.current?.getSession(sessionIdRef.current);
