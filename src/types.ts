@@ -611,6 +611,8 @@ export interface EscalationContext {
   issues: string[];
   /** What it has produced so far, which "Skip" keeps and "Retry" discards. */
   summary: string;
+  /** Where the section sits in T1's plan (1-based), when a plan split the run into sections. */
+  position?: { index: number; of: number };
 }
 
 export interface EscalationPayload {

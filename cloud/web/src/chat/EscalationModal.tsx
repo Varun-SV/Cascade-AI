@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
-import { AlertTriangle, RefreshCw, SkipForward, Send } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { ChevronRight, MessageSquareText, RotateCcw, SkipForward, ChevronDown } from 'lucide-react';
 import Modal from '../components/Modal.js';
 import { escalationKey, type EscalationRequest } from './useChatSession.js';
+import { CHOICES, clock, draftPreview, readIssues, wordCount, type EscalationChoice } from './escalation-view.js';
 
 /**
  * Every section that has stopped and asked a question.
@@ -47,7 +48,7 @@ export default function EscalationModal({
     // answered, so it must win no matter what else happens to be open, not
     // just whichever one happened to mount last.
     <Modal
-      title={many ? `${requests.length} sections need your decision` : 'A section needs your decision'}
+      title={many ? `${requests.length} sections paused for your decision` : 'Section paused for your decision'}
       onClose={onDismiss}
       zIndexClassName="z-[60]"
     >
@@ -71,14 +72,11 @@ export default function EscalationModal({
 }
 
 /**
- * One parked section, owning its own note and its own countdown.
+ * One parked section, as a card on the cascade: where in the run it stopped,
+ * what failed, what it has so far, and the three ways on, each one choice away.
  *
- * A component per request rather than one with a `note` and a reset effect.
- * The effect version was correct while exactly one was visible; with several on
- * screen a single draft would be shared between them, and since the guidance
- * box is free text meant for specific work, applying one section's instructions
- * to another is worse than applying none. Keyed on the request, so React
- * discards the draft with the section rather than carrying it anywhere.
+ * A component per request, keyed on it, so each section owns its own draft note
+ * and countdown: one section's instructions never reach another.
  */
 function ParkedSection({
   request,
@@ -91,17 +89,16 @@ function ParkedSection({
   onResolve: (action: 'retry' | 'skip' | 'guidance', note: string | undefined, key: string) => void;
   onExpire: (key: string) => void;
 }) {
+  const [choice, setChoice] = useState<EscalationChoice | null>(null);
   const [note, setNote] = useState('');
+  const [showDraft, setShowDraft] = useState(false);
+  const [showGoal, setShowGoal] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const key = escalationKey(request);
+  const noteRef = useRef<HTMLTextAreaElement>(null);
 
-  // Anchored to when the request ARRIVED, not to when this effect last ran.
-  // `onDismiss` is a fresh inline closure on every parent render, so with it in
-  // the dependency list any unrelated re-render (a status event from another
-  // section, say) used to restart the interval AND reset its start time — the
-  // countdown jumped back to five minutes while the server's timer kept
-  // running, so the modal could read "4:58 remaining" a second before the
-  // section was failed for not answering.
+  // Anchored to when the request ARRIVED: an unrelated re-render must not
+  // restart the countdown while the server's timer keeps running.
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
@@ -109,172 +106,214 @@ function ParkedSection({
 
   const remainingMs = request.timeoutMs - (now - request.receivedAt);
   const seconds = Math.max(0, Math.ceil(remainingMs / 1000));
+  const left = Math.max(0, Math.min(1, remainingMs / request.timeoutMs));
+  const urgent = seconds <= 60;
 
-  // The server has already given up; clear so a late answer can't land on a
-  // section that has moved on. `onExpire`, not `onDismiss` — reporting "Skipping
-  // section…" for a decision nobody made would be a lie about what happened.
-  // In an effect, not in the tick, because clearing during render would set
-  // parent state mid-render.
+  // The server has already given up: clear, so a late answer can't land on a
+  // section that has moved on. Not an answer, so not onResolve.
   useEffect(() => {
     if (remainingMs <= 0) onExpire(key);
   }, [remainingMs <= 0, key, onExpire]); // eslint-disable-line react-hooks/exhaustive-deps
-  const mm = Math.floor(seconds / 60);
-  const ss = String(seconds % 60).padStart(2, '0');
-  const urgent = seconds <= 60;
+
+  const { checks, notes } = readIssues(request.issues);
+  const draft = draftPreview(request.summary ?? '');
+  const ready = choice !== null && (choice !== 'guidance' || note.trim().length > 0);
+  const chosen = CHOICES.find((c) => c.id === choice);
+
+  const pick = (id: EscalationChoice) => setChoice(id);
+  const confirm = () => {
+    if (!ready || !choice) return;
+    onResolve(choice, choice === 'guidance' ? note.trim() : undefined, key);
+  };
+
+  // G / R / S pick, Enter confirms. Only when this is the one section asking,
+  // and never while typing: a letter in the notes is a letter.
+  useEffect(() => {
+    if (separated) return;
+    const onKey = (e: KeyboardEvent) => {
+      const typing = e.target instanceof HTMLElement && /^(TEXTAREA|INPUT|SELECT)$/.test(e.target.tagName);
+      if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+      const hit = CHOICES.find((c) => c.key.toLowerCase() === e.key.toLowerCase());
+      if (hit) { e.preventDefault(); pick(hit.id); }
+      else if (e.key === 'Enter' && ready) { e.preventDefault(); confirm(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+
+  const icon = (id: EscalationChoice) => (id === 'guidance' ? <MessageSquareText size={15} /> : id === 'retry' ? <RotateCcw size={15} /> : <SkipForward size={15} />);
 
   return (
-    <div className={`flex flex-col gap-3 p-4 text-sm text-ink-100 ${separated ? 'border-b border-elev/10 last:border-b-0' : ''}`}>
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex items-start gap-2">
-          <AlertTriangle size={16} className="mt-0.5 shrink-0 text-warn-400" />
-          <div>
-            <p className="font-semibold">{request.sectionTitle}</p>
-            <p className="text-xs text-ink-300">
-              This part of the run has stopped and cannot finish without an answer from you.
-            </p>
-          </div>
-        </div>
-        {/* Beside the section it belongs to, not only in the sentence at the
-            bottom. With several sections parked at once, each one's deadline
-            is its own and the one that matters is the one running out. */}
-        <span
-          className={`shrink-0 rounded-md px-2 py-0.5 font-mono text-xs tabular-nums ${
-            urgent ? 'bg-danger-500/15 text-danger-300' : 'bg-elev/10 text-ink-300'
-          }`}
+    <section
+      aria-label={request.sectionTitle}
+      className={`flex flex-col text-sm text-ink-100 ${separated ? 'border-b border-elev/10 last:border-b-0' : ''}`}
+    >
+      {/* The time it has left, as a bar draining along the top. */}
+      <div className="flex items-center gap-3 px-4 pt-3">
+        <div
+          className="h-1 flex-1 overflow-hidden rounded-full bg-elev/10"
+          role="progressbar"
           aria-label={`Time left for ${request.sectionTitle}`}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(left * 100)}
         >
-          {seconds > 0 ? `${mm}:${ss}` : '0:00'}
+          <div className={`h-full rounded-full transition-[width] duration-1000 ease-linear ${urgent ? 'bg-danger-500' : 'bg-t2'}`} style={{ width: `${left * 100}%` }} />
+        </div>
+        <span className={`shrink-0 font-mono text-[11px] tabular-nums ${urgent ? 'text-danger-300' : 'text-ink-400'}`}>
+          {seconds > 0 ? `auto-fails in ${clock(seconds)}` : 'timed out'}
         </span>
       </div>
 
-      {request.goal && (
-        <Field label="What it was asked to do">
-          <p className="whitespace-pre-wrap text-xs leading-relaxed text-ink-200">{request.goal}</p>
-        </Field>
-      )}
-
-      {request.issues.length > 0 && (
-        <Field label="Where it stopped">
-          <ul className="flex flex-col gap-1 text-xs text-ink-200">
-            {request.issues.slice(0, 6).map((issue, i) => (
-              <li key={i}>· {issue}</li>
-            ))}
-          </ul>
-        </Field>
-      )}
-
-      {request.summary?.trim() && (
-        // Bounded and scrollable rather than clamped: this is the work "Skip"
-        // KEEPS and a retry throws away, so the decision is being made about
-        // it — hiding it behind a fade would be asking about something the
-        // person cannot read.
-        <Field label="What it has so far">
-          <div className="max-h-32 overflow-y-auto whitespace-pre-wrap text-xs leading-relaxed text-ink-200">
-            {request.summary.trim()}
-          </div>
-        </Field>
-      )}
-
-      <div className="flex flex-col gap-2">
-        <span className="text-xs font-semibold uppercase tracking-wide text-ink-300">Your choice</span>
-
-        <label className="flex flex-col gap-1">
-          <span className="text-xs text-ink-300">
-            Tell it what to do differently — then choose “Retry with guidance”.
+      {/* Where in the cascade it stopped. */}
+      <div className="flex flex-col gap-1.5 px-4 pb-3 pt-2.5">
+        <nav aria-label="Where in the run" className="flex flex-wrap items-center gap-1 text-[11px] text-ink-400">
+          <Crumb dot="bg-t1">Plan</Crumb>
+          <ChevronRight size={11} className="text-ink-500" />
+          <Crumb dot="bg-t2">{request.position ? `Section ${request.position.index} of ${request.position.of}` : 'Section'}</Crumb>
+          <ChevronRight size={11} className="text-ink-500" />
+          <Crumb dot="bg-t3">Review</Crumb>
+        </nav>
+        <div className="flex items-start justify-between gap-3">
+          <h3 className="text-[15px] font-semibold leading-snug text-ink-50">{request.sectionTitle}</h3>
+          <span className="mt-0.5 shrink-0 rounded-full border border-warning-500/40 bg-warning-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-warning-300">
+            Paused
           </span>
-          <textarea
-            className="resize-none rounded-md border border-elev/10 bg-elev/[0.04] px-2 py-1.5 text-sm text-ink-100 outline-none placeholder:text-ink-400"
-            rows={3}
-            placeholder="e.g. skip the private repos and only summarise the public ones"
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            // Focused only when it is the only one. With several open, stealing
-            // focus into whichever rendered last would move the cursor out from
-            // under somebody already typing.
-            autoFocus={!separated}
-            aria-label={`Guidance for ${request.sectionTitle}`}
-          />
-        </label>
-
-        {/* Each choice says what it DOES to the run. Three bare verbs left the
-            difference between them to be guessed, and the one that is not
-            reversible — a retry discards the partial work above — read as the
-            safest of the three. */}
-        <Choice
-          icon={<Send size={14} />}
-          label="Retry with guidance"
-          detail="Runs this section again with your instructions. Replaces the work above."
-          primary
-          disabled={!note.trim()}
-          onClick={() => onResolve('guidance', note.trim(), key)}
-        />
-        <Choice
-          icon={<RefreshCw size={14} />}
-          label="Retry as-is"
-          detail="Runs it again unchanged, replacing the work above. Worth it if this looked like a one-off."
-          onClick={() => onResolve('retry', undefined, key)}
-        />
-        <Choice
-          icon={<SkipForward size={14} />}
-          label="Skip this section"
-          detail="Keeps the work above and carries on with the rest of the run."
-          onClick={() => onResolve('skip', undefined, key)}
-        />
+        </div>
+        {request.goal && (
+          <button
+            type="button"
+            onClick={() => setShowGoal((v) => !v)}
+            aria-expanded={showGoal}
+            className={`text-left text-xs leading-relaxed text-ink-300 hover:text-ink-200 ${showGoal ? 'whitespace-pre-wrap' : 'line-clamp-2'}`}
+            title={showGoal ? 'Show less' : 'Show the whole goal'}
+          >
+            {request.goal}
+          </button>
+        )}
       </div>
 
-      <p className={`text-xs ${urgent ? 'text-danger-300' : 'text-ink-400'}`}>
-        {seconds > 0
-          ? `If nobody answers within ${mm}:${ss}, this section is marked failed and the rest of the run carries on without it.`
-          : 'Timed out — this section has been failed.'}
-      </p>
-    </div>
+      {/* What failed, and what it has so far. */}
+      <dl className="mx-4 grid grid-cols-[4.5rem_1fr] gap-x-3 gap-y-2.5 rounded-lg border border-elev/10 bg-elev/[0.04] px-3 py-2.5 text-xs">
+        {(checks.length > 0 || notes.length > 0) && (
+          <>
+            <dt className="pt-0.5 font-medium text-ink-400">Checks</dt>
+            <dd className="flex flex-col gap-1.5">
+              {checks.length > 0 && (
+                <ul className="flex flex-wrap gap-1.5" aria-label="Failed checks">
+                  {checks.map((c) => (
+                    <li key={c} className="inline-flex items-center gap-1 rounded-md bg-danger-500/10 px-1.5 py-0.5 text-[11px] font-medium text-danger-300">
+                      <span aria-hidden>✕</span> {c}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {notes.slice(0, 4).map((n, i) => <p key={i} className="leading-relaxed text-ink-300">{n}</p>)}
+            </dd>
+          </>
+        )}
+        {draft.words > 0 && (
+          <>
+            <dt className="pt-0.5 font-medium text-ink-400">Draft</dt>
+            <dd className="flex min-w-0 flex-col gap-1">
+              <div className="flex items-start justify-between gap-2">
+                <span className="line-clamp-2 min-w-0 text-ink-200">{draft.line}</span>
+                <button
+                  type="button"
+                  onClick={() => setShowDraft((v) => !v)}
+                  aria-expanded={showDraft}
+                  aria-label={showDraft ? 'Hide' : 'View'}
+                  className="flex shrink-0 items-center gap-1 whitespace-nowrap text-[11px] font-medium text-t2 hover:underline"
+                >
+                  <span className="font-normal text-ink-500">{wordCount(draft.words)} ·</span>
+                  {showDraft ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                  {showDraft ? 'Hide' : 'View'}
+                </button>
+              </div>
+              {showDraft && (
+                <div className="max-h-48 overflow-y-auto whitespace-pre-wrap rounded-md bg-ink-950/40 p-2 leading-relaxed text-ink-200">
+                  {request.summary.trim()}
+                </div>
+              )}
+            </dd>
+          </>
+        )}
+      </dl>
+
+      {/* The three ways on. */}
+      <div className="flex flex-col gap-3 p-4">
+        <div role="radiogroup" aria-label={`What to do with ${request.sectionTitle}`} className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+          {CHOICES.map((c) => {
+            const on = choice === c.id;
+            return (
+              <button
+                key={c.id}
+                type="button"
+                role="radio"
+                aria-checked={on}
+                onClick={() => pick(c.id)}
+                className={`group flex flex-col gap-1 rounded-lg border px-3 py-2.5 text-left transition-colors ${
+                  on ? 'border-t2/70 bg-t2/10 ring-1 ring-t2/40' : 'border-elev/15 bg-elev/[0.04] hover:border-elev/30 hover:bg-elev/[0.08]'
+                }`}
+              >
+                <span className="flex items-center justify-between gap-2">
+                  <span className={`flex items-center gap-1.5 text-[13px] font-semibold ${on ? 'text-ink-50' : 'text-ink-100'}`}>
+                    <span className={on ? 'text-t2' : 'text-ink-400'}>{icon(c.id)}</span>
+                    {c.label}
+                  </span>
+                  {!separated && (
+                    <kbd className="rounded border border-elev/20 px-1 font-mono text-[10px] text-ink-400">{c.key}</kbd>
+                  )}
+                </span>
+                <span className="text-[11px] leading-snug text-ink-400">{c.detail}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {choice === 'guidance' && (
+          <textarea
+            ref={noteRef}
+            // Focused as it appears: the next keys typed are the notes, never a shortcut.
+            autoFocus
+            className="resize-none rounded-lg border border-elev/15 bg-elev/[0.04] px-3 py-2 text-sm text-ink-100 outline-none placeholder:text-ink-500 focus:border-t2/60"
+            rows={3}
+            placeholder="What should it do differently? e.g. finish the stylesheet and keep it under one file"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); confirm(); }
+            }}
+            aria-label={`Notes for ${request.sectionTitle}`}
+          />
+        )}
+
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-[11px] leading-snug text-ink-500">
+            {seconds > 0
+              ? 'No answer in time fails this section; the rest of the run carries on.'
+              : 'Timed out: this section has been failed.'}
+          </p>
+          <button
+            type="button"
+            onClick={confirm}
+            disabled={!ready}
+            className="shrink-0 rounded-md bg-accent-500 px-3.5 py-2 text-xs font-semibold text-white shadow-sm hover:bg-accent-400 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {chosen ? chosen.confirm : 'Choose how to continue'}
+          </button>
+        </div>
+      </div>
+    </section>
   );
 }
 
-/** A labelled block of evidence. Same shape for each, so they read as a list. */
-function Field({ label, children }: { label: string; children: React.ReactNode }): React.ReactElement {
+/** One step of the cascade path, with its tier's colour. */
+function Crumb({ dot, children }: { dot: string; children: React.ReactNode }): React.ReactElement {
   return (
-    <div className="rounded-md bg-elev/[0.05] px-3 py-2">
-      <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink-300">{label}</p>
+    <span className="inline-flex items-center gap-1.5 rounded-full bg-elev/[0.06] px-2 py-0.5 font-medium text-ink-300">
+      <span className={`h-1.5 w-1.5 rounded-full ${dot}`} aria-hidden />
       {children}
-    </div>
-  );
-}
-
-/**
- * One answer, with what it does to the run underneath it.
- *
- * A button rather than a row with a button in it, so the whole thing is the
- * target and the consequence is part of the accessible name — a screen reader
- * reaching "Skip this section" hears what skipping does, which is exactly the
- * part that was missing on screen too.
- */
-function Choice({
-  icon, label, detail, onClick, disabled, primary,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  detail: string;
-  onClick: () => void;
-  disabled?: boolean;
-  primary?: boolean;
-}): React.ReactElement {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      className={`flex w-full items-start gap-2 rounded-md px-3 py-2 text-left disabled:cursor-not-allowed disabled:opacity-40 ${
-        primary
-          ? 'bg-accent-500/20 text-accent-200 hover:bg-accent-500/30'
-          : 'bg-elev/10 text-ink-100 hover:bg-elev/20'
-      }`}
-    >
-      <span className="mt-0.5 shrink-0">{icon}</span>
-      <span className="flex flex-col gap-0.5">
-        <span className="text-sm font-semibold">{label}</span>
-        <span className={`text-xs ${primary ? 'text-accent-200/80' : 'text-ink-300'}`}>{detail}</span>
-      </span>
-    </button>
+    </span>
   );
 }

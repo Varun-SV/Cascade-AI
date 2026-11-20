@@ -727,6 +727,7 @@ export class Cascade extends EventEmitter {
           ...(ctx.goal ? { goal: ctx.goal } : {}),
           issues: ctx.issues,
           summary: ctx.summary,
+          ...(ctx.position ? { position: ctx.position } : {}),
           timeoutMs: ESCALATION_DECISION_TIMEOUT_MS,
         },
         () => settle({ action: 'skip', automatic: true }),
