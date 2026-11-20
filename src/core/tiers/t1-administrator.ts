@@ -23,6 +23,9 @@ import { T2Manager } from './t2-manager.js';
 import { RunBreaker } from '../run-breaker.js';
 import type { EscalationDecision } from '../../types.js';
 import { MemoryStore } from '../../memory/store.js';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { leavesBase } from '../../utils/real-path.js';
 import { COMPLEXITY_T2_COUNT } from '../../constants.js';
 import { compileSectionGraph } from '../orchestration/adapters.js';
 import { DependencyScheduler } from '../orchestration/scheduler.js';
@@ -381,6 +384,9 @@ export class T1Administrator extends BaseTier {
     // Wrapping up: what is done is what the answer is written from. A review
     // could only ask for more work, and the correction plan it leads to would
     // be refused.
+    // Every section planned so far, fix passes included: the files they named
+    // are what a fix pass is shown as already on disk.
+    const plannedSections = [...plan.sections];
     while (pass <= maxReplanPasses && !this.router.isWrappingUp?.()) {
       const reviewResult = await this.reviewT2Outputs(enrichedPrompt, plan, allT2Results);
       if (reviewResult.approved) {
@@ -418,7 +424,12 @@ export class T1Administrator extends BaseTier {
       // have no memory of prior delegations, so the correction plan can (and
       // did) re-emit sections that already completed.
       const completedSummary = this.summarizeCompletedSections(allT2Results);
-      const correctionContext = [systemContext, completedSummary].filter(Boolean).join('\n\n') || undefined;
+      // What the earlier pass left on disk. A section that failed part-way is
+      // not in the summary above, yet its files are there: without this the
+      // fix pass planned them again from scratch (a story written twice, paid
+      // for twice) instead of finishing what was there.
+      const onDisk = await this.filesOnDisk(plannedSections);
+      const correctionContext = [systemContext, completedSummary, onDisk].filter(Boolean).join('\n\n') || undefined;
       let correctionPlan: TaskPlan;
       try {
         correctionPlan = await this.decomposeTask(`The previous execution plan failed to fully satisfy the original goal or encountered errors.
@@ -426,7 +437,7 @@ Review reason: ${reviewResult.reason}
 
 Original goal: ${enrichedPrompt}
 
-Create a CORRECTION PLAN that contains only the new sections needed to fix the issues. Do not repeat successful sections.`, correctionContext);
+Create a CORRECTION PLAN that contains only the new sections needed to fix the issues. Do not repeat successful sections.${onDisk ? ' Files listed as already in the workspace are there now: plan to check, fix or finish them where they are, and write one again from scratch only when the review says it is wrong.' : ''}`, correctionContext);
       } catch (err) {
         // The budget ran down to the answer's reserve during the review: write
         // the answer from what is done rather than lose it.
@@ -434,7 +445,11 @@ Create a CORRECTION PLAN that contains only the new sections needed to fix the i
         throw err;
       }
 
-      const correctionResults = await this.dispatchT2Managers(correctionPlan.sections);
+      // Named as fixes, so a re-run of a section that failed doesn't look like the
+      // same section twice on every screen.
+      const fixSections = correctionPlan.sections.map((sec) => ({ ...sec, sectionTitle: fixTitle(pass, sec.sectionTitle) }));
+      plannedSections.push(...fixSections);
+      const correctionResults = await this.dispatchT2Managers(fixSections);
       allT2Results = [...allT2Results, ...correctionResults];
 
       // Early-stop: a corrective pass that produced NO new successful/partial
@@ -603,6 +618,28 @@ In 3-5 terse bullets, flag the most important RISKS, GAPS, or over-/under-decomp
 
   /** Structured, grounded summary of what's already done — used to keep
    * corrective replan passes from re-emitting completed sections. */
+  /**
+   * The files the sections planned so far named that are in the workspace now,
+   * with their sizes: names and sizes only, never their contents. The names
+   * are the plan's own, already shown to the planner.
+   */
+  private async filesOnDisk(sections: readonly T1ToT2Assignment[]): Promise<string> {
+    const root = this.toolRegistry.getWorkspaceRoot?.() ?? process.cwd();
+    const named = new Set<string>();
+    for (const sec of sections) for (const sub of sec.t3Subtasks ?? []) for (const f of sub.files ?? []) named.add(f);
+    const found: string[] = [];
+    for (const name of named) {
+      const abs = path.resolve(root, name);
+      const rel = path.relative(root, abs);
+      if (!rel || leavesBase(rel)) continue;
+      const stat = await fs.stat(abs).catch(() => null);
+      if (stat?.isFile()) found.push(`- ${rel.split(path.sep).join('/')} (${sizeLabel(stat.size)})`);
+      if (found.length >= 40) break;
+    }
+    if (!found.length) return '';
+    return `FILES ALREADY IN THE WORKSPACE (written by the earlier pass, including by sections that did not finish):\n${found.join('\n')}`;
+  }
+
   private summarizeCompletedSections(results: T2Result[]): string {
     const done = results.filter(producedOutput);
     if (done.length === 0) return '';
@@ -1330,4 +1367,16 @@ Reply with exactly one word: YES, NO, or UNSURE.
       return null; // On error, escalate to user
     }
   }
+}
+
+/** A fix pass's section title: "Fix 1 · <title>", never prefixed twice. */
+export function fixTitle(pass: number, title: string): string {
+  const bare = title.replace(/^Fix \d+ · /, '');
+  return `Fix ${pass} · ${bare}`;
+}
+
+function sizeLabel(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }

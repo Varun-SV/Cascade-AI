@@ -590,6 +590,10 @@ export class T3Worker extends BaseTier {
             // own dependents unblock at once instead of each waiting out the full
             // peer timeout — that per-link stacking was the apparent "deadlock".
             this.peerBus.publish(this.id, assignment.subtaskId, `Blocked by failed dependency: ${depId}`, 'FAILED');
+            // Settle this node too: it went ACTIVE above, and without a final
+            // status it stayed "running" on every screen, its clock still going,
+            // long after its section had ended. BLOCKED: it was never attempted.
+            this.setStatus('BLOCKED', `Not started: ${depId} failed`);
             return this.buildResult(
               'ESCALATED',
               `Dependency ${depId} failed — cannot proceed`,
@@ -602,6 +606,7 @@ export class T3Worker extends BaseTier {
           this.handedWork.push({ from: dep.subtaskId, output: dep.output });
         } catch (err) {
           this.peerBus.publish(this.id, assignment.subtaskId, `Dependency timeout: ${depId}`, 'FAILED');
+          this.setStatus('BLOCKED', `Not started: ${depId} never finished`);
           return this.buildResult(
             'ESCALATED',
             `Dependency timeout: ${depId}`,
