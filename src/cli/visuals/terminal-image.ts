@@ -62,6 +62,30 @@ export function findImages(text: string): ImageRef[] {
     return space;
   };
   const before = (a: number, b: number): boolean => a !== -1 && (b === -1 || a < b);
+  // Parentheses, counted once: a destination may hold balanced ones
+  // (`cover(1).png`), so its end is the first ")" with as many "(" as ")"
+  // before it. Prefix counts make each check constant time.
+  const opens = new Int32Array(text.length + 1);
+  const shuts = new Int32Array(text.length + 1);
+  const closers: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    opens[i + 1] = opens[i]! + (c === '(' ? 1 : 0);
+    shuts[i + 1] = shuts[i]! + (c === ')' ? 1 : 0);
+    if (c === ')') closers.push(i);
+  }
+  /** The ")" ending a destination that starts at `at`, or -1. A few nesting levels at most. */
+  const destinationEnd = (at: number): number => {
+    let lo = 0;
+    let hi = closers.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (closers[mid]! < at) lo = mid + 1; else hi = mid; }
+    for (let k = lo, tries = 0; k < closers.length && tries < 8; k++, tries++) {
+      const q = closers[k]!;
+      if (q - at > MAX_SRC) break;
+      if (opens[q]! - opens[at]! === shuts[q]! - shuts[at]!) return q;
+    }
+    return -1;
+  };
   let from = 0;
   for (;;) {
     const start = text.indexOf('![', from);
@@ -70,7 +94,8 @@ export function findImages(text: string): ImageRef[] {
     const close = nextOf(']', start + 2);
     if (!before(close, nextOf('\n', start + 2)) || close - start - 2 > MAX_ALT || text[close + 1] !== '(') continue;
     const srcStart = close + 2;
-    const paren = nextOf(')', srcStart);
+    // Not one that can be matched: left as written, never cut short.
+    const paren = destinationEnd(srcStart);
     const gap = nextSpace(srcStart);
     if (paren === -1) continue;
     const srcEnd = before(gap, paren) ? gap : paren;

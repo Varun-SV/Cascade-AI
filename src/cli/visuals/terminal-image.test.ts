@@ -95,3 +95,20 @@ describe('Codex and CodeQL on 5721352', () => {
     }
   });
 });
+
+describe('Codex on f697ac7: parentheses in a destination', () => {
+  it('balanced parentheses stay in the address', () => {
+    expect(findImages('![Cover](generated/cover(1).png) and ![b](https://x.test/a_(b).png "t")').map((r) => r.src))
+      .toEqual(['generated/cover(1).png', 'https://x.test/a_(b).png']);
+  });
+
+  it('one that cannot be matched is left exactly as written', () => {
+    expect(findImages('![x](generated/cover(1.png) more')).toEqual([]);
+  });
+
+  it('still linear on a long run of open parentheses', () => {
+    const t0 = performance.now();
+    expect(findImages('![](('.repeat(40_000))).toEqual([]);
+    expect(performance.now() - t0).toBeLessThan(500);
+  });
+});

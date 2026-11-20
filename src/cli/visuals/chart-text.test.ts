@@ -93,3 +93,17 @@ describe('Codex on 5721352', () => {
     expect(expandCharts(block, 60)).toBe(block);
   });
 });
+
+describe('Codex on f697ac7', () => {
+  it('a flat series of huge values is drawn, not thrown on', () => {
+    const lines = draw('line', 'Day,Bytes\nMon,1e16\nTue,1e16\nWed,1e16', 60);
+    expect(lines.some((l) => /[⠁-⣿]/.test(l))).toBe(true);
+    for (const l of lines) expect(l.length).toBeLessThanOrEqual(60);
+  });
+
+  it('a pie legend on a narrow terminal keeps its share and value', () => {
+    const lines = draw('pie', 'Format,Words\nCommercial Novel Target,80000\nFlash Fiction,1000', 30);
+    for (const l of lines) expect(l.length, l).toBeLessThanOrEqual(30);
+    expect(lines.find((l) => l.includes('98.8%'))).toMatch(/98\.8%\s+80,000$/);
+  });
+});

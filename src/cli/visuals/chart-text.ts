@@ -102,7 +102,10 @@ function pieLines(spec: ChartSpec, w: number): string[] {
   let left = room - cells.reduce((a, c) => a + c, 0);
   exact.map((e, i) => ({ r: e - Math.floor(e), i })).sort((a, b) => b.r - a.r).forEach(({ i }) => { if (left > 0) { cells[i]! += 1; left -= 1; } });
   const bar = parts.map((p, i) => colour(p.i)('█'.repeat(cells[i]!))).join('');
-  const name = Math.min(28, Math.max(...parts.map((p) => p.name.length)));
+  // Room for the share and the value first; the names give way, down to 4 characters.
+  const valueWidth = Math.max(...parts.map((p) => shortNumber(p.v).length));
+  const wanted = Math.min(28, Math.max(...parts.map((p) => p.name.length)));
+  const name = Math.max(4, Math.min(wanted, w - 2 - 2 - 6 - 2 - valueWidth));
   const rows = parts.map((p) => `${colour(p.i)('■')} ${pad(cut(p.name, name), name)}  ${pad(`${(p.v / total * 100).toFixed(1)}%`, 6)}  ${shortNumber(p.v)}`);
   return [bar, '', ...rows];
 }
@@ -116,7 +119,14 @@ function plotLines(spec: ChartSpec, w: number): string[] {
   const values = spec.series.flatMap((s) => s.values);
   let lo = Math.min(...values, spec.kind === 'area' ? 0 : Infinity);
   let hi = Math.max(...values);
-  if (hi === lo) { hi += 1; lo -= 1; }
+  // A flat series still needs a range to draw in. Padding relative to its size,
+  // since adding 1 to 1e16 changes nothing and the scale would divide by zero.
+  if (!(hi > lo)) {
+    const pad = Math.max(Math.abs(hi) * 1e-3, 1);
+    hi += pad;
+    lo -= pad;
+  }
+  if (!Number.isFinite(hi) || !Number.isFinite(lo) || !(hi > lo)) return [chalk.dim('(these values cannot be drawn: ' + values.map(shortNumber).join(', ').slice(0, 80) + ')')];
   const axis = Math.max(shortNumber(hi).length, shortNumber(lo).length);
   const cols = Math.max(10, w - axis - 3);
   const rows = Math.max(4, Math.min(12, Math.round(cols / 5)));
@@ -125,7 +135,7 @@ function plotLines(spec: ChartSpec, w: number): string[] {
   const cells: number[][] = Array.from({ length: rows }, () => new Array<number>(cols).fill(0));
   const owner: number[][] = Array.from({ length: rows }, () => new Array<number>(cols).fill(-1));
   const set = (x: number, y: number, si: number): void => {
-    if (x < 0 || y < 0 || x >= dotsX || y >= dotsY) return;
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x >= dotsX || y >= dotsY) return;
     const r = Math.floor(y / 4);
     const c = Math.floor(x / 2);
     cells[r]![c]! |= DOT[y % 4]![x % 2]!;
