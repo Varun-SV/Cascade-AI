@@ -23,6 +23,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import chalk from 'chalk';
 import { loadSharp } from '../../media/report-images.js';
+import { statePathFor } from '../../config/project-state.js';
 
 export interface ImageRef { alt: string; src: string; start: number; end: number }
 
@@ -131,7 +132,10 @@ export function resolveLocalImage(src: string, workspace: string, roots: readonl
   if (!isLocalImage(src)) return null;
   const decoded = (() => { try { return decodeURIComponent(src); } catch { return src; } })();
   const normal = path.sep === '/' ? decoded.replace(/\\/g, '/') : decoded;
-  const abs = path.resolve(workspace, normal);
+  // A browser screenshot is named as the tools return it, `@screenshots/<file>`,
+  // which is in the project's state folder, not the workspace. Still only shown
+  // when that folder is one of `roots`.
+  const abs = (normal.startsWith('@screenshots/') ? statePathFor(workspace, normal) : null) ?? path.resolve(workspace, normal);
   if (!IMAGE_EXTENSIONS.has(path.extname(abs).toLowerCase())) return null;
   const inside = roots.some((root) => {
     const rel = path.relative(path.resolve(root), abs);

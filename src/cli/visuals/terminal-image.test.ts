@@ -5,6 +5,7 @@ import chalk from 'chalk';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadSharp } from '../../media/report-images.js';
 import { fileLink, findImages, isLocalImage, prepareThumbnails, resolveLocalImage } from './terminal-image.js';
+import { STATE, statePath, useProjectStateDir } from '../../config/project-state.js';
 
 let dir = '';
 const level = chalk.level;
@@ -110,5 +111,29 @@ describe('Codex on f697ac7: parentheses in a destination', () => {
     const t0 = performance.now();
     expect(findImages('![](('.repeat(40_000))).toEqual([]);
     expect(performance.now() - t0).toBeLessThan(500);
+  });
+});
+
+describe('Codex on 356220c', () => {
+  it('a browser screenshot, named as the tools name it, is found in the state folder', async () => {
+    const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-img-ws-')));
+    const own = `${ws}-state`;
+    const release = useProjectStateDir(ws, own);
+    try {
+      const shots = statePath(ws, STATE.screenshots);
+      fs.mkdirSync(shots, { recursive: true });
+      fs.copyFileSync(path.join(dir, 'generated', 'cover.png'), path.join(shots, 'screenshot-1.png'));
+      const roots = [ws, statePath(ws)];
+      expect(resolveLocalImage('@screenshots/screenshot-1.png', ws, roots)).toBe(path.join(shots, 'screenshot-1.png'));
+      const thumbs = await prepareThumbnails('![Page](@screenshots/screenshot-1.png)', ws, 60, roots);
+      expect(thumbs['@screenshots/screenshot-1.png']?.lines.length).toBeGreaterThan(2);
+      // Not without the state folder among the roots, and never anything else in it.
+      expect(resolveLocalImage('@screenshots/screenshot-1.png', ws)).toBeNull();
+      expect(resolveLocalImage('@screenshots/../../elsewhere.png', ws, roots)).toBeNull();
+    } finally {
+      release();
+      fs.rmSync(ws, { recursive: true, force: true });
+      fs.rmSync(own, { recursive: true, force: true });
+    }
   });
 });

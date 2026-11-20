@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseChartSpec } from '../../core/documents/blocks.js';
+import stringWidth from 'string-width';
 import { chartToLines, shortNumber } from './chart-text.js';
 
 const plain = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
@@ -105,5 +106,34 @@ describe('Codex on f697ac7', () => {
     const lines = draw('pie', 'Format,Words\nCommercial Novel Target,80000\nFlash Fiction,1000', 30);
     for (const l of lines) expect(l.length, l).toBeLessThanOrEqual(30);
     expect(lines.find((l) => l.includes('98.8%'))).toMatch(/98\.8%\s+80,000$/);
+  });
+});
+
+describe('Codex on 356220c', () => {
+  const columns = (s: string) => stringWidth(s);
+
+  it('labels are measured in terminal columns: a double-width name never pushes its value off', () => {
+    const bar = draw('bar', 'Name,Value\n東京の長い名前ABCDEFGHIJKLMN,80000\nOther,1000', 30);
+    for (const l of bar) expect(columns(l), l).toBeLessThanOrEqual(30);
+    expect(bar.find((l) => l.startsWith('東京'))).toMatch(/…\s+█+\s80,000$/);
+    const pie = draw('pie', 'Name,Value\n東京の長い名前ABCDEFGHIJKLMN,80000\nOther,1000', 30);
+    for (const l of pie) expect(columns(l), l).toBeLessThanOrEqual(30);
+    expect(pie.find((l) => l.includes('東京'))).toMatch(/80,000$/);
+    // Control: a name that fits is left whole.
+    expect(draw('bar', 'Name,Value\n東京,5', 30).some((l) => l.startsWith('東京  '))).toBe(true);
+  });
+
+  it('area: a negative value is shaded up to zero, and zero is always on the scale', () => {
+    const dots = (lines: string[]) => lines.join('').replace(/[^⠁-⣿]/g, '').length;
+    const allBelow = draw('area', 'Day,Profit\nMon,-10\nTue,-20\nWed,-15');
+    expect(allBelow[0]).toMatch(/^\s*0 ┤/);
+    expect(dots(allBelow)).toBeGreaterThan(dots(draw('line', 'Day,Profit\nMon,-10\nTue,-20\nWed,-15')) * 3);
+    // Both sides: dots in the top row (above zero) and in the bottom row (below it).
+    const both = draw('area', 'Day,Profit\nMon,10\nTue,-20\nWed,10');
+    const plot = both.filter((l) => l.includes('┤'));
+    const zeroRow = Math.round(10 / 30 * (plot.length - 1));
+    const shaded = (row: string) => row.replace(/[^⠁-⣿]/g, '').length;
+    expect(plot.slice(0, zeroRow).some((r) => shaded(r) > 4)).toBe(true);
+    expect(plot.slice(zeroRow + 1, -1).some((r) => shaded(r) > 4)).toBe(true);
   });
 });

@@ -15,6 +15,7 @@
 //  always written out too, so nothing depends on telling colours apart.
 
 import chalk from 'chalk';
+import stringWidth from 'string-width';
 import { chartKind, parseChartSpec, type ChartSpec } from '../../core/documents/blocks.js';
 
 /** Series colours: distinct on dark and light backgrounds, in this order. */
@@ -32,8 +33,23 @@ export function shortNumber(n: number): string {
 }
 const trim = (n: number): string => n.toFixed(2).replace(/\.?0+$/, '');
 
-const pad = (s: string, n: number): string => (s.length >= n ? s : s + ' '.repeat(n - s.length));
-const cut = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0, Math.max(0, n - 1))}…`);
+// Measured in terminal columns, not UTF-16 units: 東 takes two, an accent none.
+const cols = (s: string): number => stringWidth(s);
+const pad = (s: string, n: number): string => s + ' '.repeat(Math.max(0, n - cols(s)));
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+/** `s` in at most `n` columns, ending in "…" when it had to be cut. */
+const cut = (s: string, n: number): string => {
+  if (cols(s) <= n) return s;
+  let out = '';
+  let used = 0;
+  for (const { segment } of graphemes.segment(s)) {
+    const w = cols(segment);
+    if (used + w > n - 1) break;
+    out += segment;
+    used += w;
+  }
+  return `${out}…`;
+};
 
 /** The lines that draw `spec` within `width` columns. */
 export function chartToLines(spec: ChartSpec, width: number): string[] {
@@ -68,7 +84,7 @@ function barLines(spec: ChartSpec, w: number): string[] {
   const max = Math.max(...values.map(Math.abs), 0);
   const valueWidth = Math.max(...values.map((v) => shortNumber(v).length));
   // The value is never cut: labels give way first, down to 4 characters, then the bar.
-  const wanted = Math.min(28, Math.max(...spec.categories.map((c) => c.length), 4));
+  const wanted = Math.min(28, Math.max(...spec.categories.map(cols), 4));
   const label = Math.max(4, Math.min(wanted, w - valueWidth - 4 - 8));
   const room = Math.max(1, w - label - valueWidth - 4);
   const out: string[] = [];
@@ -104,7 +120,7 @@ function pieLines(spec: ChartSpec, w: number): string[] {
   const bar = parts.map((p, i) => colour(p.i)('█'.repeat(cells[i]!))).join('');
   // Room for the share and the value first; the names give way, down to 4 characters.
   const valueWidth = Math.max(...parts.map((p) => shortNumber(p.v).length));
-  const wanted = Math.min(28, Math.max(...parts.map((p) => p.name.length)));
+  const wanted = Math.min(28, Math.max(...parts.map((p) => cols(p.name))));
   const name = Math.max(4, Math.min(wanted, w - 2 - 2 - 6 - 2 - valueWidth));
   const rows = parts.map((p) => `${colour(p.i)('■')} ${pad(cut(p.name, name), name)}  ${pad(`${(p.v / total * 100).toFixed(1)}%`, 6)}  ${shortNumber(p.v)}`);
   return [bar, '', ...rows];
@@ -118,7 +134,8 @@ const DOT = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
 function plotLines(spec: ChartSpec, w: number): string[] {
   const values = spec.series.flatMap((s) => s.values);
   let lo = Math.min(...values, spec.kind === 'area' ? 0 : Infinity);
-  let hi = Math.max(...values);
+  // An area is filled to zero, so zero is always on the scale, above or below.
+  let hi = Math.max(...values, spec.kind === 'area' ? 0 : -Infinity);
   // A flat series still needs a range to draw in. Padding relative to its size,
   // since adding 1 to 1e16 changes nothing and the scale would divide by zero.
   if (!(hi > lo)) {
@@ -128,12 +145,12 @@ function plotLines(spec: ChartSpec, w: number): string[] {
   }
   if (!Number.isFinite(hi) || !Number.isFinite(lo) || !(hi > lo)) return [chalk.dim('(these values cannot be drawn: ' + values.map(shortNumber).join(', ').slice(0, 80) + ')')];
   const axis = Math.max(shortNumber(hi).length, shortNumber(lo).length);
-  const cols = Math.max(10, w - axis - 3);
-  const rows = Math.max(4, Math.min(12, Math.round(cols / 5)));
-  const dotsX = cols * 2;
+  const width = Math.max(10, w - axis - 3);
+  const rows = Math.max(4, Math.min(12, Math.round(width / 5)));
+  const dotsX = width * 2;
   const dotsY = rows * 4;
-  const cells: number[][] = Array.from({ length: rows }, () => new Array<number>(cols).fill(0));
-  const owner: number[][] = Array.from({ length: rows }, () => new Array<number>(cols).fill(-1));
+  const cells: number[][] = Array.from({ length: rows }, () => new Array<number>(width).fill(0));
+  const owner: number[][] = Array.from({ length: rows }, () => new Array<number>(width).fill(-1));
   const set = (x: number, y: number, si: number): void => {
     if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x >= dotsX || y >= dotsY) return;
     const r = Math.floor(y / 4);
@@ -156,7 +173,12 @@ function plotLines(spec: ChartSpec, w: number): string[] {
           const x = Math.round(prev.x + (p.x - prev.x) * k / steps);
           const y = Math.round(prev.y + (p.y - prev.y) * k / steps);
           set(x, y, si);
-          if (spec.kind === 'area') for (let yy = y + 1; yy <= yAt(Math.max(lo, 0)); yy++) if ((x + yy) % 2 === 0) set(x, yy, si);
+          if (spec.kind === 'area') {
+            // Shaded between the line and zero, on whichever side of it the value is.
+            const base = yAt(0);
+            const [from, to] = y < base ? [y + 1, base] : [base, y - 1];
+            for (let yy = from; yy <= to; yy++) if ((x + yy) % 2 === 0) set(x, yy, si);
+          }
         }
       } else set(p.x, p.y, si);
       prev = p;
@@ -166,17 +188,18 @@ function plotLines(spec: ChartSpec, w: number): string[] {
   for (let r = 0; r < rows; r++) {
     const tick = r === 0 ? shortNumber(hi) : r === rows - 1 ? shortNumber(lo) : '';
     let line = '';
-    for (let c = 0; c < cols; c++) {
+    for (let c = 0; c < width; c++) {
       const ch = String.fromCodePoint(0x2800 + cells[r]![c]!);
       line += owner[r]![c]! >= 0 ? colour(owner[r]![c]!)(ch) : ch;
     }
     out.push(`${tick.padStart(axis)} ┤${line}`);
   }
-  out.push(`${' '.repeat(axis)} └${'─'.repeat(cols)}`);
+  out.push(`${' '.repeat(axis)} └${'─'.repeat(width)}`);
   const first = spec.categories[0] ?? '';
   const last = n > 1 ? spec.categories[n - 1]! : '';
-  const gap = Math.max(1, cols - first.length - last.length);
-  out.push(`${' '.repeat(axis + 2)}${cut(first, cols)}${last ? ' '.repeat(gap) + cut(last, Math.max(1, cols - first.length - 1)) : ''}`);
+  const firstShown = cut(first, width);
+  const gap = Math.max(1, width - cols(firstShown) - cols(last));
+  out.push(`${' '.repeat(axis + 2)}${firstShown}${last ? ' '.repeat(gap) + cut(last, Math.max(1, width - cols(firstShown) - 1)) : ''}`);
   if (spec.series.length > 1) out.push('', legend(spec));
   return out;
 }

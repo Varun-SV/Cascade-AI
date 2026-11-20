@@ -16,12 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     charts are drawn in braille dots, with the range and the first and last
     labels on the axes. A pie is one bar split by share, with a legend of
     percentages. Several series get a colour each and a legend. A chart
-    that doesn't parse is shown as written. This works in the alt-screen
-    view too.
+    that doesn't parse is shown as written. Labels in Chinese, Japanese or
+    Korean are measured by the columns they take, so values stay in view.
+    An area chart is shaded to zero from either side. This works in the
+    alt-screen view too.
   - **Images** on your machine, inside the project or Cascade's own folders,
     are drawn as a small colour thumbnail made of half blocks, with an
-    "open full size" link. Terminals with clickable links open the image in
+    "open full size" link. This includes the browser's screenshots
+    (`@screenshots/...`). Terminals with clickable links open the image in
     your viewer. A web address is never fetched: it stays a link.
+
 ## 0.97.2 - 2026-11-20
 
 ### Fixed
