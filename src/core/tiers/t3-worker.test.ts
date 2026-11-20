@@ -2225,3 +2225,25 @@ describe('T3Worker — where its facts came from', () => {
     }
   });
 });
+
+describe('a worker whose dependency failed', () => {
+  it('ends BLOCKED, not left running, when the work it waited for failed', async () => {
+    // A "Generate PDF" worker after a failed "Write Story Content" went ACTIVE,
+    // read the failure, and returned without a final status: the CLI showed it
+    // running, clock going, long after its section had ended.
+    const bus = new PeerBus();
+    const router = makeRouter(vi.fn(async () => makeResult('never asked')));
+    const worker = new T3Worker(router, makeToolRegistry(), 't2-parent');
+    worker.setPeerBus(bus);
+    const statuses: string[] = [];
+    worker.on('tier:status', (e: { status: string }) => statuses.push(e.status));
+    bus.publish('other-worker', 'write-story', 'the story could not be written', 'FAILED');
+
+    const result = await worker.execute(makeAssignment({ subtaskId: 'make-pdf', dependsOn: ['write-story'] }), 'task-blocked');
+
+    expect(result.issues).toContain('Blocked by failed dependency: write-story');
+    expect(statuses[0]).toBe('ACTIVE');
+    expect(statuses.at(-1)).toBe('BLOCKED');
+    expect(router.generate).not.toHaveBeenCalled();
+  });
+});

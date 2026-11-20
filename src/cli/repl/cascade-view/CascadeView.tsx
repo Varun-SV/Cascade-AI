@@ -71,7 +71,10 @@ export function focusOf(root: TierNode, selectedId: string | null, activity: Act
 
 const strip = (label: string, role: string) => label.replace(new RegExp(`^\\[${role}\\]\\s*`, 'i'), '');
 
-function glyph(status: TierNode['status'], theme: Theme): { mark: string; color: string } {
+function glyph(status: TierNode['status'], theme: Theme, partial = false): { mark: string; color: string } {
+  // Finished with part of its work done: still a tick (its work is used), in
+  // the warning colour, with "partly" written beside it.
+  if (status === 'COMPLETED' && partial) return { mark: '✔', color: theme.colors.warning };
   switch (status) {
     case 'ACTIVE': return { mark: '◐', color: theme.colors.warning };
     case 'COMPLETED': return { mark: '✔', color: theme.colors.success };
@@ -114,7 +117,7 @@ function TreeColumn({ root, rows, focus, width: columnWidth, maxRows, theme, act
   return (
     <Box flexDirection="column" width={columnWidth}>
       {shown.map(({ node, prefix }) => {
-        const g = glyph(node.status, theme);
+        const g = glyph(node.status, theme, node.partial);
         const isFocus = node === focus;
         const time = elapsed(activity.get(node.id), node.status, now);
         if (node === root) {
@@ -129,7 +132,8 @@ function TreeColumn({ root, rows, focus, width: columnWidth, maxRows, theme, act
             </Text>
           );
         }
-        const tail = `${time ? ` ${time}` : ''}${isFocus && picked ? ' ◀' : ''}`;
+        const partly = node.status === 'COMPLETED' && node.partial ? ' partly' : '';
+        const tail = `${partly}${time ? ` ${time}` : ''}${isFocus && picked ? ' ◀' : ''}`;
         const room = width - prefix.length - node.role.length - 3 - tail.length;
         return (
           <Text key={node.id} wrap="truncate-end">
@@ -139,6 +143,7 @@ function TreeColumn({ root, rows, focus, width: columnWidth, maxRows, theme, act
             <Text color={isFocus ? theme.colors.foreground : node.status === 'COMPLETED' ? theme.colors.muted : theme.colors.foreground} bold={isFocus}>
               {fit(strip(node.label, node.role), Math.max(6, room))}
             </Text>
+            {partly ? <Text color={theme.colors.warning}>{partly}</Text> : null}
             <Text color={theme.colors.muted}>{time ? ` ${time}` : ''}</Text>
             {isFocus && picked ? <Text color={theme.colors.primary}> ◀</Text> : null}
           </Text>

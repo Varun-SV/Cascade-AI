@@ -120,6 +120,14 @@ export abstract class BaseTier extends EventEmitter {
     };
   }
 
+  /**
+   * Set when this tier finished with part of its work done: a section where
+   * some subtasks failed. Its status is still COMPLETED (the work that was done
+   * is used), and this travels beside it on both status emits, so a screen can
+   * show "partly done" instead of a plain tick.
+   */
+  protected partial = false;
+
   getStatus(): TierStatus {
     return this.status;
   }
@@ -137,6 +145,7 @@ export abstract class BaseTier extends EventEmitter {
       output,
       model: this.servingModel,
       ...this.graphFields(),
+      ...(this.partial ? { partial: true } : {}),
     };
     this.emit('status', event);
     this.emit('tier:status', event);
@@ -281,6 +290,7 @@ export abstract class BaseTier extends EventEmitter {
       ...(update.review !== undefined ? { review: update.review } : {}),
       model: this.servingModel,
       ...this.graphFields(),
+      ...(this.partial ? { partial: true } : {}),
     });
   }
 

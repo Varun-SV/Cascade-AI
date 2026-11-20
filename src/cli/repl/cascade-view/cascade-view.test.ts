@@ -143,6 +143,22 @@ describe('the cascade view', () => {
     expect(frame).toContain('dir story.pdf');
   });
 
+  it('a section done in part shows "partly", not the plain tick of a full success', () => {
+    const root = tree();
+    root.children![0]!.partial = true;
+    let frame = '';
+    const stdout = Object.assign(new EventEmitter(), { columns: 140, rows: 40, isTTY: true, write: (s: string) => { if (s.includes('T3')) frame = s; return true; } });
+    const app = render(React.createElement(CascadeView, {
+      root, activity: activity(), version: 1, selectedId: null, width: 140, maxRows: 9, theme: getTheme('cascade'),
+      peerEvents: [], showComms: false, now: 1_000_000 + 122_000,
+    }), { stdout: stdout as never, debug: true, patchConsole: false });
+    app.unmount();
+    const out = frame.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+    const line = (needle: string) => out.split('\n').find((l) => l.includes(needle)) ?? '';
+    expect(line('Core storage & ingestion')).toMatch(/T2 ✔ Core storage & ingestion.* partly/);
+    expect(line('Dashboard, CLI & verify')).not.toContain('partly');
+  });
+
   it('narrow: the same, with the detail under the tree', () => {
     const f = draw(80);
     const tree = f.indexOf('CLI & verification');

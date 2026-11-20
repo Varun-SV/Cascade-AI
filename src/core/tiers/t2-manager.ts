@@ -241,6 +241,8 @@ export class T2Manager extends BaseTier {
     this.setLabel(assignment.sectionTitle);
     const m = this.router.getModelForTier('T2');
     if (m) this.setServingModel(`${m.provider}:${m.id}`);
+    // A retry runs this again on the same instance: it starts with nothing done.
+    this.partial = false;
     this.setStatus('ACTIVE');
 
     this.sendStatusUpdate({
@@ -480,6 +482,7 @@ export class T2Manager extends BaseTier {
       }
 
       const isOk = overallStatus === 'COMPLETED' || overallStatus === 'PARTIAL';
+      this.partial = overallStatus === 'PARTIAL';
       this.setStatus(isOk ? 'COMPLETED' : 'FAILED', summary);
 
       // Say what actually happened. This read "Section complete" unconditionally
