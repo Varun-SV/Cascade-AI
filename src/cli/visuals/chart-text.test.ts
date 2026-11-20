@@ -71,3 +71,25 @@ describe('charts in a reply shown as plain lines', () => {
     expect(out).not.toContain('Item,Value');
   });
 });
+
+describe('Codex on 5721352', () => {
+  it('on a narrow terminal the labels give way and the value is never cut', () => {
+    const lines = draw('bar', 'Format,Words\nCommercial Novel Target,80000\nFlash Fiction,1000', 30);
+    for (const l of lines) expect(l.length, l).toBeLessThanOrEqual(30);
+    expect(lines.find((l) => l.startsWith('Comm'))).toMatch(/80,000$/);
+  });
+
+  it('many unclosed chart fences are passed over in linear time, as written', async () => {
+    const { expandCharts } = await import('./chart-text.js');
+    const text = '```chart:bar\nA,1\n'.repeat(8000);
+    const t0 = performance.now();
+    expect(expandCharts(text, 60)).toBe(text);
+    expect(performance.now() - t0).toBeLessThan(500);
+  });
+
+  it('a block that does not parse is passed over whole, openers inside it included', async () => {
+    const { expandCharts } = await import('./chart-text.js');
+    const block = '```chart:bar\nonly\n```chart:bar\n```';
+    expect(expandCharts(block, 60)).toBe(block);
+  });
+});

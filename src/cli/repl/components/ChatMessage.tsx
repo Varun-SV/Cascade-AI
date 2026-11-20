@@ -8,7 +8,7 @@ import chalk from 'chalk';
 import type { Theme } from '../../../types.js';
 import { chartKind, parseChartSpec } from '../../../core/documents/blocks.js';
 import { chartToLines } from '../../visuals/chart-text.js';
-import { fileLink, findImages, type Thumbnails } from '../../visuals/terminal-image.js';
+import { fileLink, findImages, thumbnailFor, type Thumbnails } from '../../visuals/terminal-image.js';
 
 interface ChatMessageProps {
   role: 'user' | 'assistant' | 'system' | 'error';
@@ -110,7 +110,7 @@ function renderContent(content: string, theme: Theme, thumbnails: Thumbnails, wi
     let at = 0;
     for (const img of findImages(part)) {
       if (img.start > at) out.push(<Text key={`${i}-t${at}`} wrap="wrap">{inline(part.slice(at, img.start), theme)}</Text>);
-      out.push(imageBlock(`${i}-i${img.start}`, img.alt, img.src, thumbnails[img.src], theme));
+      out.push(imageBlock(`${i}-i${img.start}`, img.alt, img.src, thumbnailFor(thumbnails, img.src), theme));
       at = img.end;
     }
     if (at < part.length) out.push(<Text key={`${i}-t${at}`} wrap="wrap">{inline(part.slice(at), theme)}</Text>);

@@ -64,11 +64,13 @@ function legend(spec: ChartSpec): string {
 
 function barLines(spec: ChartSpec, w: number): string[] {
   const many = spec.series.length > 1;
-  const label = Math.min(28, Math.max(...spec.categories.map((c) => c.length), 4));
   const values = spec.series.flatMap((s) => s.values);
   const max = Math.max(...values.map(Math.abs), 0);
   const valueWidth = Math.max(...values.map((v) => shortNumber(v).length));
-  const room = Math.max(8, w - label - valueWidth - 4);
+  // The value is never cut: labels give way first, down to 4 characters, then the bar.
+  const wanted = Math.min(28, Math.max(...spec.categories.map((c) => c.length), 4));
+  const label = Math.max(4, Math.min(wanted, w - valueWidth - 4 - 8));
+  const room = Math.max(1, w - label - valueWidth - 4);
   const out: string[] = [];
   spec.categories.forEach((cat, ci) => {
     spec.series.forEach((s, si) => {
@@ -176,19 +178,22 @@ function plotLines(spec: ChartSpec, w: number): string[] {
  */
 export function expandCharts(text: string, width: number): string {
   // Line by line, not one pattern over the whole reply: a reply is model-written and
-  // can be long, and a fence that never closes must not make the scan quadratic.
+  // can be long. A fence string found to have no closer after some line has none
+  // after any later line either, so it is never looked for twice; and a block that
+  // doesn't parse is passed over whole. Each line is read a bounded number of times.
   const lines = text.split('\n');
   const out: string[] = [];
+  const unclosed = new Set<string>();
   for (let i = 0; i < lines.length; i++) {
     const open = /^ {0,3}(`{3,})[ \t]*chart[ \t]*:(.*)$/i.exec(lines[i]!);
-    if (!open) { out.push(lines[i]!); continue; }
+    if (!open || unclosed.has(open[1]!)) { out.push(lines[i]!); continue; }
     const fence = open[1]!;
     let end = i + 1;
     while (end < lines.length && lines[end]!.trim() !== fence) end++;
+    if (end >= lines.length) { unclosed.add(fence); out.push(lines[i]!); continue; }
     const k = chartKind(open[2]!);
-    const spec = k && end < lines.length ? parseChartSpec(k, lines.slice(i + 1, end).join('\n')) : null;
-    if (!spec) { out.push(lines[i]!); continue; }
-    out.push(...chartToLines(spec, width));
+    const spec = k ? parseChartSpec(k, lines.slice(i + 1, end).join('\n')) : null;
+    out.push(...(spec ? chartToLines(spec, width) : lines.slice(i, end + 1)));
     i = end;
   }
   return out.join('\n');

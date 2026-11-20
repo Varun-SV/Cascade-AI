@@ -60,3 +60,38 @@ describe('images in a reply', () => {
     expect(fileLink('/tmp/a b.png', 'open')).toBe('\u001b]8;;file:///tmp/a%20b.png\u0007open\u001b]8;;\u0007');
   });
 });
+
+describe('Codex and CodeQL on 5721352', () => {
+  it('finding images stays fast on a long run of openers that never close', () => {
+    const t0 = performance.now();
+    expect(findImages('![\\'.repeat(50_000))).toEqual([]);
+    expect(findImages('![](!'.repeat(50_000))).toEqual([]);
+    expect(performance.now() - t0).toBeLessThan(500);
+  });
+
+  it('still finds images among them, with or without a title', () => {
+    const refs = findImages('![a](x.png "Title") ![b](y.png)![ ](z.png "unclosed');
+    expect(refs.map((r) => [r.alt, r.src])).toEqual([['a', 'x.png'], ['b', 'y.png']]);
+  });
+
+  it('a src named like an object property is no thumbnail', async () => {
+    const { thumbnailFor } = await import('./terminal-image.js');
+    const thumbs = await prepareThumbnails('![x](constructor) ![y](__proto__) ![z](toString)', dir, 60);
+    for (const src of ['constructor', '__proto__', 'toString']) expect(thumbnailFor(thumbs, src)).toBeUndefined();
+    expect(thumbnailFor({}, 'constructor')).toBeUndefined();
+  });
+
+  it('a link inside the project that points outside it is not followed', async () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-outside-'));
+    try {
+      fs.copyFileSync(path.join(dir, 'generated', 'cover.png'), path.join(outside, 'secret.png'));
+      fs.symlinkSync(outside, path.join(dir, 'linked'), 'dir');
+      expect(await prepareThumbnails('![s](linked/secret.png)', dir, 60)).toEqual({});
+      // Control: the same image, really inside the project, is drawn.
+      expect(Object.keys(await prepareThumbnails('![c](generated/cover.png)', dir, 60))).toEqual(['generated/cover.png']);
+    } finally {
+      fs.rmSync(path.join(dir, 'linked'), { force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
