@@ -26,6 +26,7 @@ function fakeSocket(candidates: MemoryCandidate[]) {
   return {
     emitted,
     progress: (p: unknown) => listeners.get('memories:progress')?.(p),
+    disconnect: () => listeners.get('disconnect')?.(undefined),
     finish: () => finish?.(),
     emit: vi.fn((event: string, payload?: unknown, ack?: (r: unknown) => void) => {
       emitted.push([event, payload]);
@@ -146,5 +147,19 @@ describe('MemoryModal', () => {
     fireEvent.click(go);
     expect(go).toBeChecked();
     expect(rust).not.toBeChecked();
+  });
+
+  it('a dropped connection ends the build with a message, never a spinner forever (Codex on 411b9d6)', async () => {
+    vi.mocked(api.fetchMemoryBuildChats).mockResolvedValue({ chats: [{ id: 'c1', title: 'Go', updatedAt: 2, turns: 4, worth: true }] });
+    const socket = fakeSocket([]);
+    render(<MemoryModal onClose={vi.fn()} socket={socket} providers={PROVIDERS} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Build from my chats/ }));
+    await screen.findByLabelText('Go', { exact: false });
+    fireEvent.click(screen.getByRole('button', { name: /Build memories/ }));
+    expect(screen.getByText(/Reading your chats/)).toBeInTheDocument();
+    act(() => socket.disconnect());
+    expect(screen.queryByText(/Reading your chats/)).not.toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent(/connection dropped/);
+    expect(screen.getByRole('button', { name: /Build memories/ })).toBeInTheDocument();
   });
 });

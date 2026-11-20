@@ -1458,7 +1458,7 @@ export class CloudStore {
     const row: DbMemoryRow = {
       id: randomUUID(), user_id: userId, content, category, durability,
       created_at: now, updated_at: now,
-      evidence: extra.evidence?.length ? JSON.stringify(extra.evidence.slice(0, MAX_MEMORY_EVIDENCE)) : null,
+      evidence: extra.evidence?.length ? JSON.stringify([...extra.evidence].sort((a, b) => a.at - b.at).slice(-MAX_MEMORY_EVIDENCE)) : null,
       source: extra.source ?? (category === 'session' ? 'session' : 'manual'),
       revisions: null,
     };
@@ -1493,7 +1493,8 @@ export class CloudStore {
         reworded ? change.content : current.content,
         change.category !== undefined ? change.category : current.category,
         change.durability ?? current.durability,
-        evidence.length ? JSON.stringify(evidence.slice(-MAX_MEMORY_EVIDENCE)) : null,
+        // Oldest first, the most recent kept: by when it was said, not when it was added.
+        evidence.length ? JSON.stringify([...evidence].sort((a, b) => a.at - b.at).slice(-MAX_MEMORY_EVIDENCE)) : null,
         revisions.length ? JSON.stringify(revisions) : null,
         Date.now(), id, userId,
       );

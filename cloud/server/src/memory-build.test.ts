@@ -147,4 +147,16 @@ describe('memory build (server)', () => {
     expect(target.evidence.length).toBe(12);
     expect(target.evidence.some((e) => e.at === 39)).toBe(true);
   });
+
+  it('keeps the most recent evidence by when it was said, whatever order it was added in (Codex on 411b9d6)', () => {
+    const ev = (at: number) => ({ conversationId: mine, quote: `q${at}`, at });
+    const m = store.addMemory(U('u1'), 'Writes Go', 'preferences', 'permanent', { evidence: Array.from({ length: 12 }, (_, k) => ev(28 + k)) });
+    store.reviseMemory(m.id, U('u1'), { evidence: [ev(40)] });
+    let kept = store.listMemories(U('u1')).find((x) => x.id === m.id)!.evidence.map((e) => e.at);
+    expect(kept).toEqual(Array.from({ length: 12 }, (_, k) => 29 + k));
+    // An older quote added later doesn't push out a newer one.
+    store.reviseMemory(m.id, U('u1'), { evidence: [ev(1)] });
+    kept = store.listMemories(U('u1')).find((x) => x.id === m.id)!.evidence.map((e) => e.at);
+    expect(kept).toEqual(Array.from({ length: 12 }, (_, k) => 29 + k));
+  });
 });

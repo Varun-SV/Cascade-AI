@@ -99,8 +99,17 @@ export default function MemoryBuilder({ socket, providers, onDone, onBack }: {
   useEffect(() => {
     if (!socket) return;
     const onProgress = (p: { read: number; total: number; found: number }) => setProgress(p);
+    // The server stops a build when its connection drops, and the answer can't
+    // reach the next connection: leave the running state, and offer to try again.
+    const onDisconnect = () => {
+      if (!running.current) return;
+      running.current = false;
+      setError('The connection dropped, so the build stopped. Try again.');
+      setStep('pick');
+    };
     socket.on('memories:progress', onProgress);
-    return () => { socket.off('memories:progress', onProgress); };
+    socket.on('disconnect', onDisconnect);
+    return () => { socket.off('memories:progress', onProgress); socket.off('disconnect', onDisconnect); };
   }, [socket]);
 
   const worthChosen = useMemo(() => (chats ?? []).filter((c) => c.worth && chosen.has(c.id)).length, [chats, chosen]);

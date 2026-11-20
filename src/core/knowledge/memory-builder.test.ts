@@ -163,3 +163,23 @@ describe('Codex on bca3626', () => {
     expect(c).toMatchObject({ status: 'known', content: 'Prefers Go for services' });
   });
 });
+
+describe('Codex on 411b9d6', () => {
+  it('the same words in another order are a change to review, not a repeat', async () => {
+    const { reconcile, sameClaim } = await import('./memory-builder.js');
+    const was = 'You are migrating the payments service from Python to Rust';
+    const now = 'You are migrating the payments service from Rust to Python';
+    expect(sameClaim(was, now)).toBe(false);
+    expect(sameClaim(was, `${was}.`)).toBe(true);
+    const [c] = reconcile([{ id: 'm1', content: was, category: 'projects', durability: 'permanent' }], [
+      { category: 'projects', content: now, durability: 'permanent', status: 'new', evidence: [{ conversationId: 'c', quote: 'q', at: 1 }] },
+    ]);
+    expect(c).toMatchObject({ status: 'revision', content: now, matches: { id: 'm1' } });
+    // Nor are two such candidates merged into one.
+    const ev = [{ conversationId: 'c', quote: 'q', at: 1 }];
+    expect(reconcile([], [
+      { category: 'projects', content: was, durability: 'permanent', status: 'new', evidence: ev },
+      { category: 'projects', content: now, durability: 'permanent', status: 'new', evidence: ev },
+    ])).toHaveLength(2);
+  });
+});

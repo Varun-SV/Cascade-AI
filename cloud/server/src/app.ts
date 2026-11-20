@@ -179,6 +179,9 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   // The Razorpay webhook signature is an HMAC of the RAW request body, so that
   // route needs the unparsed bytes — capture them and skip the JSON parser.
   const webhookRaw = express.raw({ type: '*/*', limit: '1mb' });
+  // Memories kept from a build: up to 200 a request, each up to 2,000 characters
+  // with its 12 quotes (the page sends no more), about 1.3 MB at most.
+  const memoryAcceptJson = express.json({ limit: '2mb' });
   // A transferred chat is bounded by parseHandoffBody at 500,000 characters.
   // Both handoff routes used to run through the 100kb default, so a long
   // transfer 413'd at the middleware and that validation never got to say
@@ -204,7 +207,7 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   // handoff) run their own parser; keep them off the tight 100kb default.
   const rawBodyRoutes = new Set([
     '/api/uploads', '/api/billing/webhook', '/api/files', '/api/memories/import',
-    '/api/handoff', '/api/conversations/import',
+    '/api/handoff', '/api/conversations/import', '/api/memories/accept',
     ...OPENAI_COMPAT_JSON_ROUTES,
   ]);
   app.use((req, res, next) => {
@@ -808,7 +811,7 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
     res.json({ chats: buildChatRows(store, req.session!.userId) });
   });
 
-  app.post('/api/memories/accept', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+  app.post('/api/memories/accept', sessionMiddleware(env.SESSION_SECRET), memoryAcceptJson, (req: AuthedRequest, res) => {
     try {
       res.json(acceptMemories(store, req.session!.userId, req.body));
     } catch (err) {

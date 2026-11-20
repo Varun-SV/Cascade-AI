@@ -202,8 +202,26 @@ function trimTail(w: string): string {
   return w.slice(0, end);
 }
 
+/** The meaningful words of a text, in order, each once. */
+function termList(s: string): string[] {
+  return [...new Set(s.toLowerCase().replace(/[^a-z0-9+#.\s-]/g, ' ').split(/\s+/).map(trimTail).filter((w) => w && !STOP.has(w)))];
+}
+
 function terms(s: string): Set<string> {
-  return new Set(s.toLowerCase().replace(/[^a-z0-9+#.\s-]/g, ' ').split(/\s+/).map(trimTail).filter((w) => w && !STOP.has(w)));
+  return new Set(termList(s));
+}
+
+/**
+ * Whether two wordings make the same claim: nearly the same words, and the words
+ * they share in the same order. Word overlap alone can't tell "from Python to
+ * Rust" from "from Rust to Python"; those are a change to review, not a repeat.
+ */
+export function sameClaim(a: string, b: string): boolean {
+  if (similarity(a, b) < SAME) return false;
+  const x = termList(a);
+  const y = termList(b);
+  const shared = new Set(x.filter((w) => y.includes(w)));
+  return x.filter((w) => shared.has(w)).join(' ') === y.filter((w) => shared.has(w)).join(' ');
 }
 
 /** How alike two memories read, 0–1 (shared words over all words). */
@@ -230,7 +248,7 @@ export const RELATED = 0.45;
 export function reconcile(existing: StoredMemory[], found: MemoryCandidate[]): MemoryCandidate[] {
   const merged: MemoryCandidate[] = [];
   for (const c of found) {
-    const twin = merged.find((m) => m.category === c.category && similarity(m.content, c.content) >= SAME);
+    const twin = merged.find((m) => m.category === c.category && sameClaim(m.content, c.content));
     if (twin) {
       for (const e of c.evidence) if (!twin.evidence.some((x) => x.conversationId === e.conversationId && x.quote === e.quote)) twin.evidence.push(e);
       if (c.durability === 'permanent') twin.durability = 'permanent';
@@ -245,7 +263,7 @@ export function reconcile(existing: StoredMemory[], found: MemoryCandidate[]): M
       if (!best || s > best.s) best = { m, s };
     }
     if (!best) continue;
-    if (best.s >= SAME) {
+    if (best.s >= SAME && sameClaim(best.m.content, c.content)) {
       c.status = 'known';
       c.matches = { id: best.m.id, content: best.m.content };
       // Already kept: keeping it adds where it was said, and leaves its wording alone.
