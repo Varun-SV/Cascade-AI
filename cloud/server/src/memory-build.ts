@@ -98,7 +98,12 @@ export function estimateFor(chats: ChatForMemory[], router: Pick<CascadeRouter, 
   return { ...est, model: model?.id ?? null, costUsd: estimateBuildCostUsd(est, model) };
 }
 
-export interface BuildProgress { read: number; total: number; found: number }
+export interface BuildProgress { read: number; total: number; found: number; failed: number }
+
+/** Why a call failed, by kind only: a provider's message can quote the request. */
+export type BuildFailure = 'auth' | 'other';
+const failureOf = (err: unknown): BuildFailure =>
+  err instanceof Error && /\b(401|403)\b|api[ _-]?key|unauthori[sz]ed|authentication|permission denied|invalid.*key/i.test(err.message) ? 'auth' : 'other';
 
 /**
  * Reads each chat and reconciles what they say with what is kept. Stops between
@@ -112,24 +117,38 @@ export async function buildMemories(opts: {
   signal: AbortSignal;
   onProgress?: (p: BuildProgress) => void;
   concurrency?: number;
-}): Promise<{ candidates: MemoryCandidate[]; read: number; total: number; cancelled: boolean }> {
+}): Promise<{ candidates: MemoryCandidate[]; read: number; total: number; failed: number; failure?: BuildFailure; cancelled: boolean }> {
   const queue = opts.chats.filter(chatWorthReading);
   const total = queue.length;
   const found: MemoryCandidate[] = [];
   let read = 0;
+  let failed = 0;
+  let failure: BuildFailure | undefined;
   let next = 0;
   const worker = async (): Promise<void> => {
     while (!opts.signal.aborted && next < queue.length) {
       const chat = queue[next++]!;
-      const got = await extractFromChat(chat, (p) => opts.generate(p, opts.signal));
+      // A chat whose call fails is skipped and counted, never taken for one with nothing in it.
+      let got: MemoryCandidate[] | null = null;
+      try {
+        got = await extractFromChat(chat, (p) => opts.generate(p, opts.signal));
+      } catch (err) {
+        if (opts.signal.aborted) return;
+        failed += 1;
+        // A rejected key says the most about what to do next.
+        if (failure !== 'auth') failure = failureOf(err);
+      }
       if (opts.signal.aborted) return;
-      found.push(...got);
-      read += 1;
-      opts.onProgress?.({ read, total, found: found.length });
+      if (got) { found.push(...got); read += 1; }
+      opts.onProgress?.({ read, total, found: found.length, failed });
     }
   };
   await Promise.all(Array.from({ length: Math.min(opts.concurrency ?? CONCURRENCY, Math.max(1, total)) }, worker));
-  return { candidates: reconcile(opts.existing, found), read, total, cancelled: opts.signal.aborted };
+  return {
+    candidates: reconcile(opts.existing, found), read, total, failed,
+    ...(failure ? { failure } : {}),
+    cancelled: opts.signal.aborted,
+  };
 }
 
 /** The store's memories, as the builder compares against them. */
@@ -278,6 +297,14 @@ export function attachMemoryBuild(
         signal: controller.signal,
         onProgress: (p) => socket.emit('memories:progress', p),
       });
+      // Nothing read and something failed: the build failed, and says why, rather
+      // than reporting that nothing looked worth remembering.
+      if (result.read === 0 && result.failed > 0 && !result.cancelled) {
+        reply?.({ error: result.failure === 'auth'
+          ? 'Your provider refused the request. Check its key in Settings.'
+          : 'None of the chats could be read: your provider returned an error each time. Try again in a moment.' });
+        return;
+      }
       outcome = result.cancelled ? 'stopped' : 'answered';
       reply?.(result);
     } catch (err) {

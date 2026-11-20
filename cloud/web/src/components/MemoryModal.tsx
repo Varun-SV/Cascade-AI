@@ -70,6 +70,15 @@ function MemoryRow({ m, onSaved, onDelete }: { m: Memory; onSaved: (m: Memory) =
   const source = sourceLine(m);
   const hasDetail = (m.evidence?.length ?? 0) > 0 || (m.revisions?.length ?? 0) > 0;
 
+  // Every field starts from the memory as it is now: a cancelled change to its
+  // category or durability must not ride along with the next edit's save.
+  function startEdit() {
+    setText(m.content);
+    setCategory(m.category ?? 'facts');
+    setDurability(m.durability);
+    setEditing(true);
+  }
+
   async function save() {
     const content = text.trim();
     if (!content) return;
@@ -96,7 +105,7 @@ function MemoryRow({ m, onSaved, onDelete }: { m: Memory; onSaved: (m: Memory) =
           />
           <div className="flex shrink-0 gap-1">
             <button type="button" aria-label="Save" onClick={save} className="p-1 text-success-500 hover:text-success-300"><Check size={14} /></button>
-            <button type="button" aria-label="Cancel" onClick={() => { setEditing(false); setText(m.content); }} className="p-1 text-ink-400 hover:text-ink-100"><X size={14} /></button>
+            <button type="button" aria-label="Cancel" onClick={() => setEditing(false)} className="p-1 text-ink-400 hover:text-ink-100"><X size={14} /></button>
           </div>
         </div>
       </div>
@@ -108,7 +117,7 @@ function MemoryRow({ m, onSaved, onDelete }: { m: Memory; onSaved: (m: Memory) =
       <div className="flex items-start justify-between gap-2">
         <span className="flex-1 whitespace-pre-wrap break-words">{m.content}</span>
         <div className="flex shrink-0 gap-1">
-          <button type="button" aria-label="Edit memory" onClick={() => setEditing(true)} className="p-1 text-ink-400 hover:text-ink-100"><Pencil size={13} /></button>
+          <button type="button" aria-label="Edit memory" onClick={startEdit} className="p-1 text-ink-400 hover:text-ink-100"><Pencil size={13} /></button>
           <button type="button" aria-label="Delete memory" onClick={() => onDelete(m.id)} className="p-1 text-ink-400 hover:text-danger-500"><Trash2 size={13} /></button>
         </div>
       </div>

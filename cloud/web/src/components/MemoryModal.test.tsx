@@ -162,4 +162,40 @@ describe('MemoryModal', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(/connection dropped/);
     expect(screen.getByRole('button', { name: /Build memories/ })).toBeInTheDocument();
   });
+
+  it('a cancelled edit leaves nothing behind for the next save (Codex on 556f88d)', async () => {
+    vi.mocked(api.updateMemory).mockImplementation(async (id, content, category, durability) => ({ memory: mem(id, content, category ?? null, { durability }) }));
+    render(<MemoryModal onClose={vi.fn()} />);
+    const prefs = await screen.findByRole('region', { name: 'Preferences' });
+    fireEvent.click(within(prefs).getByRole('button', { name: 'Edit memory' }));
+    fireEvent.change(within(prefs).getByRole('combobox', { name: 'Category' }), { target: { value: 'goals' } });
+    fireEvent.change(within(prefs).getByRole('combobox', { name: 'How long should this hold?' }), { target: { value: 'volatile' } });
+    fireEvent.click(within(prefs).getByRole('button', { name: 'Cancel' }));
+    fireEvent.click(within(prefs).getByRole('button', { name: 'Edit memory' }));
+    fireEvent.change(within(prefs).getByRole('textbox', { name: 'Memory' }), { target: { value: 'Prefers TypeScript, always' } });
+    fireEvent.click(within(prefs).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(api.updateMemory).toHaveBeenCalledWith('1', 'Prefers TypeScript, always', 'preferences', 'permanent'));
+  });
+
+  it('a save that fails part way keeps what was saved out of the retry, so nothing is saved twice (Codex on 556f88d)', async () => {
+    vi.mocked(api.fetchMemoryBuildChats).mockResolvedValue({ chats: [{ id: 'c1', title: 'Go', updatedAt: 2, turns: 4, worth: true }] });
+    const ev = [{ conversationId: 'c1', quote: 'q', at: 1 }];
+    const many: MemoryCandidate[] = Array.from({ length: 250 }, (_, k) => ({ category: 'facts', content: `Fact ${k}`, durability: 'permanent', status: 'new', evidence: ev }));
+    const sent: number[] = [];
+    vi.mocked(api.acceptMemories).mockReset()
+      .mockImplementationOnce(async (items) => { sent.push(items.length); return { saved: items.map((it, k) => mem(`n${k}`, it.content, it.category)) }; })
+      .mockImplementationOnce(async (items) => { sent.push(items.length); throw new Error('network down'); })
+      .mockImplementationOnce(async (items) => { sent.push(items.length); return { saved: items.map((it, k) => mem(`m${k}`, it.content, it.category)) }; });
+    const socket = fakeSocket(many);
+    render(<MemoryModal onClose={vi.fn()} socket={socket} providers={PROVIDERS} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Build from my chats/ }));
+    await screen.findByLabelText('Go', { exact: false });
+    fireEvent.click(screen.getByRole('button', { name: /Build memories/ }));
+    act(() => socket.finish());
+    fireEvent.click(await screen.findByRole('button', { name: /Save 250 memories/ }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Saved 200; the rest could not be. network down/);
+    fireEvent.click(screen.getByRole('button', { name: /Save 50 memories/ }));
+    expect(await screen.findByText(/Saved 250 memories/)).toBeInTheDocument();
+    expect(sent).toEqual([200, 50, 50]);
+  });
 });

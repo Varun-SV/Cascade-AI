@@ -42,7 +42,8 @@ describe('extractFromChat', () => {
     const out = await extractFromChat(c, reply([{ category: 'PROJECT', memory: 'You deploy to Railway.', durable: false, quote: 'deploy to Railway' }]));
     expect(out[0]).toMatchObject({ category: 'projects', durability: 'volatile' });
     expect(await extractFromChat(c, async () => 'not json at all')).toEqual([]);
-    expect(await extractFromChat(c, async () => { throw new Error('rate limited'); })).toEqual([]);
+    // A failed call is the caller's to know about, not an empty answer (Codex on 556f88d).
+    await expect(extractFromChat(c, async () => { throw new Error('rate limited'); })).rejects.toThrow('rate limited');
   });
 
   it('a chat with nothing of the person\'s own is not read at all', async () => {

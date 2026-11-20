@@ -68,7 +68,10 @@ describe('memory build (server)', () => {
     expect(progress).toEqual([1]);
 
     const failing = await buildMemories({ chats, existing: [], signal: new AbortController().signal, generate: async () => { throw new Error('rate limited'); } });
-    expect(failing).toMatchObject({ read: 1, candidates: [] });
+    // Counted as failed, not as read with nothing in it (Codex on 556f88d).
+    expect(failing).toMatchObject({ read: 0, failed: 1, failure: 'other', candidates: [] });
+    const refused = await buildMemories({ chats, existing: [], signal: new AbortController().signal, generate: async () => { throw new Error('401 invalid x-api-key'); } });
+    expect(refused).toMatchObject({ failed: 1, failure: 'auth' });
 
     const stop = new AbortController();
     stop.abort();
@@ -123,7 +126,7 @@ describe('memory build (server)', () => {
     const done = await first;
     expect(done).toMatchObject({ read: 1, total: 1, cancelled: false });
     expect(done.candidates[0]).toMatchObject({ category: 'projects', content: 'Works on a payments team' });
-    expect(socket.emitted).toContainEqual(['memories:progress', { read: 1, total: 1, found: 1 }]);
+    expect(socket.emitted).toContainEqual(['memories:progress', { read: 1, total: 1, found: 1, failed: 0 }]);
     // Nothing is saved until the person keeps it; the build's cost is on their ledger.
     expect(store.listMemories(U('u1'))).toEqual([]);
     expect(store.spend.firstSpendAt(U('u1'))).toEqual(expect.any(Number));
@@ -158,5 +161,20 @@ describe('memory build (server)', () => {
     store.reviseMemory(m.id, U('u1'), { evidence: [ev(1)] });
     kept = store.listMemories(U('u1')).find((x) => x.id === m.id)!.evidence.map((e) => e.at);
     expect(kept).toEqual(Array.from({ length: 12 }, (_, k) => 29 + k));
+  });
+
+  it('a build where every call fails says why, rather than that nothing was worth remembering (Codex on 556f88d)', async () => {
+    const socket = new EventEmitter();
+    const failing = (message: string) => ({
+      getModelForTier: () => undefined,
+      generate: async () => { throw new Error(message); },
+      getStats: () => ({ totalCostUsd: 0, totalTokens: 0, costByTierModel: {}, tokensByTierModel: {}, untrackedByTierModel: {} }),
+    });
+    let router = failing('401 Unauthorized: invalid x-api-key');
+    attachMemoryBuild({ on: (e, fn) => socket.on(e, fn), emit: () => true }, store, U('u1'), async () => router as never);
+    const call = () => new Promise<any>((resolve) => { socket.emit('memories:build', { providers: PROVIDERS, conversationIds: [mine] }, resolve); });
+    expect(await call()).toEqual({ error: expect.stringMatching(/refused the request. Check its key/) });
+    router = failing('socket hang up');
+    expect(await call()).toEqual({ error: expect.stringMatching(/None of the chats could be read/) });
   });
 });

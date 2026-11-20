@@ -166,8 +166,9 @@ ${chatTranscript(chat)}`;
  */
 export async function extractFromChat(chat: ChatForMemory, generate: (prompt: string) => Promise<string>): Promise<MemoryCandidate[]> {
   if (!chatWorthReading(chat)) return [];
-  let raw: string;
-  try { raw = await generate(memoryPrompt(chat)); } catch { return []; }
+  // A failed call is the caller's to know about (a rejected key looks nothing
+  // like a chat with nothing in it): it is thrown, not taken for an empty answer.
+  const raw = await generate(memoryPrompt(chat));
   const parsed = parseModelJson<unknown[]>(raw, 'array');
   if (!Array.isArray(parsed)) return [];
   const words = userWords(chat);

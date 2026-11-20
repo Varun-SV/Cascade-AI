@@ -66,9 +66,11 @@ export default function MemoryBuilder({ socket, providers, onDone, onBack }: {
   const [chats, setChats] = useState<MemoryBuildChat[] | null>(null);
   const [chosen, setChosen] = useState<Set<string>>(new Set());
   const [estimate, setEstimate] = useState<MemoryBuildEstimate | null>(null);
-  const [progress, setProgress] = useState({ read: 0, total: 0, found: 0 });
+  const [progress, setProgress] = useState({ read: 0, total: 0, found: 0, failed: 0 });
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [stopped, setStopped] = useState(false);
+  /** Chats the provider failed on: skipped, and said so in the review. */
+  const [failedChats, setFailedChats] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [savedCount, setSavedCount] = useState(0);
@@ -98,7 +100,7 @@ export default function MemoryBuilder({ socket, providers, onDone, onBack }: {
 
   useEffect(() => {
     if (!socket) return;
-    const onProgress = (p: { read: number; total: number; found: number }) => setProgress(p);
+    const onProgress = (p: { read: number; total: number; found: number; failed?: number }) => setProgress({ ...p, failed: p.failed ?? 0 });
     // The server stops a build when its connection drops, and the answer can't
     // reach the next connection: leave the running state, and offer to try again.
     const onDisconnect = () => {
@@ -122,13 +124,14 @@ export default function MemoryBuilder({ socket, providers, onDone, onBack }: {
     if (!socket || chosen.size === 0) return;
     setError(null);
     setStopped(false);
-    setProgress({ read: 0, total: worthChosen, found: 0 });
+    setProgress({ read: 0, total: worthChosen, found: 0, failed: 0 });
     setStep('running');
     running.current = true;
-    socket.emit('memories:build', { providers, conversationIds: [...chosen] }, (r: { candidates: MemoryCandidate[]; cancelled: boolean } | { error: string }) => {
+    socket.emit('memories:build', { providers, conversationIds: [...chosen] }, (r: { candidates: MemoryCandidate[]; cancelled: boolean; failed?: number } | { error: string }) => {
       running.current = false;
       if ('error' in r) { setError(r.error); setStep('pick'); return; }
       setStopped(r.cancelled);
+      setFailedChats(r.failed ?? 0);
       setDrafts(initialDrafts(r.candidates));
       setStep('review');
     });
@@ -150,22 +153,27 @@ export default function MemoryBuilder({ socket, providers, onDone, onBack }: {
   }
 
   async function save() {
-    const items = drafts.filter((d) => d.keep && d.content.trim()).map((d) => ({
-      category: d.category, content: d.content.trim(), durability: d.durability, evidence: d.evidence.slice(0, MAX_EVIDENCE),
-      ...(d.matches && d.status !== 'new' ? { revises: d.matches.id } : {}),
-    }));
-    if (!items.length) { onDone(); return; }
+    const pending = drafts.filter((d) => d.keep && d.content.trim());
+    if (!pending.length) { onDone(); return; }
     setSaving(true);
     setError(null);
+    let count = savedCount;
     try {
-      let count = 0;
-      for (let at = 0; at < items.length; at += ACCEPT_BATCH) {
-        count += (await acceptMemories(items.slice(at, at + ACCEPT_BATCH))).saved.length;
+      for (let at = 0; at < pending.length; at += ACCEPT_BATCH) {
+        const batch = pending.slice(at, at + ACCEPT_BATCH);
+        count += (await acceptMemories(batch.map((d) => ({
+          category: d.category, content: d.content.trim(), durability: d.durability, evidence: d.evidence.slice(0, MAX_EVIDENCE),
+          ...(d.matches && d.status !== 'new' ? { revises: d.matches.id } : {}),
+        })))).saved.length;
+        // Saved: out of the review, so a retry after a later batch fails sends
+        // only what is left, and nothing is saved twice.
+        const done = new Set(batch);
+        setDrafts((prev) => prev.filter((d) => !done.has(d)));
+        setSavedCount(count);
       }
-      setSavedCount(count);
       setStep('saved');
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not save.');
+      setError(`${count ? `Saved ${count}; the rest could not be. ` : ''}${e instanceof Error ? e.message : 'Could not save.'}`);
     } finally {
       setSaving(false);
     }
@@ -257,6 +265,7 @@ export default function MemoryBuilder({ socket, providers, onDone, onBack }: {
         </div>
         <p className="text-xs text-ink-400">
           {progress.read} of {progress.total} chats read · {progress.found} {progress.found === 1 ? 'suggestion' : 'suggestions'} so far
+          {progress.failed > 0 && ` · ${progress.failed} could not be read`}
         </p>
         <button type="button" onClick={stop} className="flex w-fit items-center gap-1.5 rounded-md border border-elev/15 px-3 py-1.5 text-xs hover:bg-elev/[0.06]">
           <Square size={12} /> Stop and review what was found
@@ -285,6 +294,7 @@ export default function MemoryBuilder({ socket, providers, onDone, onBack }: {
         {drafts.length === 0
           ? 'Nothing in these chats looked worth remembering.'
           : `${drafts.length} ${drafts.length === 1 ? 'suggestion' : 'suggestions'}${stopped ? ' (stopped early)' : ''}. Untick what is wrong, and edit anything before saving.`}
+        {failedChats > 0 && ` ${failedChats} ${failedChats === 1 ? 'chat' : 'chats'} could not be read (your provider returned an error) and were skipped.`}
       </p>
       <div className="flex max-h-[45dvh] flex-col gap-4 overflow-y-auto">
         {groups.map((g) => (
