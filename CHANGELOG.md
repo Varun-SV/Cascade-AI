@@ -5,6 +5,26 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.96.0 - 2026-11-20
+
+### Added
+- **Skills written with AI (Cascade Cloud).** Your own model helps with
+  three things in the Skills panel:
+  - **Write it with AI.** In New skill, say what it is for in a sentence or
+    two. The name, description and instructions are filled in for you to edit
+    before Create. Press Rewrite to try again.
+  - **Improve with AI.** On a skill you have, say what should change. The
+    proposed instructions are shown beside the current ones, and nothing
+    changes until you choose "Use this" and save.
+  - **Suggest from my chats.** Pick chats (your 40 most recent are chosen at
+    the start) and see the cost first. Your model suggests skills for tasks you
+    come back to. Each says why, and which chats it came from. Only your own
+    words are read, not the replies, and a suggestion must come from at least
+    two of the chats it was shown. Add one to edit it before it is saved, or
+    dismiss it.
+  - Every call can be stopped, runs on your own providers, and shows in your
+    spend report. A rejected key or a failed call is reported as such.
+
 ## 0.95.0 - 2026-11-20
 
 ### Changed
