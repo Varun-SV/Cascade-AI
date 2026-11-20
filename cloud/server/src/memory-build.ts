@@ -78,14 +78,25 @@ export const BuildRequestSchema = z.object({
 export type BuildRequest = z.infer<typeof BuildRequestSchema>;
 
 /** A router on the person's own providers, for the T3 calls a build makes. */
-export async function memoryRouter(providers: ProviderConfig[]): Promise<CascadeRouter> {
+export async function memoryRouter(providers: ProviderConfig[], maxTokens?: number): Promise<CascadeRouter> {
   const config = CascadeConfigSchema.parse({
-    ...buildCloudConfig(providers, MAX_BUILD_COST_USD, { learnFromOutcomes: false }),
+    ...buildCloudConfig(providers, MAX_BUILD_COST_USD, { learnFromOutcomes: false, ...(maxTokens ? { maxTokensPerRun: maxTokens } : {}) }),
     enabledTools: [],
   });
   const router = new CascadeRouter();
   await router.init(config);
   return router;
+}
+
+/**
+ * The token allowance for a build of these chats. A run's default (200,000)
+ * would stop a large build part way, and the router refuses work at 80% of its
+ * allowance: this covers every chat's prompt and its longest answer, with room
+ * to spare. The cost ceiling (MAX_BUILD_COST_USD) still applies.
+ */
+export function tokenBudgetFor(chats: ChatForMemory[]): number {
+  const est = estimateBuild(chats);
+  return Math.ceil(((est.inputTokens + est.chats * EXTRACT_MAX_TOKENS) * 1.5) / 0.8) + 10_000;
 }
 
 export interface BuildEstimate {
@@ -168,7 +179,10 @@ export function storedForBuild(memories: CloudMemory[]): StoredMemory[] {
 export function recordBuildSpend(store: CloudStore, userId: string, router: CascadeRouter, outcome: 'answered' | 'stopped' | 'failed'): void {
   try {
     const s = router.getStats();
-    if (!(s.totalCostUsd > 0) && !(s.totalTokens > 0)) return;
+    // A call to an unpriced model that reported no usage still happened: it is
+    // recorded as of unknown cost, not dropped.
+    const untracked = Object.values(s.untrackedByTierModel ?? {}).some((m) => Object.values(m).some((n) => n > 0));
+    if (!(s.totalCostUsd > 0) && !(s.totalTokens > 0) && !untracked) return;
     store.recordSpend(spendEntryFromRun({
       id: `memories:${randomUUID()}`, userId, conversationId: null, at: Date.now(), costUsd: s.totalCostUsd,
       why: {
@@ -274,7 +288,7 @@ export function attachMemoryBuild(
   socket: MemorySocket,
   store: CloudStore,
   userId: string,
-  makeRouter: (providers: ProviderConfig[]) => Promise<CascadeRouter> = memoryRouter,
+  makeRouter: (providers: ProviderConfig[], maxTokens?: number) => Promise<CascadeRouter> = memoryRouter,
 ): { abort(): void } {
   let running: AbortController | null = null;
 
@@ -299,10 +313,11 @@ export function attachMemoryBuild(
     let router: CascadeRouter | null = null;
     let outcome: 'answered' | 'stopped' | 'failed' = 'failed';
     try {
-      router = await makeRouter(parsed.data.providers as ProviderConfig[]);
+      const chats = chatsForMemory(store, userId, parsed.data.conversationIds);
+      router = await makeRouter(parsed.data.providers as ProviderConfig[], tokenBudgetFor(chats));
       const r = router;
       const result = await buildMemories({
-        chats: chatsForMemory(store, userId, parsed.data.conversationIds),
+        chats,
         existing: storedForBuild(store.listMemories(userId)),
         generate: async (prompt, signal) => {
           const out = await r.generate('T3', {

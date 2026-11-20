@@ -13,7 +13,11 @@ export interface BuildSocket {
 
 type Step = 'pick' | 'running' | 'review' | 'saved';
 
-interface Draft extends MemoryCandidate { keep: boolean }
+interface Draft extends MemoryCandidate {
+  keep: boolean;
+  /** The reviewer changed its wording, category or durability: saved as an update, never as evidence only. */
+  edited?: boolean;
+}
 
 function formatCost(usd: number | null): string {
   if (usd === null) return 'an unknown amount (this model has no published price)';
@@ -152,7 +156,10 @@ export default function MemoryBuilder({ socket, providers, onDone, onBack }: {
       // One update per kept memory: ticking one unticks any other update to it.
       const exclusive = change.keep === true && target?.status === 'revision' && target.matches;
       return prev.map((d, j) => {
-        if (j === i) return { ...d, ...change };
+        if (j === i) {
+          const edits = 'content' in change || 'category' in change || 'durability' in change;
+          return { ...d, ...change, ...(edits ? { edited: true } : {}) };
+        }
         if (exclusive && d.status === 'revision' && d.matches?.id === target.matches!.id) return { ...d, keep: false };
         return d;
       });
@@ -173,7 +180,7 @@ export default function MemoryBuilder({ socket, providers, onDone, onBack }: {
           ...(d.matches && d.status !== 'new' ? { revises: d.matches.id } : {}),
           // Already kept and left as it was: only where it was said is added, so
           // it never puts back a wording an update in an earlier batch replaced.
-          ...(d.status === 'known' && d.matches && d.content.trim() === d.matches.content ? { evidenceOnly: true } : {}),
+          ...(d.status === 'known' && d.matches && !d.edited && d.content.trim() === d.matches.content ? { evidenceOnly: true } : {}),
         })))).saved.length;
         // Saved: out of the review, so a retry after a later batch fails sends
         // only what is left, and nothing is saved twice.

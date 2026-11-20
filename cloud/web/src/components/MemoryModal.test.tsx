@@ -254,4 +254,24 @@ describe('MemoryModal', () => {
       { category: 'preferences', content: 'Prefers TypeScript', durability: 'permanent', evidence: ev, revises: '1', evidenceOnly: true },
     ]));
   });
+
+  it('an "already kept" memory whose category or durability was changed is saved as an update (Codex on 15152a6)', async () => {
+    vi.mocked(api.fetchMemoryBuildChats).mockResolvedValue({ chats: [{ id: 'c1', title: 'Go', updatedAt: 2, turns: 4, worth: true }] });
+    vi.mocked(api.acceptMemories).mockReset().mockResolvedValue({ saved: [mem('1', 'Prefers TypeScript', 'instructions')] });
+    const ev = [{ conversationId: 'c1', quote: 'TypeScript', at: 1 }];
+    const socket = fakeSocket([
+      { category: 'preferences', content: 'Prefers TypeScript', durability: 'permanent', status: 'known', matches: { id: '1', content: 'Prefers TypeScript' }, evidence: ev },
+    ]);
+    render(<MemoryModal onClose={vi.fn()} socket={socket} providers={PROVIDERS} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Build from my chats/ }));
+    await screen.findByLabelText('Go', { exact: false });
+    await startBuild();
+    act(() => socket.finish());
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Keep: Prefers TypeScript' }));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Category' }), { target: { value: 'instructions' } });
+    fireEvent.click(screen.getByRole('button', { name: /Save 1 memory/ }));
+    await waitFor(() => expect(api.acceptMemories).toHaveBeenCalledWith([
+      { category: 'instructions', content: 'Prefers TypeScript', durability: 'permanent', evidence: ev, revises: '1' },
+    ]));
+  });
 });

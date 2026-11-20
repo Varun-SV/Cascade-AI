@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import { CloudStore } from './db.js';
-import { acceptMemories, attachMemoryBuild, buildChatRows, buildMemories, chatsForMemory, estimateFor } from './memory-build.js';
+import { acceptMemories, attachMemoryBuild, buildChatRows, buildMemories, chatsForMemory, estimateFor, recordBuildSpend, tokenBudgetFor } from './memory-build.js';
 
 const PROVIDERS = [{ type: 'anthropic', apiKey: 'sk-test' }];
 const LONG = 'I am a backend engineer in Lisbon and I write most of my services in Go these days, mostly for a payments team that ships every week';
@@ -202,5 +202,31 @@ describe('memory build (server)', () => {
     const now = store.listMemories(U('u1')).find((m) => m.id === kept.id)!;
     expect(now).toMatchObject({ content: 'Building Cascade with Rust', category: 'projects', durability: 'volatile' });
     expect(now.evidence.map((e) => e.at)).toEqual([1, 2]);
+  });
+
+  it('a large build gets a token allowance for all of it, not a run\'s 200,000 (Codex on 15152a6)', async () => {
+    const big = Array.from({ length: 300 }, (_, k) => ({ id: `c${k}`, messages: [{ role: 'user' as const, content: LONG.repeat(20), createdAt: k }] }));
+    const budget = tokenBudgetFor(big);
+    // The router refuses work at 80% of it: every chat's prompt and longest answer must fit under that.
+    expect(budget * 0.8).toBeGreaterThan(300 * 2000);
+    expect(budget).toBeGreaterThan(200_000);
+    // The build asks for it.
+    const socket = new EventEmitter();
+    let asked: number | undefined;
+    const router = {
+      getModelForTier: () => undefined,
+      generate: async () => ({ content: '[]', finishReason: 'stop' }),
+      getStats: () => ({ totalCostUsd: 0, totalTokens: 0, costByTierModel: {}, tokensByTierModel: {}, untrackedByTierModel: {} }),
+    };
+    attachMemoryBuild({ on: (e, fn) => socket.on(e, fn), emit: () => true }, store, U('u1'), async (_p, maxTokens) => { asked = maxTokens; return router as never; });
+    await new Promise((resolve) => { socket.emit('memories:build', { providers: PROVIDERS, conversationIds: [mine] }, resolve); });
+    expect(asked).toBe(tokenBudgetFor(chatsForMemory(store, U('u1'), [mine])));
+  });
+
+  it('records a build whose only calls were to an unpriced model that reported no usage (Codex on 15152a6)', () => {
+    recordBuildSpend(store, U('u1'), {
+      getStats: () => ({ totalCostUsd: 0, totalTokens: 0, costByTierModel: {}, tokensByTierModel: {}, untrackedByTierModel: { T3: { 'local-x': 2 } } }),
+    } as never, 'answered');
+    expect(store.spend.firstSpendAt(U('u1'))).toEqual(expect.any(Number));
   });
 });
