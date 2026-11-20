@@ -81,9 +81,29 @@ export class ExitGuard {
    */
   begin(): void {
     this.previous();
+    this.writeProvisional();
+  }
+
+  /**
+   * Native code (a sandbox's V8 isolate) is about to run, or has finished (null).
+   * A crash in native code ends the process with no handler run, so nothing
+   * would overwrite the provisional record: it is rewritten now to name what
+   * was running, and the next start can say so.
+   */
+  noteNative(doing: string | null): void {
+    if (this.written || (this.native ?? null) === doing) return;
+    this.native = doing ?? undefined;
+    this.writeProvisional();
+  }
+
+  private native: string | undefined;
+
+  private writeProvisional(): void {
     this.writeRecord({
       clean: false,
-      reason: 'Cascade was stopped without warning: another program ended it (for example `taskkill /F` or `kill -9`), the terminal window was closed, or the computer shut down.',
+      reason: this.native
+        ? `Cascade stopped without warning while ${this.native}. Most likely that crashed: a crash in native code ends the whole process with no chance to save anything. Another program ending Cascade, or the window being closed, looks the same.`
+        : 'Cascade was stopped without warning: another program ended it (for example `taskkill /F` or `kill -9`), the terminal window was closed, the computer shut down, or Cascade crashed in native code.',
     }, true);
   }
 
@@ -117,7 +137,9 @@ export class ExitGuard {
       pid: process.pid,
       version: this.version,
       uptimeSec: Math.round((this.now() - this.startedAt) / 1000),
-      ...(this.activity && !provisional ? { running: this.activity } : {}),
+      ...(provisional
+        ? (this.native ? { running: this.native } : {})
+        : (this.activity ? { running: this.activity } : {})),
       ...(this.survived.length ? { survived: [...this.survived] } : {}),
     };
     try {
