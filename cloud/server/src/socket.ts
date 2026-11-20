@@ -2,6 +2,7 @@
 //  Cascade Cloud Server — Socket.IO wiring
 // ─────────────────────────────────────────────
 
+import { attachMemoryBuild } from './memory-build.js';
 import { randomUUID } from 'node:crypto';
 import type { Server as HttpServer } from 'node:http';
 import { Server as SocketIOServer, type Socket } from 'socket.io';
@@ -881,6 +882,9 @@ export function attachSocket(
       }
     }
 
+    // Memories from the person's chats: estimate, build, cancel (memory-build.ts).
+    const memoryBuild = attachMemoryBuild(socket, store, userId);
+
     socket.on('chat:run', async (payload: unknown, ack?: ChatRunAck) => {
       // The run holds a transport, not this socket. Same structural surface
       // (`RunSocket` in runs.ts — emit plus on/off), so runChatTurn is
@@ -1003,6 +1007,8 @@ export function attachSocket(
     // client is already reconnecting. Hold the runs for the grace window and
     // abort only if nobody comes back — see RECONNECT_GRACE_MS.
     socket.on('disconnect', () => {
+      // Nobody is left to review what a build finds: stop spending on it.
+      memoryBuild.abort();
       const parkKey = resumeKey(socket);
 
       // Release ownership FIRST, on every disconnect — including the idle one

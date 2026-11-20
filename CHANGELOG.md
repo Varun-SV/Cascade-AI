@@ -5,6 +5,37 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.94.0 - 2026-11-20
+
+### Added
+- **Build memories from your chats (Cascade Cloud).** In the Memory panel,
+  **Build from my chats** reads the chats you choose and suggests what is worth
+  remembering about you.
+  - **You choose and you see the cost first.** Your chats are listed by title,
+    and ones too short to learn from can't be chosen. Before you start, it
+    says how many chats it will read, with which model, and about what it will
+    cost. It runs on your own providers, and its cost shows in your spend
+    report.
+  - **You can stop it.** Progress shows as it reads. Stopping keeps what it
+    found so far for you to review.
+  - **Nothing is saved until you review it.** Each suggestion shows your own
+    words from the chat. One the model can't back with a quote of yours is
+    dropped before you see it. You can keep, edit, re-categorize or drop each
+    one.
+  - **It knows what you already have.** A suggestion matching a memory you
+    keep is marked "Already kept"; keeping it only records another place you
+    said it. One that says it differently is offered as an update, and the old
+    wording is kept in that memory's history.
+
+### Changed
+- **The Memory panel is grouped by category:** About you, Preferences,
+  Projects & work, Goals, Instructions, and Facts. A memory saved earlier
+  under a label of your own keeps it and is shown under "Other".
+  - A memory built from your chats shows how many chats it came from. It opens
+    to show your words and any earlier wordings.
+  - Memories true for now, such as a current project, are marked "for now",
+    and Cascade prefers what you say in the moment over them.
+
 ## 0.93.0 - 2026-11-20
 
 ### Added

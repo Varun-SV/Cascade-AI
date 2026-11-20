@@ -22,7 +22,9 @@ import {
   type AuthedRequest,
 } from './auth/session.js';
 import { providerIsUsable, providerRationsSessions } from './remote-browser.js';
-import { remoteBrowserControls } from './runs.js';
+import { formatZodError, remoteBrowserControls } from './runs.js';
+import { acceptMemories, buildChatRows } from './memory-build.js';
+import { ZodError } from 'zod';
 import { NativeAuthStore, isLoopbackRedirect, hashRefreshToken } from './native-auth.js';
 import { githubAuthUrl, exchangeGithubCode, googleAuthUrl, exchangeGoogleCode, type OAuthProfile } from './auth/oauth.js';
 import { limitsForPlan, ORPHAN_UPLOAD_TTL_MS, todayKey, checkStorageQuota } from './entitlements.js';
@@ -797,6 +799,21 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
     const memory = store.updateMemory(id, req.session!.userId, content, parseCategory(req.body?.category), parseDurability(req.body?.durability));
     if (!memory) { res.status(404).json({ error: 'Not found' }); return; }
     res.json({ memory });
+  });
+
+  // Building memories from chats: the picker's list (titles and counts, never
+  // what was said), and saving what the person kept from a build. The build
+  // itself runs over the socket (memories:build), with the person's providers.
+  app.get('/api/memories/build/chats', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    res.json({ chats: buildChatRows(store, req.session!.userId) });
+  });
+
+  app.post('/api/memories/accept', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {
+    try {
+      res.json(acceptMemories(store, req.session!.userId, req.body));
+    } catch (err) {
+      res.status(400).json({ error: err instanceof ZodError ? formatZodError(err) : 'Invalid request' });
+    }
   });
 
   app.delete('/api/memories/:id', sessionMiddleware(env.SESSION_SECRET), (req: AuthedRequest, res) => {

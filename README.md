@@ -840,6 +840,15 @@ cascade identity set-default reviewer
 cascade -i reviewer            # run as one identity for this session
 ```
 
+### Memories in Cascade Cloud
+
+Cascade Cloud keeps memories about you and brings them into every chat. You can see them in the Memory panel, grouped as About you, Preferences, Projects & work, Goals, Instructions and Facts.
+
+- **Add one yourself** under a category. Mark it "True for now" if it will change, such as a current project.
+- **Build from my chats** reads chats you choose, with your own providers, after showing what it will cost. It suggests memories, each backed by a quote of your own words. Nothing is saved until you keep it. A suggestion that matches a memory you have adds to that memory instead of duplicating it, and earlier wordings are kept in its history.
+
+The builder lives in the SDK (`extractFromChat`, `reconcile` and `estimateBuild` in `core/knowledge/memory-builder.ts`), behind a small `MemoryBackend` interface, so another store can use it.
+
 ### Session export
 
 ```
