@@ -62,6 +62,7 @@ import { ModelsDisplay, type ModelPickerSelection } from './components/ModelsDis
 import { CostTracker } from './components/CostTracker.js';
 import { CompactStatus } from './components/CompactStatus.js';
 import { ChatMessage } from './components/ChatMessage.js';
+import { prepareThumbnails, type Thumbnails } from '../visuals/terminal-image.js';
 import { PlanApproval, type PlanApprovalRequest } from './components/PlanApproval.js';
 
 // Keep only the most recent peer-comms events — a long run can produce
@@ -150,8 +151,11 @@ interface TierStatusEvent {
   partial?: boolean;
 }
 
+/** A message as the REPL holds it: a reply carries the thumbnails it shows (see terminal-image.ts). */
+type ReplMessage = Message & { thumbnails?: Thumbnails };
+
 interface ReplState {
-  messages: Message[];
+  messages: ReplMessage[];
   agentTree: TierNode | null;
   isStreaming: boolean;
   isExecuting: boolean;
@@ -177,7 +181,7 @@ interface ReplState {
 type ReplAction =
   | { type: 'ADD_MESSAGE'; message: Message }
   | { type: 'APPEND_STREAM'; text: string }
-  | { type: 'COMMIT_STREAM'; finalText: string; timestamp?: string }
+  | { type: 'COMMIT_STREAM'; finalText: string; timestamp?: string; thumbnails?: Thumbnails }
   | { type: 'SET_TREE'; tree: TierNode | null }
   | { type: 'UPDATE_COST'; tokens: number; costUsd: number; byProvider: Record<string,number>; byTier: Record<string,number>; costByTier: Record<string,number>; tokensByTier: Record<string,number>; costByFeature: Record<string,number>; savedUsd: number; savedPct: number }
   | { type: 'SET_APPROVAL'; request: ApprovalRequest | null }
@@ -200,11 +204,12 @@ function replReducer(state: ReplState, action: ReplAction): ReplState {
     case 'APPEND_STREAM':
       return { ...state, isStreaming: true, streamBuffer: state.streamBuffer + action.text };
     case 'COMMIT_STREAM': {
-      const msg: Message = {
+      const msg: ReplMessage = {
         id: randomUUID(),
         role: 'assistant',
         content: action.finalText,
         timestamp: action.timestamp ?? new Date().toISOString(),
+        ...(action.thumbnails && Object.keys(action.thumbnails).length ? { thumbnails: action.thumbnails } : {}),
       };
       return { ...state, messages: [...state.messages, msg], isStreaming: false, streamBuffer: '', activeTool: null };
     }
@@ -1335,7 +1340,11 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
       const stats = cascade.getRouter().getStats();
       const savings = cascade.getRouter().getDelegationSavings();
       dispatch({ type: 'UPDATE_COST', tokens: stats.totalTokens, costUsd: stats.totalCostUsd, byProvider: stats.callsByProvider, byTier: stats.callsByTier, costByTier: stats.costByTier, tokensByTier: stats.tokensByTier, costByFeature: stats.costByFeature, savedUsd: savings.savedUsd, savedPct: savings.savedPct });
-      dispatch({ type: 'COMMIT_STREAM', finalText: result.output, timestamp: new Date().toISOString() });
+      // Drawn now, before the reply goes to the scrollback, which never draws it again.
+      const thumbnails = result.output
+        ? await prepareThumbnails(result.output, workspacePath, process.stdout.columns ?? 80, [workspacePath, statePath(workspacePath)]).catch(() => ({}))
+        : {};
+      dispatch({ type: 'COMMIT_STREAM', finalText: result.output, timestamp: new Date().toISOString(), thumbnails });
       persistMessage('assistant', result.output, new Date().toISOString());
       // Mirror the finished turn into the shared cloud session (best-effort),
       // with what this run cost: the cloud's /why and spend report read it.
@@ -1549,7 +1558,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
   const transcriptRows = altScreen
     ? computeTranscriptRows(termSize.rows, liveBudget, { ...budgetOpts, treeVisible: state.agentTree != null })
     : 0;
-  const transcriptLines = altScreen ? flattenTranscript(state.messages) : [];
+  const transcriptLines = altScreen ? flattenTranscript(state.messages, width) : [];
   const transcript = altScreen ? windowTranscript(transcriptLines, historyOffset, transcriptRows) : null;
   transcriptMetaRef.current = { rows: transcriptRows, lines: transcriptLines.length };
 
@@ -1623,6 +1632,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
               content={msg.content}
               timestamp={msg.timestamp}
               theme={theme}
+              {...(msg.thumbnails ? { thumbnails: msg.thumbnails } : {})}
             />
           )}
         </Static>

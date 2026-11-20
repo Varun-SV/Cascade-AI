@@ -1,0 +1,195 @@
+// ─────────────────────────────────────────────
+//  Cascade AI — Charts drawn in the terminal
+// ─────────────────────────────────────────────
+//
+//  A reply's ```chart:<kind>``` block (core/documents/blocks.ts) is a real
+//  chart in the web and desktop apps. In the CLI it was printed as its CSV.
+//  These draw it with characters every terminal has:
+//
+//  - bar:               a row per category (per series), ▇ scaled to the widest
+//  - line, area, scatter: braille dots (2×4 per cell), axis labels at the edges
+//  - pie, doughnut:     one bar split by share, and a legend with percentages
+//
+//  Plain functions from a ChartSpec to lines of text, coloured with chalk
+//  (which falls back to fewer colours, or none, by itself). The numbers are
+//  always written out too, so nothing depends on telling colours apart.
+
+import chalk from 'chalk';
+import { chartKind, parseChartSpec, type ChartSpec } from '../../core/documents/blocks.js';
+
+/** Series colours: distinct on dark and light backgrounds, in this order. */
+const PALETTE = ['#4C8DFF', '#2DD4BF', '#F5A524', '#E5484D', '#A78BFA', '#38B0DE', '#F472B6', '#84CC16'];
+const colour = (i: number) => chalk.hex(PALETTE[i % PALETTE.length]!);
+
+/** A number as people write it: 9542 → "9,542", 0.125 → "0.13", 1.5e6 → "1.5M". */
+export function shortNumber(n: number): string {
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return `${trim(n / 1e9)}B`;
+  if (abs >= 1e6) return `${trim(n / 1e6)}M`;
+  if (abs >= 1e4) return Math.round(n).toLocaleString('en-US');
+  if (Number.isInteger(n)) return n.toLocaleString('en-US');
+  return trim(n);
+}
+const trim = (n: number): string => n.toFixed(2).replace(/\.?0+$/, '');
+
+const pad = (s: string, n: number): string => (s.length >= n ? s : s + ' '.repeat(n - s.length));
+const cut = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0, Math.max(0, n - 1))}…`);
+
+/** The lines that draw `spec` within `width` columns. */
+export function chartToLines(spec: ChartSpec, width: number): string[] {
+  const w = Math.max(30, Math.min(width, 120));
+  const lines: string[] = [];
+  if (spec.title) lines.push(chalk.bold(spec.title));
+  switch (spec.kind) {
+    case 'pie':
+    case 'doughnut':
+      lines.push(...pieLines(spec, w));
+      break;
+    case 'line':
+    case 'area':
+    case 'scatter':
+      lines.push(...plotLines(spec, w));
+      break;
+    default:
+      lines.push(...barLines(spec, w));
+  }
+  return lines;
+}
+
+function legend(spec: ChartSpec): string {
+  return spec.series.map((s, i) => `${colour(i)('■')} ${s.name}`).join('   ');
+}
+
+// ── Bars ─────────────────────────────────────────────────────────
+
+function barLines(spec: ChartSpec, w: number): string[] {
+  const many = spec.series.length > 1;
+  const label = Math.min(28, Math.max(...spec.categories.map((c) => c.length), 4));
+  const values = spec.series.flatMap((s) => s.values);
+  const max = Math.max(...values.map(Math.abs), 0);
+  const valueWidth = Math.max(...values.map((v) => shortNumber(v).length));
+  const room = Math.max(8, w - label - valueWidth - 4);
+  const out: string[] = [];
+  spec.categories.forEach((cat, ci) => {
+    spec.series.forEach((s, si) => {
+      const v = s.values[ci] ?? 0;
+      const cells = max > 0 ? Math.abs(v) / max * room : 0;
+      const whole = Math.floor(cells);
+      const bar = '█'.repeat(whole) + (cells - whole >= 0.5 ? '▌' : '') || (v !== 0 ? '▏' : '');
+      const name = si === 0 ? pad(cut(cat, label), label) : ' '.repeat(label);
+      // A negative value is drawn the same length, marked by its own sign.
+      out.push(`${name}  ${colour(si)(bar)} ${shortNumber(v)}`);
+    });
+    if (many && ci < spec.categories.length - 1) out.push('');
+  });
+  if (many) out.push('', legend(spec));
+  return out;
+}
+
+// ── Pie ──────────────────────────────────────────────────────────
+
+function pieLines(spec: ChartSpec, w: number): string[] {
+  const s = spec.series[0]!;
+  const parts = spec.categories.map((name, i) => ({ name, v: Math.max(0, s.values[i] ?? 0), i }));
+  const total = parts.reduce((a, p) => a + p.v, 0);
+  if (total <= 0) return [chalk.dim('(nothing to draw: every value is zero)')];
+  const room = Math.max(10, w - 2);
+  // Largest remainder, so the cells add up to exactly the width.
+  const exact = parts.map((p) => p.v / total * room);
+  const cells = exact.map(Math.floor);
+  let left = room - cells.reduce((a, c) => a + c, 0);
+  exact.map((e, i) => ({ r: e - Math.floor(e), i })).sort((a, b) => b.r - a.r).forEach(({ i }) => { if (left > 0) { cells[i]! += 1; left -= 1; } });
+  const bar = parts.map((p, i) => colour(p.i)('█'.repeat(cells[i]!))).join('');
+  const name = Math.min(28, Math.max(...parts.map((p) => p.name.length)));
+  const rows = parts.map((p) => `${colour(p.i)('■')} ${pad(cut(p.name, name), name)}  ${pad(`${(p.v / total * 100).toFixed(1)}%`, 6)}  ${shortNumber(p.v)}`);
+  return [bar, '', ...rows];
+}
+
+// ── Line, area, scatter: braille ─────────────────────────────────
+
+// The dot each (x, y) within a 2×4 braille cell sets, as an offset from U+2800.
+const DOT = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
+
+function plotLines(spec: ChartSpec, w: number): string[] {
+  const values = spec.series.flatMap((s) => s.values);
+  let lo = Math.min(...values, spec.kind === 'area' ? 0 : Infinity);
+  let hi = Math.max(...values);
+  if (hi === lo) { hi += 1; lo -= 1; }
+  const axis = Math.max(shortNumber(hi).length, shortNumber(lo).length);
+  const cols = Math.max(10, w - axis - 3);
+  const rows = Math.max(4, Math.min(12, Math.round(cols / 5)));
+  const dotsX = cols * 2;
+  const dotsY = rows * 4;
+  const cells: number[][] = Array.from({ length: rows }, () => new Array<number>(cols).fill(0));
+  const owner: number[][] = Array.from({ length: rows }, () => new Array<number>(cols).fill(-1));
+  const set = (x: number, y: number, si: number): void => {
+    if (x < 0 || y < 0 || x >= dotsX || y >= dotsY) return;
+    const r = Math.floor(y / 4);
+    const c = Math.floor(x / 2);
+    cells[r]![c]! |= DOT[y % 4]![x % 2]!;
+    owner[r]![c] = si;
+  };
+  const n = spec.categories.length;
+  const xAt = (i: number): number => (n <= 1 ? 0 : Math.round(i / (n - 1) * (dotsX - 1)));
+  const yAt = (v: number): number => Math.round((hi - v) / (hi - lo) * (dotsY - 1));
+  spec.series.forEach((s, si) => {
+    let prev: { x: number; y: number } | null = null;
+    s.values.forEach((v, i) => {
+      const p = { x: xAt(i), y: yAt(v) };
+      if (spec.kind === 'scatter') { set(p.x, p.y, si); return; }
+      if (prev) {
+        // A straight line between neighbours, one dot per step along the longer side.
+        const steps = Math.max(Math.abs(p.x - prev.x), Math.abs(p.y - prev.y), 1);
+        for (let k = 0; k <= steps; k++) {
+          const x = Math.round(prev.x + (p.x - prev.x) * k / steps);
+          const y = Math.round(prev.y + (p.y - prev.y) * k / steps);
+          set(x, y, si);
+          if (spec.kind === 'area') for (let yy = y + 1; yy <= yAt(Math.max(lo, 0)); yy++) if ((x + yy) % 2 === 0) set(x, yy, si);
+        }
+      } else set(p.x, p.y, si);
+      prev = p;
+    });
+  });
+  const out: string[] = [];
+  for (let r = 0; r < rows; r++) {
+    const tick = r === 0 ? shortNumber(hi) : r === rows - 1 ? shortNumber(lo) : '';
+    let line = '';
+    for (let c = 0; c < cols; c++) {
+      const ch = String.fromCodePoint(0x2800 + cells[r]![c]!);
+      line += owner[r]![c]! >= 0 ? colour(owner[r]![c]!)(ch) : ch;
+    }
+    out.push(`${tick.padStart(axis)} ┤${line}`);
+  }
+  out.push(`${' '.repeat(axis)} └${'─'.repeat(cols)}`);
+  const first = spec.categories[0] ?? '';
+  const last = n > 1 ? spec.categories[n - 1]! : '';
+  const gap = Math.max(1, cols - first.length - last.length);
+  out.push(`${' '.repeat(axis + 2)}${cut(first, cols)}${last ? ' '.repeat(gap) + cut(last, Math.max(1, cols - first.length - 1)) : ''}`);
+  if (spec.series.length > 1) out.push('', legend(spec));
+  return out;
+}
+
+/**
+ * `text` with each ```chart:<kind>``` block that parses replaced by its drawing,
+ * for places that show a reply as plain lines (the alt-screen transcript). A
+ * block that doesn't parse is left as written.
+ */
+export function expandCharts(text: string, width: number): string {
+  // Line by line, not one pattern over the whole reply: a reply is model-written and
+  // can be long, and a fence that never closes must not make the scan quadratic.
+  const lines = text.split('\n');
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const open = /^ {0,3}(`{3,})[ \t]*chart[ \t]*:(.*)$/i.exec(lines[i]!);
+    if (!open) { out.push(lines[i]!); continue; }
+    const fence = open[1]!;
+    let end = i + 1;
+    while (end < lines.length && lines[end]!.trim() !== fence) end++;
+    const k = chartKind(open[2]!);
+    const spec = k && end < lines.length ? parseChartSpec(k, lines.slice(i + 1, end).join('\n')) : null;
+    if (!spec) { out.push(lines[i]!); continue; }
+    out.push(...chartToLines(spec, width));
+    i = end;
+  }
+  return out.join('\n');
+}
