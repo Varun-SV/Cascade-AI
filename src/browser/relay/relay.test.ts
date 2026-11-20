@@ -947,3 +947,64 @@ describe('closedRootHolds: what a closed shadow root may not hide from a screens
     expect(closedRootHolds(open)).toBe(false);
   });
 });
+
+describe('what the tab says reaches the agent in the order the tab said it', () => {
+  it('a reply, then an event in the same read: the agent gets the reply first', async () => {
+    // A cross-site frame's snapshot (Page.getFrameTree, address still empty) and then
+    // its navigation, written by the tab together. The relay used to forward the event
+    // at once and the reply only after reading it, so the agent applied the empty
+    // snapshot last and kept the frame at no address for good.
+    const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+    await new Promise((r) => wss.once('listening', r));
+    wss.on('connection', (ws) => ws.on('message', (raw) => {
+      const { id, method } = JSON.parse(String(raw)) as { id: number; method: string };
+      if (method !== 'Page.getFrameTree') { ws.send(JSON.stringify({ id, result: {} })); return; }
+      const socket = (ws as unknown as { _socket: { cork(): void; uncork(): void } })._socket;
+      socket.cork();
+      ws.send(JSON.stringify({ id, result: { frameTree: { frame: { id: 'F', loaderId: 'L1', url: '', securityOrigin: '://', mimeType: 'text/html' } } } }));
+      ws.send(JSON.stringify({ method: 'Page.frameNavigated', params: { type: 'Navigation', frame: { id: 'F', loaderId: 'L2', url: 'https://a.test/one', securityOrigin: 'https://a.test', mimeType: 'text/html' } } }));
+      process.nextTick(() => socket.uncork());
+    }));
+    const url = `ws://127.0.0.1:${(wss.address() as AddressInfo).port}/`;
+    try {
+      const { lease, relay, agent } = setup(url);
+      const out = sent(agent);
+      const served = relay.serve(agent as unknown as WebSocket);
+      agent.emit('message', JSON.stringify({ id: 1, method: 'Page.getFrameTree', params: {}, sessionId: 'cascade-tab-1' }));
+      await vi.waitFor(() => expect(out.some((m) => m.includes('Page.frameNavigated'))).toBe(true));
+      const reply = out.findIndex((m) => m.includes('"id":1') && m.includes('frameTree'));
+      const navigated = out.findIndex((m) => m.includes('Page.frameNavigated'));
+      expect(reply).toBeGreaterThan(-1);
+      expect(navigated).toBeGreaterThan(reply);
+      lease.revoke('done');
+      await served;
+    } finally { wss.close(); }
+  });
+});
+
+describe('a reply that arrives after its command was refused (Codex on a1819ec)', () => {
+  it('holds no place in line: events after the hand-back still reach the agent', async () => {
+    // The user takes over while a command waits for its reply: the command is
+    // refused and answered. Its late reply must not take a place in line that
+    // nothing would ever free, or every event after the hand-back waits for good.
+    const tab = await answeringTab(new Set(['Page.getFrameTree']));
+    try {
+      const { lease, relay, agent } = setup(tab.url);
+      const out = sent(agent);
+      const served = relay.serve(agent as unknown as WebSocket);
+      await settle();
+      agent.emit('message', JSON.stringify({ id: 1, method: 'Page.getFrameTree', params: {}, sessionId: 'cascade-tab-1' }));
+      await vi.waitFor(() => expect(tab.methods).toContain('Page.getFrameTree'));
+      lease.suspend();
+      await vi.waitFor(() => expect(replied(out, 1)).toBe(true));
+      tab.release();
+      await settle();
+      lease.handBack();
+      tab.emit({ method: 'Page.frameNavigated', params: { type: 'Navigation', frame: { id: 'F', loaderId: 'L', url: 'https://a.test/after', securityOrigin: 'https://a.test', mimeType: 'text/html' } } });
+      const navigatedTo = (m: string) => (JSON.parse(m) as { method?: string; params?: { frame?: { url?: string } } });
+      await vi.waitFor(() => expect(out.map(navigatedTo).some((m) => m.method === 'Page.frameNavigated' && m.params?.frame?.url === 'https://a.test/after')).toBe(true));
+      lease.revoke('done');
+      await served;
+    } finally { tab.close(); }
+  });
+});

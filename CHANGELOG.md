@@ -26,6 +26,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (`@screenshots/...`). Terminals with clickable links open the image in
     your viewer. A web address is never fetched: it stays a link.
 
+## 0.97.3 - 2026-11-20
+
+### Fixed
+- **On your own browser, the agent no longer loses track of a frame from
+  another site.** When a page added a frame from another site, the agent
+  sometimes kept seeing it with no address at all, for good. The relay
+  forwards the browser's events as they arrive, but reads and filters its
+  answers to the agent's own requests first. So a frame's snapshot, taken
+  before it loaded, could reach the agent after the news that it had loaded,
+  and the agent kept the older, empty one. Everything the browser says now
+  reaches the agent in the order the browser said it. This was also the
+  intermittent failure in the relay's browser tests.
 ## 0.97.2 - 2026-11-20
 
 ### Fixed
