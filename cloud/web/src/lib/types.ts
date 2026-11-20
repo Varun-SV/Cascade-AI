@@ -89,6 +89,28 @@ export interface Memory {
   durability: MemoryDurability;
   createdAt: number;
   updatedAt: number;
+  /** The person's own words it rests on, when it was built from their chats. */
+  evidence?: MemoryEvidence[];
+  /** 'manual' | 'session' | 'chats' | 'import'. */
+  source?: string;
+  /** Earlier wordings, oldest first. */
+  revisions?: Array<{ content: string; at: number }>;
+}
+
+export interface MemoryEvidence { conversationId: string; quote: string; at: number }
+
+/** A chat in the build picker: its title and size, never what was said. */
+export interface MemoryBuildChat { id: string; title: string | null; updatedAt: number; turns: number; worth: boolean }
+
+export interface MemoryBuildEstimate { chats: number; inputTokens: number; outputTokens: number; model: string | null; costUsd: number | null }
+
+export interface MemoryCandidate {
+  category: string;
+  content: string;
+  durability: MemoryDurability;
+  evidence: MemoryEvidence[];
+  status: 'new' | 'known' | 'revision';
+  matches?: { id: string; content: string };
 }
 
 /** Run-explorer report: the decision trail + router economics of one run. */

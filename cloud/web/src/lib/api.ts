@@ -1,4 +1,4 @@
-import type { CloudConversation, CloudMessage, CloudUser, Memory, MemoryDurability, Skill } from './types.js';
+import type { CloudConversation, CloudMessage, CloudUser, Memory, MemoryBuildChat, MemoryDurability, MemoryEvidence, Skill } from './types.js';
 
 export interface CloudConfig {
   /**
@@ -289,6 +289,24 @@ export function fetchTierMix(): Promise<{ mix: Array<{ tier: string; count: numb
 
 export function fetchMemories(): Promise<{ memories: Memory[] }> {
   return json(fetch('/api/memories', { credentials: 'include' }));
+}
+
+export function fetchMemoryBuildChats(): Promise<{ chats: MemoryBuildChat[] }> {
+  return json(fetch('/api/memories/build/chats', { credentials: 'include' }));
+}
+
+/** Saves the memories the person kept from a build: new ones, or more for one they have (`revises`). */
+export function acceptMemories(items: Array<{
+  category: string; content: string; durability: MemoryDurability; evidence: MemoryEvidence[]; revises?: string; evidenceOnly?: boolean;
+}>): Promise<{ saved: Memory[] }> {
+  return json(
+    fetch('/api/memories/accept', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items }),
+    }),
+  );
 }
 
 export function addMemory(
