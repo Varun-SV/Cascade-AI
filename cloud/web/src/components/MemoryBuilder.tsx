@@ -71,6 +71,8 @@ export default function MemoryBuilder({ socket, providers, onDone, onBack }: {
   const [chosen, setChosen] = useState<Set<string>>(new Set());
   const [estimate, setEstimate] = useState<MemoryBuildEstimate | null>(null);
   const [estimateError, setEstimateError] = useState<string | null>(null);
+  /** Bumped on each reconnect: an estimate whose answer was lost with the old connection is asked again. */
+  const [connection, setConnection] = useState(0);
   const [progress, setProgress] = useState({ read: 0, total: 0, found: 0, failed: 0 });
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [stopped, setStopped] = useState(false);
@@ -107,7 +109,7 @@ export default function MemoryBuilder({ socket, providers, onDone, onBack }: {
       });
     }, 300);
     return () => clearTimeout(t);
-  }, [socket, providers, chosen]);
+  }, [socket, providers, chosen, connection]);
 
   useEffect(() => {
     if (!socket) return;
@@ -120,9 +122,15 @@ export default function MemoryBuilder({ socket, providers, onDone, onBack }: {
       setError('The connection dropped, so the build stopped. Try again.');
       setStep('pick');
     };
+    const onConnect = () => setConnection((c) => c + 1);
     socket.on('memories:progress', onProgress);
     socket.on('disconnect', onDisconnect);
-    return () => { socket.off('memories:progress', onProgress); socket.off('disconnect', onDisconnect); };
+    socket.on('connect', onConnect);
+    return () => {
+      socket.off('memories:progress', onProgress);
+      socket.off('disconnect', onDisconnect);
+      socket.off('connect', onConnect);
+    };
   }, [socket]);
 
   const worthChosen = useMemo(() => (chats ?? []).filter((c) => c.worth && chosen.has(c.id)).length, [chats, chosen]);

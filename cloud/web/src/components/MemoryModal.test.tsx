@@ -297,4 +297,24 @@ describe('MemoryModal', () => {
     await act(async () => finishSave());
     expect(await screen.findByText(/Saved 1 memory/)).toBeInTheDocument();
   });
+
+  it('an estimate lost with a dropped connection is asked again on reconnect (Codex on 4f40e94)', async () => {
+    vi.mocked(api.fetchMemoryBuildChats).mockResolvedValue({ chats: [{ id: 'c1', title: 'Go', updatedAt: 2, turns: 4, worth: true }] });
+    const listeners = new Map<string, (p?: unknown) => void>();
+    const acks: Array<(r: unknown) => void> = [];
+    const socket = {
+      emit: vi.fn((event: string, _payload?: unknown, ack?: (r: unknown) => void) => { if (event === 'memories:estimate') acks.push(ack!); }),
+      on: (e: string, fn: (p?: unknown) => void) => { listeners.set(e, fn); },
+      off: (e: string) => { listeners.delete(e); },
+    };
+    render(<MemoryModal onClose={vi.fn()} socket={socket} providers={PROVIDERS} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Build from my chats/ }));
+    await screen.findByLabelText('Go', { exact: false });
+    await waitFor(() => expect(acks).toHaveLength(1));
+    // The answer to that one is lost with the connection; a new one is asked once it is back.
+    act(() => { listeners.get('disconnect')?.(); listeners.get('connect')?.(); });
+    await waitFor(() => expect(acks).toHaveLength(2));
+    act(() => acks[1]!({ chats: 1, inputTokens: 1000, outputTokens: 350, model: 'm', costUsd: 0.01 }));
+    expect(screen.getByRole('button', { name: /Build memories/ })).toBeEnabled();
+  });
 });
