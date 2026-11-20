@@ -272,7 +272,9 @@ describe('browser_control capture', () => {
     const img = assets.get(`generated/${saved[0]!.name}`)!;
     expect([img.width, img.height]).toEqual([176, 126]);
     expect(img.boxes).toEqual({ e3: { x: 48, y: 48, w: 80, h: 30 } });
-    expect(out).not.toContain('e9');
+    // As a ref on a control line: the file name's random hex can hold "e9" too
+    // ("…-e93c7bd8.jpg" failed CI once), and that is not a control.
+    expect(out).not.toMatch(/^\s*e9\b/m);
   });
 
   it('says why when no picture could be taken', async () => {
