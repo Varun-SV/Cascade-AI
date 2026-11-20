@@ -5,6 +5,31 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.93.0 - 2026-11-20
+
+### Added
+- **A live model leaderboard on the landing page.** It shows how each model
+  has actually done on each kind of task (coding, analysis, writing, data,
+  mixed) across every run Cascade has routed. These are the numbers routing
+  itself learns from, not a published benchmark.
+  - **Ranked by what is known at least.** Each model's score is the range its
+    success rate is 90% likely to be in, and models are ranked by the low end
+    of it. A model with a few lucky runs doesn't outrank one proven over
+    hundreds. Confidence is shown, and a model needs 5 runs to be ranked.
+  - **Runs, success rate, cost per run** and the **change over the last
+    week** beside each, with the **published benchmark** for the same kind of
+    task in a column of its own, for comparison.
+  - **Nothing is forgotten.** The scores are all-time. A model Cascade stops
+    choosing stays on the board, marked *inactive* after 30 days without a
+    run. The server keeps a snapshot a day beside the learning pool
+    (`leaderboard-history.json` on the data volume) for the trends and for
+    telling when a model's runs stopped.
+  - **Counts only.** It is built from the shared learning pool, which holds
+    counts and sums per model and task type: no prompt, answer or account.
+    `GET /api/leaderboard` is public and cached for five minutes. A "How we
+    score" note on the page says all this.
+  - The ranking is in the SDK (`buildLeaderboard`), using the same Beta
+    posterior routing uses, so the board and the router agree.
 ## 0.92.0 - 2026-11-20
 
 ### Added

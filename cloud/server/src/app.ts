@@ -39,6 +39,7 @@ import {
 } from './billing.js';
 import { HandoffStore, parseHandoffBody } from './handoff.js';
 import { DownloadResolver, isTargetId, isCascadeReleaseAsset, RELEASES_PAGE_URL } from './downloads.js';
+import { LeaderboardService } from './leaderboard.js';
 import { DocumentTooLargeError, ExtractionBusyError, MAX_DOCUMENT_BYTES, parseDocument, resolveDocumentMime } from './documents.js';
 import { connectorCatalog, getConnector, validateRemoteMcpUrl } from './mcp.js';
 import { McpOAuthFlows, encodeOAuthBlob, resolveRunMcpServers } from './mcp-oauth.js';
@@ -148,6 +149,8 @@ export interface CreateAppOptions {
    * suite both slow and dependent on someone else's rate limit.
    */
   downloads?: DownloadResolver;
+  /** The public model leaderboard. One is made over DATA_DIR when not given. */
+  leaderboard?: LeaderboardService;
   /**
    * The browser relay, when this deployment has it on. Passed in rather than
    * built here because it also owns WebSocket endpoints on the HTTP server,
@@ -239,6 +242,20 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
 
   app.get('/health', (_req, res) => {
     res.json({ ok: true });
+  });
+
+  // Public: how each model has done on each kind of task across Cascade's runs on
+  // this deployment. Counts from the shared learning pool only, never what a run
+  // said or whose it was (see leaderboard.ts).
+  const leaderboard = options.leaderboard ?? new LeaderboardService({ dataDir: path.resolve(env.DATA_DIR) });
+  app.get('/api/leaderboard', async (_req, res) => {
+    try {
+      const board = await leaderboard.get();
+      res.set('Cache-Control', 'public, max-age=300');
+      res.json(board);
+    } catch {
+      res.status(503).json({ error: 'The leaderboard could not be read just now.' });
+    }
   });
 
   // Public, non-sensitive — lets the SPA decide which login buttons to show

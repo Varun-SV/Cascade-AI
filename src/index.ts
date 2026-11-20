@@ -75,6 +75,7 @@ export { ALLOWANCE_UNAVAILABLE, RemoteBrowserController } from './browser/remote
 export type { BrowserFrame, BrowserInput, BrowserControlState, BrowserBusyInfo, BrowserAllowance } from './browser/remote/controller.js';
 export { GenericCdpProvider, isCdpEndpoint } from './browser/remote/generic-cdp.js';
 export { SteelProvider, isHostedSteel, isUsableSteelBase, isUsableSteelKey } from './browser/remote/steel.js';
+export { buildLeaderboard, withSnapshot, publishedBenchmark, LEADERBOARD_TASKS, MIN_RANKED_RUNS, INACTIVE_AFTER_DAYS, type Leaderboard, type LeaderboardRow, type LeaderboardHistory, type PoolStat } from './core/router/leaderboard.js';
 export { RelayBrowserProvider } from './browser/remote/relay-provider.js';
 export { TabbedBrowserController, SAME_SITE_TABS, type RunBrowserControl } from './browser/remote/tabbed-controller.js';
 export { MAX_RUN_TABS, DEFAULT_RUN_TABS } from './browser/relay/device.js';

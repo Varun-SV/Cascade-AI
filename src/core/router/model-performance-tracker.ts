@@ -36,6 +36,12 @@ interface ModelStat {
   totalContextTokens: number;
   /** Sum of context tokens on the FAILED samples only. */
   failureContextTokens: number;
+  /**
+   * How many of `sampleCount` were explicit ratings rather than runs. A rating is
+   * an observation of the model, not another execution of it: run totals and
+   * per-run costs leave it out. Absent in pools written before it was kept.
+   */
+  explicitCount?: number;
 }
 
 interface FeatureStat {
@@ -135,6 +141,7 @@ export class ModelPerformanceTracker {
       sampleCount: s.sampleCount + 1,
       totalContextTokens: (s.totalContextTokens ?? 0) + Math.max(0, contextTokens),
       failureContextTokens: (s.failureContextTokens ?? 0) + (outcome === 'failure' ? Math.max(0, contextTokens) : 0),
+      ...(s.explicitCount ? { explicitCount: s.explicitCount } : {}),
     });
   }
 
@@ -174,6 +181,9 @@ export class ModelPerformanceTracker {
   recordExplicit(modelId: string, taskType: TaskType, rating: 'good' | 'bad', costUsd = 0): void {
     const outcome = rating === 'good' ? 'success' : 'failure';
     this.record(modelId, taskType, outcome, 0, costUsd, 0, ModelPerformanceTracker.EXPLICIT_RATING_WEIGHT);
+    if (this.readOnly) return;
+    const s = this.stats.get(`${modelId}:${taskType}`);
+    if (s) s.explicitCount = (s.explicitCount ?? 0) + 1;
   }
 
   /** Returns all stats keyed by "modelId:taskType" — used by `cascade stats`. */

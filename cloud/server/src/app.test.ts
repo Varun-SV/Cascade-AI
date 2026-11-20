@@ -105,6 +105,18 @@ describe('cloud/server app', () => {
     await fs.rm(dir, { recursive: true, force: true });
   });
 
+  it('GET /api/leaderboard is public, and serves the pool as counts only', async () => {
+    const empty = await fetch(`${baseUrl}/api/leaderboard`);
+    expect(empty.status).toBe(200);
+    expect(await empty.json()).toMatchObject({ totalRuns: 0, models: 0, tasks: { code: [] } });
+    await fs.writeFile(path.join(dir, 'model-perf.json'), JSON.stringify({ models: { 'm-one:code': { successCount: 9, failureCount: 1, totalRetries: 0, totalCostUsd: 0.1, sampleCount: 10 } } }));
+    await restartWith({});
+    const res = await fetch(`${baseUrl}/api/leaderboard`);
+    const board = await res.json() as { tasks: { code: Array<{ model: string; runs: number }> } };
+    expect(board.tasks.code).toMatchObject([{ model: 'm-one', runs: 10 }]);
+    expect(res.headers.get('cache-control')).toContain('max-age=300');
+  });
+
   it('GET /health returns ok', async () => {
     const res = await fetch(`${baseUrl}/health`);
     expect(res.status).toBe(200);

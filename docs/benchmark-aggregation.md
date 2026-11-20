@@ -97,6 +97,12 @@ For each `family × task`, in order:
 
 A family is emitted once it has all four task scores; `agentic` is optional.
 
+Which of those were measured ships with them: `measured` in `benchmark-data.json` maps
+each family to the task types a primary or fallback source rated. The rest were
+imputed or carried from the baseline. Routing reads every cell; anything that presents
+a score as published (the landing page leaderboard's Benchmarks column) shows only
+measured ones.
+
 Every score carries an auditable trace — run with `--explain` (or `BENCHMARK_EXPLAIN=1`)
 to see which source set each value and what every source reported:
 
