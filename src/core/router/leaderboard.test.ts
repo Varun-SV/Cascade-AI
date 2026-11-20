@@ -111,4 +111,14 @@ describe('publishedBenchmark', () => {
     expect(publishedBenchmark('llama3.1:8b', 'code')).toBeUndefined();
     expect(publishedBenchmark('claude-3-opus-20240229', 'code')).toBeUndefined();
   });
+
+  it('only task cells a board measured: an imputed cell, or Mixed without all four, is none (Codex on b504e66)', () => {
+    // qwen-4-max is measured on analysis and data; its code and creative cells are imputed.
+    expect(publishedBenchmark('qwen-4-max', 'analysis')).toEqual(expect.any(Number));
+    expect(publishedBenchmark('qwen-4-max', 'data')).toEqual(expect.any(Number));
+    expect(publishedBenchmark('qwen-4-max', 'code')).toBeUndefined();
+    expect(publishedBenchmark('qwen-4-max', 'creative')).toBeUndefined();
+    expect(publishedBenchmark('qwen-4-max', 'mixed')).toBeUndefined();
+    expect(publishedBenchmark('claude-sonnet-5-5', 'mixed')).toEqual(expect.any(Number));
+  });
 });

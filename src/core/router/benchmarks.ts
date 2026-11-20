@@ -179,6 +179,17 @@ const FAMILY_MATCHERS: Array<[RegExp, string]> = [
  */
 export const CARRIED_SEED_FAMILIES: ReadonlySet<string> = new Set(['codellama', 'deepseek', 'qwen', 'llama-70b', 'llama-small', 'mistral', 'gemma']);
 
+/**
+ * The task types a board measured for a family, as the refresher recorded them
+ * (scripts/refresh-benchmarks.mjs, `measured`). Every other cell of its profile is
+ * imputed from those or carried from an older baseline. Empty when the family has
+ * no measured cell, or the snapshot predates the record.
+ */
+const MEASURED: Record<string, readonly string[]> = (benchmarkData as { measured?: Record<string, string[]> }).measured ?? {};
+export function measuredTasks(family: string): ReadonlySet<string> {
+  return new Set(MEASURED[family] ?? []);
+}
+
 export function resolveFamily(model: ModelInfo): string | null {
   // Prefer the canonical base-model id (e.g. an Azure deployment's real model)
   // so a deployment named "prod-fast" still resolves via its baseModelId.

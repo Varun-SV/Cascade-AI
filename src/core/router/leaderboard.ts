@@ -21,7 +21,7 @@
 
 import type { ModelInfo, TaskType } from '../../types.js';
 import { posteriorMean, posteriorStdDev, weightedPosterior } from './bayes.js';
-import { CARRIED_SEED_FAMILIES, benchmarkProfile, resolveFamily } from './benchmarks.js';
+import { CARRIED_SEED_FAMILIES, benchmarkProfile, measuredTasks, resolveFamily } from './benchmarks.js';
 
 /** One model on one task type, as the learning pool holds it. */
 export interface PoolStat {
@@ -125,12 +125,15 @@ export function publishedBenchmark(model: string, task: TaskType): number | unde
   if (!family || CARRIED_SEED_FAMILIES.has(family) || !squash(model).includes(squash(family))) return undefined;
   const profile = benchmarkProfile(info);
   if (!profile) return undefined;
-  if (task === 'mixed') {
-    const vals = (['code', 'analysis', 'creative', 'data'] as const).map((t) => profile[t]).filter((v): v is number => typeof v === 'number');
-    return vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : undefined;
-  }
-  const v = profile[task];
-  return typeof v === 'number' ? Math.round(v) : undefined;
+  // Only cells a board measured: the aggregator fills a family's other task cells
+  // from its measured ones (and a family new to the boards from its baseline),
+  // which routing may use but nothing should present as published.
+  const measured = measuredTasks(family);
+  const tasks = task === 'mixed' ? (['code', 'analysis', 'creative', 'data'] as const) : [task];
+  // Mixed is the average of all four, so it needs all four measured.
+  if (!tasks.every((t) => measured.has(t))) return undefined;
+  const vals = tasks.map((t) => profile[t]).filter((v): v is number => typeof v === 'number');
+  return vals.length === tasks.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : undefined;
 }
 
 const dayMs = 86_400_000;

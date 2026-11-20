@@ -246,6 +246,25 @@ function withLegacyAliases(families) {
   return Object.fromEntries(Object.entries(out).sort(([a], [b]) => a.localeCompare(b)));
 }
 
+/**
+ * Which task cells of each family a board measured: from a primary or a fallback
+ * source, not imputed from the family's other cells and not carried from the
+ * baseline. Shipped with the scores so a consumer that presents them as published
+ * (the leaderboard's Benchmarks column) can show only those. Routing reads every
+ * cell, measured or not.
+ */
+function measuredCells(trace) {
+  const out = {};
+  for (const [fam, tasks] of Object.entries(trace ?? {})) {
+    const cells = Object.entries(tasks ?? {})
+      .filter(([task, cell]) => TASK_KEYS.includes(task) && cell && cell.mode !== 'imputed' && cell.mode !== 'baseline')
+      .map(([task]) => task)
+      .sort();
+    if (cells.length) out[fam] = cells;
+  }
+  return Object.fromEntries(Object.entries(out).sort(([a], [b]) => a.localeCompare(b)));
+}
+
 /** Print every fitted calibration, so a weak fit is visible on every refresh. */
 function printFits(fits) {
   for (const [source, tasks] of Object.entries(fits ?? {})) {
@@ -267,6 +286,7 @@ async function main() {
   let nextFamilies = { ...currentFamilies };
   let nextModalities = { ...currentModalities };
   let nextComparability = null;
+  let nextMeasured = current.measured ?? null;
   let usedAggregator = false;
 
   // 1. Aggregator over the committed per-source files (unless disabled). Text
@@ -283,6 +303,7 @@ async function main() {
       const base = seedRenamedFamilies(currentFamilies);
       const { families, trace, fits } = buildFamilies(sources, { mode, base });
       nextFamilies = withLegacyAliases(families);
+      nextMeasured = measuredCells(trace);
       usedAggregator = true;
       console.log(
         `Aggregated ${sources.length} text source(s) [${sources.map((s) => s.source).join(', ')}] ` +
@@ -354,7 +375,9 @@ async function main() {
   const nextComparabilities = nextComparability ?? current.modalityComparability ?? null;
   const comparabilityChanged =
     JSON.stringify(nextComparabilities) !== JSON.stringify(current.modalityComparability ?? null);
-  if (!familiesChanged && !modalitiesChanged && !comparabilityChanged) {
+  // Which cells were measured is part of what the scores mean, as above.
+  const measuredChanged = JSON.stringify(nextMeasured) !== JSON.stringify(current.measured ?? null);
+  if (!familiesChanged && !modalitiesChanged && !comparabilityChanged && !measuredChanged) {
     console.log('No snapshot changes — nothing to write.');
     return;
   }
@@ -369,6 +392,8 @@ async function main() {
     // read this in the same file and refuse a modality whose sources share no
     // models, instead of discovering the caveat in a doc it never opened.
     ...(nextComparabilities ? { modalityComparability: nextComparabilities } : {}),
+    // Measured cells per family (see measuredCells): anything else is imputed or carried.
+    ...(nextMeasured ? { measured: nextMeasured } : {}),
   };
   await writeFile(dataFile, serialize(next), 'utf-8');
   console.log('Snapshot updated.');
