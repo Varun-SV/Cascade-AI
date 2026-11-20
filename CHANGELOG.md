@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     to show your words and any earlier wordings.
   - Memories true for now, such as a current project, are marked "for now",
     and Cascade prefers what you say in the moment over them.
+
 ## 0.93.1 - 2026-11-20
 
 ### Fixed
