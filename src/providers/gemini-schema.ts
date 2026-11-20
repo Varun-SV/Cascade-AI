@@ -118,8 +118,10 @@ export function sanitizeGeminiSchema(schema: unknown): Record<string, unknown> |
         break;
       }
       case 'items': {
-        const cleaned = sanitizeGeminiSchema(value);
-        if (cleaned) out['items'] = cleaned;
+        // A tuple form (an array of schemas) has no Gemini equivalent: its first
+        // entry stands for every item.
+        const cleaned = sanitizeGeminiSchema(Array.isArray(value) ? value[0] : value);
+        if (cleaned && Object.keys(cleaned).length) out['items'] = cleaned;
         break;
       }
       case 'anyOf': {
@@ -146,6 +148,11 @@ export function sanitizeGeminiSchema(schema: unknown): Record<string, unknown> |
   // unambiguous about what this node is.
   if (!out['type'] && out['properties']) out['type'] = 'object';
   if (!out['type'] && out['items']) out['type'] = 'array';
+  // And an array must say what it holds: Gemini rejects the WHOLE request, every
+  // tool with it, for one array without `items` ("properties[paths].items: missing
+  // field"). Agent-written and MCP tools leave it out, or give one (`{}`, a `$ref`)
+  // that cleans to nothing. A string is what such a parameter almost always holds.
+  if (out['type'] === 'array' && !out['items']) out['items'] = { type: 'string' };
 
   return out;
 }
