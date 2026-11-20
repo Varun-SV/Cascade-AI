@@ -5,6 +5,22 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.93.1 - 2026-11-20
+
+### Fixed
+- **On Windows, the CLI could close the moment you approved an agent-written
+  tool.** There was no error, and the next start said "stopped without warning".
+  These tools ran in the `isolated-vm` sandbox, a native addon, and a crash in
+  native code ends the whole process before Cascade can save anything. On
+  Windows the default sandbox is now the WebAssembly one that ships with
+  Cascade. It confines the code the same way, only slower. Setting the sandbox
+  to `isolate` still uses `isolated-vm` there.
+- **A crash inside a native sandbox now says so.** Just before an agent-written
+  tool runs in `isolated-vm`, Cascade notes which tool it is in its exit record.
+  If the process dies there, the next start names the tool and the sandbox,
+  instead of blaming another program or a closed window. It records only the
+  tool's name.
+
 ## 0.93.0 - 2026-11-20
 
 ### Added

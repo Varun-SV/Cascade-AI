@@ -29,6 +29,7 @@ import type { CascadeRouter } from '../core/router/index.js';
 import type { PermissionEscalator } from '../core/permissions/escalator.js';
 import type { PermissionRequest } from '../types.js';
 import { parseModelJson } from '../utils/json-extract.js';
+import { nativeRun } from '../utils/crash-note.js';
 
 export type SandboxMode = 'isolate' | 'wasm' | 'auto';
 
@@ -40,6 +41,18 @@ export type SandboxMode = 'isolate' | 'wasm' | 'auto';
 export function sandboxModeOf(configured: unknown): SandboxMode {
   if (configured === 'worker') return 'wasm';
   return configured === 'isolate' || configured === 'wasm' ? configured : 'auto';
+}
+
+/**
+ * Whether to run a tool in isolated-vm rather than the WebAssembly sandbox.
+ * 'auto' does on every platform but Windows: there a person's CLI died the
+ * moment an agent-written tool started, with no error and no exit handler run,
+ * which is how a native crash looks; isolated-vm is a native addon and the
+ * WebAssembly sandbox is not. It confines the code the same way, only slower.
+ * Asked for by name ('isolate'), isolated-vm still runs on Windows.
+ */
+export function usesIsolate(mode: SandboxMode, platform: NodeJS.Platform = process.platform): boolean {
+  return mode === 'isolate' || (mode === 'auto' && platform !== 'win32');
 }
 
 // ── Optional hard-isolate runtime (isolated-vm) ────
@@ -401,9 +414,18 @@ class DynamicTool extends BaseTool {
     // in the WebAssembly sandbox when isolated-vm isn't loadable ('isolate' says
     // so once); 'wasm' always uses the WebAssembly sandbox. Both confine the code.
     const mode = this.getSandboxMode();
-    if (mode !== 'wasm') {
+    if (usesIsolate(mode)) {
       const ivm = await loadIsolatedVm();
-      if (ivm) return this.runInIsolate(ivm, input, callTool, sendOut, options.signal);
+      if (ivm) {
+        // A crash in native code ends the process with nothing to catch it: the
+        // host is told what was running, so the next start can say so.
+        const over = nativeRun(`running the agent-written tool ${this.name} in the isolated-vm sandbox`);
+        try {
+          return await this.runInIsolate(ivm, input, callTool, sendOut, options.signal);
+        } finally {
+          over();
+        }
+      }
       if (mode === 'isolate' && !ivmWarned) {
         ivmWarned = true;
         this.log('[tool-creator] isolated-vm is not available (not installed or failed to build) — dynamic tools run in the WebAssembly sandbox instead, which confines them the same way.');
