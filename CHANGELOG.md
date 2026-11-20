@@ -5,7 +5,7 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.98.0 - 2026-11-20
+## 0.99.0 - 2026-11-20
 
 ### Added
 - **Workers share what they find, and the project remembers it.** Workers
@@ -32,6 +32,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Only short facts in Cascade's own words are kept, never what a tool
     printed. A subtask under your local-only `privacy.paths` neither adds
     to the board nor reads from it.
+## 0.97.2 - 2026-11-20
+
+### Fixed
+- **Gemini no longer refuses every request because of one tool.** Gemini
+  needs every list parameter to say what kind of items it holds, and turns
+  down the whole request, with every tool on it, when one doesn't
+  ("properties[paths].items: missing field"). A tool written by the agent
+  or added from an MCP server could leave that out, and Cascade passed it
+  along as it was. Such a list now holds text unless it says otherwise,
+  however deep it sits in the tool's parameters.
 
 ## 0.96.3 - 2026-11-20
 
