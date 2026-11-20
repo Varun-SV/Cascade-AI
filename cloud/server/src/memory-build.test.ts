@@ -177,4 +177,19 @@ describe('memory build (server)', () => {
     router = failing('socket hang up');
     expect(await call()).toEqual({ error: expect.stringMatching(/None of the chats could be read/) });
   });
+
+  it('an answer cut off at its length limit is a failure to report, not an empty chat (Codex on 5a8cdf5)', async () => {
+    const socket = new EventEmitter();
+    let maxTokens = 0;
+    const router = {
+      getModelForTier: () => undefined,
+      generate: async (_tier: string, opts: { maxTokens: number }) => { maxTokens = opts.maxTokens; return { content: '[{"category":"facts","memory":"Lives in Lis', finishReason: 'length' }; },
+      getStats: () => ({ totalCostUsd: 0, totalTokens: 0, costByTierModel: {}, tokensByTierModel: {}, untrackedByTierModel: {} }),
+    };
+    attachMemoryBuild({ on: (e, fn) => socket.on(e, fn), emit: () => true }, store, U('u1'), async () => router as never);
+    const reply = await new Promise<any>((resolve) => { socket.emit('memories:build', { providers: PROVIDERS, conversationIds: [mine] }, resolve); });
+    expect(reply).toEqual({ error: expect.stringMatching(/None of the chats could be read/) });
+    // Room for the longest answer the prompt allows (8 memories with quotes).
+    expect(maxTokens).toBeGreaterThanOrEqual(1500);
+  });
 });

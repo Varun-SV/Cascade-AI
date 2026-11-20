@@ -18,6 +18,14 @@ const mem = (id: string, content: string, category: string | null, extra: Partia
 
 const PROVIDERS = [{ type: 'anthropic', apiKey: 'k' }] as never;
 
+/** Build waits for the cost of the current selection: start once it shows. */
+async function startBuild() {
+  await screen.findByText(/Reads \d+ chats? with/);
+  const build = screen.getByRole('button', { name: /Build memories/ });
+  await waitFor(() => expect(build).toBeEnabled());
+  fireEvent.click(build);
+}
+
 /** A socket that answers the build events as the server does, and lets a test drive progress. */
 function fakeSocket(candidates: MemoryCandidate[]) {
   const listeners = new Map<string, (p: unknown) => void>();
@@ -83,7 +91,7 @@ describe('MemoryModal', () => {
     expect(screen.getByText('too short')).toBeInTheDocument();
     expect(await screen.findByText(/Reads 1 chat with claude-x, for about \$0\.02/)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /Build memories/ }));
+    await startBuild();
     expect(socket.emitted.find(([e]) => e === 'memories:build')?.[1]).toEqual({ providers: PROVIDERS, conversationIds: ['c1'] });
     act(() => socket.progress({ read: 1, total: 1, found: 2 }));
     expect(screen.getByText(/1 of 1 chats read · 2 suggestions so far/)).toBeInTheDocument();
@@ -107,7 +115,7 @@ describe('MemoryModal', () => {
     render(<MemoryModal onClose={vi.fn()} socket={socket} providers={PROVIDERS} />);
     fireEvent.click(await screen.findByRole('button', { name: /Build from my chats/ }));
     await screen.findByLabelText('Go', { exact: false });
-    fireEvent.click(screen.getByRole('button', { name: /Build memories/ }));
+    await startBuild();
     fireEvent.click(screen.getByRole('button', { name: /Stop and review/ }));
     expect(socket.emitted.map(([e]) => e)).toContain('memories:cancel');
   });
@@ -124,7 +132,7 @@ describe('MemoryModal', () => {
     const first = render(<MemoryModal onClose={vi.fn()} socket={running} providers={PROVIDERS} />);
     fireEvent.click(await screen.findByRole('button', { name: /Build from my chats/ }));
     await screen.findByLabelText('Go', { exact: false });
-    fireEvent.click(screen.getByRole('button', { name: /Build memories/ }));
+    await startBuild();
     first.unmount();
     expect(running.emitted.map(([e]) => e)).toContain('memories:cancel');
 
@@ -137,7 +145,7 @@ describe('MemoryModal', () => {
     render(<MemoryModal onClose={vi.fn()} socket={socket} providers={PROVIDERS} />);
     fireEvent.click(await screen.findByRole('button', { name: /Build from my chats/ }));
     await screen.findByLabelText('Go', { exact: false });
-    fireEvent.click(screen.getByRole('button', { name: /Build memories/ }));
+    await startBuild();
     act(() => socket.finish());
     const rust = await screen.findByRole('checkbox', { name: 'Keep: Building Cascade with Rust' });
     const go = screen.getByRole('checkbox', { name: 'Keep: Building Cascade with Go' });
@@ -155,7 +163,7 @@ describe('MemoryModal', () => {
     render(<MemoryModal onClose={vi.fn()} socket={socket} providers={PROVIDERS} />);
     fireEvent.click(await screen.findByRole('button', { name: /Build from my chats/ }));
     await screen.findByLabelText('Go', { exact: false });
-    fireEvent.click(screen.getByRole('button', { name: /Build memories/ }));
+    await startBuild();
     expect(screen.getByText(/Reading your chats/)).toBeInTheDocument();
     act(() => socket.disconnect());
     expect(screen.queryByText(/Reading your chats/)).not.toBeInTheDocument();
@@ -190,12 +198,41 @@ describe('MemoryModal', () => {
     render(<MemoryModal onClose={vi.fn()} socket={socket} providers={PROVIDERS} />);
     fireEvent.click(await screen.findByRole('button', { name: /Build from my chats/ }));
     await screen.findByLabelText('Go', { exact: false });
-    fireEvent.click(screen.getByRole('button', { name: /Build memories/ }));
+    await startBuild();
     act(() => socket.finish());
     fireEvent.click(await screen.findByRole('button', { name: /Save 250 memories/ }));
     expect(await screen.findByRole('alert')).toHaveTextContent(/Saved 200; the rest could not be. network down/);
     fireEvent.click(screen.getByRole('button', { name: /Save 50 memories/ }));
     expect(await screen.findByText(/Saved 250 memories/)).toBeInTheDocument();
     expect(sent).toEqual([200, 50, 50]);
+  });
+
+  it('Build waits for the cost of what it would start; a changed selection clears the old one (Codex on 5a8cdf5)', async () => {
+    vi.mocked(api.fetchMemoryBuildChats).mockResolvedValue({ chats: [
+      { id: 'c1', title: 'Go', updatedAt: 2, turns: 4, worth: true },
+      { id: 'c2', title: 'Rust', updatedAt: 1, turns: 4, worth: true },
+    ] });
+    const asked: unknown[] = [];
+    const pending: Array<(r: unknown) => void> = [];
+    const socket = {
+      emit: vi.fn((event: string, payload?: unknown, ack?: (r: unknown) => void) => { if (event === 'memories:estimate') { asked.push(payload); pending.push(ack!); } }),
+      on: vi.fn(), off: vi.fn(),
+    };
+    render(<MemoryModal onClose={vi.fn()} socket={socket} providers={PROVIDERS} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Build from my chats/ }));
+    await screen.findByLabelText('Go', { exact: false });
+    const build = screen.getByRole('button', { name: /Build memories/ });
+    expect(build).toBeDisabled();
+    await waitFor(() => expect(pending).toHaveLength(1));
+    act(() => pending[0]!({ chats: 2, inputTokens: 2000, outputTokens: 700, model: 'm', costUsd: 0.05 }));
+    expect(build).toBeEnabled();
+    // Untick one: the two-chat price is gone, and Build waits for the new one.
+    fireEvent.click(screen.getByLabelText('Rust', { exact: false }));
+    expect(build).toBeDisabled();
+    expect(screen.queryByText(/Reads 2 chats/)).not.toBeInTheDocument();
+    await waitFor(() => expect(pending).toHaveLength(2));
+    act(() => pending[1]!({ chats: 1, inputTokens: 1000, outputTokens: 350, model: 'm', costUsd: null }));
+    expect(screen.getByText(/Reads 1 chat with m, for an unknown amount/)).toBeInTheDocument();
+    expect(build).toBeEnabled();
   });
 });

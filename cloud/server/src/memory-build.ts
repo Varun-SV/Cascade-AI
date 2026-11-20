@@ -28,6 +28,11 @@ import { spendEntryFromRun } from './spend.js';
 export const MAX_BUILD_CHATS = 300;
 /** Chats read at once. */
 const CONCURRENCY = 3;
+/**
+ * Room for the longest answer the prompt allows: 8 memories, each up to 280
+ * characters with a quote up to 240, in JSON. About 1,300 tokens; the rest is slack.
+ */
+const EXTRACT_MAX_TOKENS = 2000;
 /** A build's own cost ceiling, whatever the estimate said. */
 export const MAX_BUILD_COST_USD = 5;
 
@@ -291,9 +296,15 @@ export function attachMemoryBuild(
       const result = await buildMemories({
         chats: chatsForMemory(store, userId, parsed.data.conversationIds),
         existing: storedForBuild(store.listMemories(userId)),
-        generate: async (prompt, signal) => (await r.generate('T3', {
-          messages: [{ role: 'user', content: prompt }], maxTokens: 700, temperature: 0, signal,
-        })).content,
+        generate: async (prompt, signal) => {
+          const out = await r.generate('T3', {
+            messages: [{ role: 'user', content: prompt }], maxTokens: EXTRACT_MAX_TOKENS, temperature: 0, signal,
+          });
+          // Cut off before its closing bracket, the answer parses as nothing: a
+          // failure to count and report, never "nothing worth remembering".
+          if (out.finishReason === 'length') throw new Error('The answer was cut off at its length limit.');
+          return out.content;
+        },
         signal: controller.signal,
         onProgress: (p) => socket.emit('memories:progress', p),
       });

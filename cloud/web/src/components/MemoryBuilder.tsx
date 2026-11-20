@@ -66,6 +66,7 @@ export default function MemoryBuilder({ socket, providers, onDone, onBack }: {
   const [chats, setChats] = useState<MemoryBuildChat[] | null>(null);
   const [chosen, setChosen] = useState<Set<string>>(new Set());
   const [estimate, setEstimate] = useState<MemoryBuildEstimate | null>(null);
+  const [estimateError, setEstimateError] = useState<string | null>(null);
   const [progress, setProgress] = useState({ read: 0, total: 0, found: 0, failed: 0 });
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [stopped, setStopped] = useState(false);
@@ -86,13 +87,19 @@ export default function MemoryBuilder({ socket, providers, onDone, onBack }: {
       .catch(() => { setChats([]); setError('Could not load your chats.'); });
   }, []);
 
-  // The estimate follows the selection, a moment after it settles.
+  // The estimate follows the selection, a moment after it settles. An estimate
+  // for another selection is cleared at once, and Build waits for this one's:
+  // the cost shown is always the cost of what Build would start.
   useEffect(() => {
-    if (!socket || !providers.length || chosen.size === 0) { setEstimate(null); return; }
     const seq = ++estimateSeq.current;
+    setEstimate(null);
+    setEstimateError(null);
+    if (!socket || !providers.length || chosen.size === 0) return;
     const t = setTimeout(() => {
       socket.emit('memories:estimate', { providers, conversationIds: [...chosen] }, (r: MemoryBuildEstimate | { error: string }) => {
-        if (seq === estimateSeq.current) setEstimate('error' in r ? null : r);
+        if (seq !== estimateSeq.current) return;
+        if ('error' in r) setEstimateError(r.error);
+        else setEstimate(r);
       });
     }, 300);
     return () => clearTimeout(t);
@@ -240,12 +247,12 @@ export default function MemoryBuilder({ socket, providers, onDone, onBack }: {
               ? 'Choose at least one chat.'
               : estimate
                 ? `Reads ${estimate.chats} ${estimate.chats === 1 ? 'chat' : 'chats'} with ${estimate.model ?? 'your model'}, for ${formatCost(estimate.costUsd)}.`
-                : `Reads ${worthChosen} ${worthChosen === 1 ? 'chat' : 'chats'}.`}
+                : estimateError ?? `Working out what reading ${worthChosen} ${worthChosen === 1 ? 'chat' : 'chats'} would cost…`}
           </p>
           <button
             type="button"
             onClick={start}
-            disabled={!socket || worthChosen === 0}
+            disabled={!socket || worthChosen === 0 || !estimate}
             className="flex h-9 shrink-0 items-center gap-1.5 rounded-md bg-accent-500 px-3 text-xs font-semibold text-white hover:bg-accent-400 disabled:opacity-40"
           >
             <Sparkles size={14} /> Build memories
