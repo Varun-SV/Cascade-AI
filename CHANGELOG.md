@@ -27,6 +27,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Each paused section now carries where it sits in the plan ("Section 2 of
   4"), so the path is the run's own, not a guess.
 
+## 0.94.1 - 2026-11-20
+
+### Fixed
+- **A session that dies without warning now leaves a clue.** Some endings run
+  no handler at all, such as running out of memory or a crash in native code.
+  The next start could only say "stopped without warning", which also blamed
+  another program or a closed window.
+  - **What Node says.** If Node itself stops Cascade, for example "JavaScript
+    heap out of memory", it now writes a report beside the exit record. The
+    next start says so, and `/logs exit` shows the error and its stack.
+    Only those two are kept: the report's environment variables (your API
+    keys among them), command line and network details are never read, and
+    the file is deleted.
+  - **Where it was.** While Cascade waits for your answer on an approval, and
+    after you answer, the exit record notes the tool's name and your answer
+    (y, a or n). Never the command or anything you typed. If the session
+    dies there, the next start says so.
+
 ## 0.94.0 - 2026-11-20
 
 ### Added

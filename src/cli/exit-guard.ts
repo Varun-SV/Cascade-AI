@@ -65,6 +65,25 @@ export class ExitGuard {
 
   private before: ExitRecord | null | undefined;
 
+  /**
+   * What Node's fatal-error report says about how the previous session died,
+   * folded into its record: a session that "stopped without warning" because
+   * the heap ran out says so. For this session's answers only (/logs exit, the
+   * notice): the file is this session's own by then.
+   */
+  explainPrevious(fatal: { event: string; stack?: string; at: number } | null): ExitRecord | null {
+    const before = this.previous();
+    if (!fatal || !before || before.clean) return before;
+    // A report from before the previous session started is not about it.
+    if (fatal.at < Date.parse(before.at) - before.uptimeSec * 1000 - 60_000) return before;
+    this.before = {
+      ...before,
+      reason: `Node stopped Cascade with a fatal error: ${fatal.event}.`,
+      ...(fatal.stack ? { error: fatal.stack } : {}),
+    };
+    return this.before;
+  }
+
   private readRecord(): ExitRecord | null {
     try {
       const raw = JSON.parse(fs.readFileSync(this.file, 'utf8')) as Partial<ExitRecord>;
@@ -97,6 +116,19 @@ export class ExitGuard {
   }
 
   private native: string | undefined;
+  private step: string | undefined;
+
+  /**
+   * The step the session is at, when a crash there would leave nothing else
+   * behind (null once it is past it): waiting on an approval, carrying on after
+   * one. Written into the provisional record at once, as noteNative is. Tool
+   * names only: never a command, a path or anything the person typed.
+   */
+  noteStep(step: string | null): void {
+    if (this.written || (this.step ?? null) === step) return;
+    this.step = step ?? undefined;
+    this.writeProvisional();
+  }
 
   private writeProvisional(): void {
     this.writeRecord({
@@ -138,7 +170,7 @@ export class ExitGuard {
       version: this.version,
       uptimeSec: Math.round((this.now() - this.startedAt) / 1000),
       ...(provisional
-        ? (this.native ? { running: this.native } : {})
+        ? (this.native ?? this.step ? { running: (this.native ?? this.step)! } : {})
         : (this.activity ? { running: this.activity } : {})),
       ...(this.survived.length ? { survived: [...this.survived] } : {}),
     };
@@ -160,6 +192,8 @@ export function setCurrentGuard(guard: ExitGuard | null): void { current = guard
 export function currentGuard(): ExitGuard | null { return current; }
 /** What the REPL is doing, for the record. Null when idle. */
 export function noteActivity(text: string | null): void { current?.setActivity(text); }
+/** The step the session is at, written down at once in case it dies there (see ExitGuard.noteStep). */
+export function noteStep(step: string | null): void { current?.noteStep(step); }
 /** The person chose to quit (/exit, Ctrl+C twice): the ending that follows is a clean one. */
 export function markQuitByUser(): void { quitByUser = true; }
 export function wasQuitByUser(): boolean { return quitByUser; }
