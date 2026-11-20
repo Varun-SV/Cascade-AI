@@ -1,8 +1,10 @@
-import { useState } from 'react';
-import { Sparkles, Plus, Trash2, Pencil, Check, X, Lock } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Sparkles, Plus, Trash2, Pencil, Check, X, Lock, Wand2, Loader2, Square, MessagesSquare } from 'lucide-react';
 import Modal from './Modal.js';
+import SkillSuggest from './SkillSuggest.js';
 import { createSkill, deleteSkill, updateSkill } from '../lib/api.js';
-import type { Skill } from '../lib/types.js';
+import { cancelSkillAi, draftSkill, refineSkill, type SkillAiSocket, type SkillDraft } from '../lib/skill-ai.js';
+import type { ProviderConfig, Skill } from '../lib/types.js';
 
 interface Props {
   skills: Skill[];
@@ -13,6 +15,9 @@ interface Props {
   onUse?: (id: string) => void;
   /** A run is working: it took its skill when it started, so switching waits for it to end. */
   useLocked?: boolean;
+  /** For writing skills with the person's own model. Without them, the AI help is not offered. */
+  socket?: SkillAiSocket | null;
+  providers?: ProviderConfig[];
 }
 
 interface DraftState {
@@ -24,10 +29,52 @@ interface DraftState {
 
 const EMPTY_DRAFT: DraftState = { id: null, name: '', description: '', systemPrompt: '' };
 
-export default function SkillsModal({ skills, onClose, onChange, activeSkillId, onUse, useLocked = false }: Props) {
+export default function SkillsModal({ skills, onClose, onChange, activeSkillId, onUse, useLocked = false, socket = null, providers = [] }: Props) {
   const [draft, setDraft] = useState<DraftState | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [view, setView] = useState<'list' | 'suggest'>('list');
+  /** What the person asked the model for: a new skill's purpose, or a change to this one. */
+  const [ask, setAsk] = useState('');
+  const [thinking, setThinking] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  /** A proposed change to an existing skill, shown beside what it replaces until accepted. */
+  const [proposal, setProposal] = useState<{ before: SkillDraft; after: SkillDraft } | null>(null);
+  const aiRunning = useRef(false);
+  const canAi = !!socket && providers.length > 0;
+
+  // Closing while the model writes stops it.
+  useEffect(() => () => { if (aiRunning.current && socket) cancelSkillAi(socket); }, [socket]);
+
+  function openDraft(next: DraftState) {
+    setDraft(next);
+    setError(null);
+    setAsk('');
+    setAiError(null);
+    setProposal(null);
+  }
+
+  async function writeWithAi() {
+    if (!socket || !draft || !ask.trim() || thinking) return;
+    setThinking(true);
+    setAiError(null);
+    aiRunning.current = true;
+    if (draft.id) {
+      // An existing skill: the change is shown beside what it replaces, and applied only on "Use this".
+      const r = await refineSkill(socket, providers, draft.id, ask.trim());
+      aiRunning.current = false;
+      setThinking(false);
+      if (!r.ok) { if ('error' in r) setAiError(r.error); return; }
+      setProposal({ before: r.value.before, after: r.value.draft });
+      return;
+    }
+    const r = await draftSkill(socket, providers, ask.trim());
+    aiRunning.current = false;
+    setThinking(false);
+    if (!r.ok) { if ('error' in r) setAiError(r.error); return; }
+    const out = r.value.draft;
+    setDraft((d) => (d ? { ...d, name: out.name, description: out.description, systemPrompt: out.instructions } : d));
+  }
 
   const custom = skills.filter((s) => s.custom);
   const builtin = skills.filter((s) => !s.custom);
@@ -78,14 +125,79 @@ export default function SkillsModal({ skills, onClose, onChange, activeSkillId, 
           <p>Reusable personas Cascade adopts for a chat. Pick one here, or from the + menu in the composer.</p>
         </div>
 
-        {draft ? (
+        {view === 'suggest' ? (
+          <SkillSuggest
+            socket={socket}
+            providers={providers}
+            onBack={() => setView('list')}
+            onAdd={(d) => { setView('list'); openDraft({ id: null, name: d.name, description: d.description, systemPrompt: d.instructions }); }}
+          />
+        ) : draft ? (
           <div className="flex flex-col gap-2">
+            {canAi && (
+              <div className="flex flex-col gap-2 rounded-lg border border-t2/25 bg-t2/[0.06] p-2.5">
+                <label className="flex items-center gap-1.5 text-[12px] font-medium text-ink-200" htmlFor="skill-ai-ask">
+                  <Wand2 size={13} className="text-t2" /> {draft.id ? 'Improve with AI' : 'Write it with AI'}
+                </label>
+                <div className="flex items-end gap-2">
+                  <textarea
+                    id="skill-ai-ask"
+                    className="cz-field h-auto min-h-[44px] flex-1 resize-none py-2 text-[13px] placeholder:text-ink-500"
+                    rows={2}
+                    placeholder={draft.id ? 'What should change? e.g. be stricter about SQL joins, and answer in bullet points' : 'What is it for? e.g. review my pull requests for security issues and explain each finding'}
+                    value={ask}
+                    onChange={(e) => setAsk(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void writeWithAi(); } }}
+                    disabled={thinking}
+                  />
+                  {thinking ? (
+                    <button type="button" onClick={() => socket && cancelSkillAi(socket)} className="cz-btn cz-btn-quiet cz-btn-sm shrink-0">
+                      <Square size={12} /> Stop
+                    </button>
+                  ) : (
+                    <button type="button" onClick={() => void writeWithAi()} disabled={ask.trim().length < 3} className="cz-btn cz-btn-sm shrink-0">
+                      {draft.id ? <Wand2 size={13} /> : <Sparkles size={13} />} {draft.id ? 'Improve' : draft.systemPrompt ? 'Rewrite' : 'Write it'}
+                    </button>
+                  )}
+                </div>
+                {thinking && <p className="flex items-center gap-1.5 text-[11.5px] text-ink-400"><Loader2 size={12} className="animate-spin" /> Your model is writing it…</p>}
+                {aiError && <p role="alert" className="text-[11.5px] text-danger-400">{aiError}</p>}
+                {proposal && (
+                  <div className="flex flex-col gap-2 rounded-md border border-elev/15 bg-ink-950/30 p-2">
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      <section aria-label="Now" className="flex min-w-0 flex-col gap-1">
+                        <p className="text-[11px] font-medium text-ink-500">Now</p>
+                        <p className="max-h-40 overflow-y-auto whitespace-pre-wrap text-[12px] text-ink-400 line-through decoration-ink-500/40">{proposal.before.instructions}</p>
+                      </section>
+                      <section aria-label="Proposed" className="flex min-w-0 flex-col gap-1">
+                        <p className="text-[11px] font-medium text-t2">Proposed{proposal.after.name !== proposal.before.name ? ` · renamed “${proposal.after.name}”` : ''}</p>
+                        <p className="max-h-40 overflow-y-auto whitespace-pre-wrap text-[12px] text-ink-100">{proposal.after.instructions}</p>
+                      </section>
+                    </div>
+                    <div className="flex justify-end gap-2">
+                      <button type="button" onClick={() => setProposal(null)} className="cz-btn cz-btn-quiet cz-btn-sm">Discard</button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const after = proposal.after;
+                          setDraft((d) => (d ? { ...d, name: after.name, description: after.description, systemPrompt: after.instructions } : d));
+                          setProposal(null);
+                        }}
+                        className="cz-btn cz-btn-sm"
+                      >
+                        <Check size={13} /> Use this
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
             <input
               className="cz-field text-[14px] placeholder:text-ink-500"
               placeholder="Name (e.g. SQL Tutor)"
               value={draft.name}
               onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-              autoFocus
+              autoFocus={!canAi}
             />
             <input
               className="cz-field text-[14px] placeholder:text-ink-500"
@@ -103,7 +215,7 @@ export default function SkillsModal({ skills, onClose, onChange, activeSkillId, 
             <div className="flex justify-end gap-2">
               <button
                 type="button"
-                onClick={() => { setDraft(null); setError(null); }}
+                onClick={() => { setDraft(null); setError(null); setProposal(null); if (thinking && socket) cancelSkillAi(socket); }}
                 className="cz-btn cz-btn-quiet cz-btn-sm"
               >
                 <X size={13} /> Cancel
@@ -111,7 +223,7 @@ export default function SkillsModal({ skills, onClose, onChange, activeSkillId, 
               <button
                 type="button"
                 onClick={save}
-                disabled={busy || !draft.name.trim() || !draft.systemPrompt.trim()}
+                disabled={busy || thinking || !!proposal || !draft.name.trim() || !draft.systemPrompt.trim()}
                 className="cz-btn cz-btn-sm"
               >
                 <Check size={13} /> {draft.id ? 'Save' : 'Create'}
@@ -119,16 +231,23 @@ export default function SkillsModal({ skills, onClose, onChange, activeSkillId, 
             </div>
           </div>
         ) : (
-          <button
-            type="button"
-            onClick={() => { setDraft({ ...EMPTY_DRAFT }); setError(null); }}
-            className="cz-btn cz-btn-ghost cz-btn-sm self-start"
-          >
-            <Plus size={14} /> New skill
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => openDraft({ ...EMPTY_DRAFT })}
+              className="cz-btn cz-btn-ghost cz-btn-sm"
+            >
+              <Plus size={14} /> New skill
+            </button>
+            {canAi && (
+              <button type="button" onClick={() => setView('suggest')} className="cz-btn cz-btn-ghost cz-btn-sm">
+                <MessagesSquare size={14} /> Suggest from my chats
+              </button>
+            )}
+          </div>
         )}
 
-        {custom.length > 0 && (
+        {view === 'list' && custom.length > 0 && (
           <div className="flex flex-col gap-1.5">
             <p className="text-[11.5px] font-medium tracking-[0.02em] text-ink-500">Your skills</p>
             {custom.map((s) => (
@@ -147,7 +266,7 @@ export default function SkillsModal({ skills, onClose, onChange, activeSkillId, 
                   <button
                     type="button"
                     aria-label="Edit skill"
-                    onClick={() => setDraft({ id: s.id, name: s.name, description: s.description, systemPrompt: s.systemPrompt ?? '' })}
+                    onClick={() => openDraft({ id: s.id, name: s.name, description: s.description, systemPrompt: s.systemPrompt ?? '' })}
                     className="cz-ib cz-ib-sm"
                   >
                     <Pencil size={13} />
@@ -161,6 +280,7 @@ export default function SkillsModal({ skills, onClose, onChange, activeSkillId, 
           </div>
         )}
 
+        {view === 'list' && (
         <div className="flex flex-col gap-1.5">
           <p className="text-[11.5px] font-medium tracking-[0.02em] text-ink-500">Built-in</p>
           {builtin.map((s) => (
@@ -174,6 +294,7 @@ export default function SkillsModal({ skills, onClose, onChange, activeSkillId, 
             </div>
           ))}
         </div>
+        )}
       </div>
     </Modal>
   );

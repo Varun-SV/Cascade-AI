@@ -177,3 +177,4 @@ export type { EncryptedBlob } from './cloud/keysync-crypto.js';
 export { gatherSyncBundle, applySyncBundle } from './cloud/keysync.js';
 export type { SyncBundle } from './cloud/keysync.js';
 export { MEMORY_CATEGORIES, normalizeCategory, extractFromChat, reconcile, estimateBuild, estimateBuildCostUsd, chatWorthReading, similarity, type MemoryCategory, type MemoryCandidate, type MemoryEvidence, type MemoryBackend, type StoredMemory, type ChatForMemory } from './core/knowledge/memory-builder.js';
+export { SKILL_LIMITS, draftSkillPrompt, refineSkillPrompt, suggestSkillsPrompt, parseSkillDraft, parseSkillSuggestions, chatDigest, estimateSuggest, SUGGEST_MAX_CHATS, type SkillDraft, type SkillSuggestion, type ChatForSkills } from './core/knowledge/skill-builder.js';

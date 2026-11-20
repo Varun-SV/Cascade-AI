@@ -118,7 +118,7 @@ export interface BuildProgress { read: number; total: number; found: number; fai
 
 /** Why a call failed, by kind only: a provider's message can quote the request. */
 export type BuildFailure = 'auth' | 'other';
-const failureOf = (err: unknown): BuildFailure =>
+export const failureOf = (err: unknown): BuildFailure =>
   err instanceof Error && /\b(401|403)\b|api[ _-]?key|unauthori[sz]ed|authentication|permission denied|invalid.*key/i.test(err.message) ? 'auth' : 'other';
 
 /**
@@ -176,7 +176,7 @@ export function storedForBuild(memories: CloudMemory[]): StoredMemory[] {
 }
 
 /** Records what a build spent, beside the person's runs. */
-export function recordBuildSpend(store: CloudStore, userId: string, router: CascadeRouter, outcome: 'answered' | 'stopped' | 'failed'): void {
+export function recordBuildSpend(store: CloudStore, userId: string, router: CascadeRouter, outcome: 'answered' | 'stopped' | 'failed', kind = 'memories'): void {
   try {
     const s = router.getStats();
     // A call to an unpriced model that reported no usage still happened: it is
@@ -184,7 +184,7 @@ export function recordBuildSpend(store: CloudStore, userId: string, router: Casc
     const untracked = Object.values(s.untrackedByTierModel ?? {}).some((m) => Object.values(m).some((n) => n > 0));
     if (!(s.totalCostUsd > 0) && !(s.totalTokens > 0) && !untracked) return;
     store.recordSpend(spendEntryFromRun({
-      id: `memories:${randomUUID()}`, userId, conversationId: null, at: Date.now(), costUsd: s.totalCostUsd,
+      id: `${kind}:${randomUUID()}`, userId, conversationId: null, at: Date.now(), costUsd: s.totalCostUsd,
       why: {
         totalCostUsd: s.totalCostUsd, totalTokens: s.totalTokens,
         costByModel: s.costByTierModel, tokensByModel: s.tokensByTierModel, unpricedByModel: s.untrackedByTierModel,

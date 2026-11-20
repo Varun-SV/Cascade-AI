@@ -552,6 +552,8 @@ export default function App() {
             activeSkillId={skillId}
             onUse={setSkillId}
             useLocked={chat.busy}
+            socket={socket}
+            providers={providers}
           />
         )}
         {showContinue && (

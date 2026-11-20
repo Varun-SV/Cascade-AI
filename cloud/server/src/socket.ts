@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────
 
 import { attachMemoryBuild } from './memory-build.js';
+import { attachSkillBuild } from './skill-build.js';
 import { randomUUID } from 'node:crypto';
 import type { Server as HttpServer } from 'node:http';
 import { Server as SocketIOServer, type Socket } from 'socket.io';
@@ -884,6 +885,8 @@ export function attachSocket(
 
     // Memories from the person's chats: estimate, build, cancel (memory-build.ts).
     const memoryBuild = attachMemoryBuild(socket, store, userId);
+    // Skills written with a model's help: draft, refine, suggest (skill-build.ts).
+    const skillBuild = attachSkillBuild(socket, store, userId);
 
     socket.on('chat:run', async (payload: unknown, ack?: ChatRunAck) => {
       // The run holds a transport, not this socket. Same structural surface
@@ -1009,6 +1012,7 @@ export function attachSocket(
     socket.on('disconnect', () => {
       // Nobody is left to review what a build finds: stop spending on it.
       memoryBuild.abort();
+      skillBuild.abort();
       const parkKey = resumeKey(socket);
 
       // Release ownership FIRST, on every disconnect — including the idle one
