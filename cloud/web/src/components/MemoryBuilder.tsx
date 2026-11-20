@@ -313,67 +313,71 @@ export default function MemoryBuilder({ socket, providers, onDone, onBack }: {
           : `${drafts.length} ${drafts.length === 1 ? 'suggestion' : 'suggestions'}${stopped ? ' (stopped early)' : ''}. Untick what is wrong, and edit anything before saving.`}
         {failedChats > 0 && ` ${failedChats} ${failedChats === 1 ? 'chat' : 'chats'} could not be read (your provider returned an error) and were skipped.`}
       </p>
-      <div className="flex max-h-[45dvh] flex-col gap-4 overflow-y-auto">
-        {groups.map((g) => (
-          <section key={g.id} aria-label={g.label} className="flex flex-col gap-1.5">
-            <h3 className="text-[11px] font-semibold uppercase tracking-wide text-ink-400">{g.label}</h3>
-            {g.items.map(({ d, i }) => (
-              <div key={i} className={`flex flex-col gap-1.5 rounded-md border px-3 py-2 ${d.keep ? 'border-accent-500/30 bg-elev/[0.05]' : 'border-elev/10 opacity-60'}`}>
-                <div className="flex items-start gap-2">
-                  <input type="checkbox" aria-label={`Keep: ${d.content}`} checked={d.keep} onChange={(e) => patch(i, { keep: e.target.checked })} className="mt-1.5" />
-                  <textarea
-                    aria-label="Memory"
-                    className="flex-1 resize-none rounded border border-elev/10 bg-transparent px-2 py-1 text-sm outline-none"
-                    rows={2}
-                    value={d.content}
-                    onChange={(e) => patch(i, { content: e.target.value })}
-                  />
+      {/* Locked while saving: a batch not yet sent must be what the page shows,
+          never a change made after Save that the save then ignores. */}
+      <fieldset disabled={saving} aria-busy={saving} className="m-0 min-w-0 border-0 p-0 disabled:opacity-70">
+        <div className="flex max-h-[45dvh] flex-col gap-4 overflow-y-auto">
+          {groups.map((g) => (
+            <section key={g.id} aria-label={g.label} className="flex flex-col gap-1.5">
+              <h3 className="text-[11px] font-semibold uppercase tracking-wide text-ink-400">{g.label}</h3>
+              {g.items.map(({ d, i }) => (
+                <div key={i} className={`flex flex-col gap-1.5 rounded-md border px-3 py-2 ${d.keep ? 'border-accent-500/30 bg-elev/[0.05]' : 'border-elev/10 opacity-60'}`}>
+                  <div className="flex items-start gap-2">
+                    <input type="checkbox" aria-label={`Keep: ${d.content}`} checked={d.keep} onChange={(e) => patch(i, { keep: e.target.checked })} className="mt-1.5" />
+                    <textarea
+                      aria-label="Memory"
+                      className="flex-1 resize-none rounded border border-elev/10 bg-transparent px-2 py-1 text-sm outline-none"
+                      rows={2}
+                      value={d.content}
+                      onChange={(e) => patch(i, { content: e.target.value })}
+                    />
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 pl-6">
+                    <select
+                      aria-label="Category"
+                      className="rounded border border-elev/10 bg-elev/[0.04] px-1.5 py-0.5 text-xs outline-none"
+                      value={d.category}
+                      onChange={(e) => patch(i, { category: e.target.value })}
+                    >
+                      {MEMORY_CATEGORIES.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+                    </select>
+                    <select
+                      aria-label="How long it holds"
+                      className="rounded border border-elev/10 bg-elev/[0.04] px-1.5 py-0.5 text-xs outline-none"
+                      value={d.durability}
+                      onChange={(e) => patch(i, { durability: e.target.value === 'volatile' ? 'volatile' : 'permanent' })}
+                    >
+                      <option value="permanent">Always true</option>
+                      <option value="volatile">True for now</option>
+                    </select>
+                    {d.status !== 'new' && (
+                      <span className="rounded bg-elev/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-300">
+                        {d.status === 'known' ? 'Already kept' : 'Update'}
+                      </span>
+                    )}
+                  </div>
+                  {(() => {
+                    const rivals = d.status === 'revision' ? drafts.filter((x, k) => k !== i && x.status === 'revision' && x.matches?.id === d.matches?.id).length : 0;
+                    const line = statusLine(d, rivals);
+                    return line && <p className="pl-6 text-[11px] text-ink-400">{line}</p>;
+                  })()}
+                  <ul className="flex flex-col gap-0.5 pl-6">
+                    {d.evidence.slice(0, 3).map((e, k) => (
+                      <li key={k} className="flex items-start gap-1 text-[11px] italic text-ink-400">
+                        <Quote size={10} className="mt-0.5 shrink-0" /> <span>{e.quote}</span>
+                      </li>
+                    ))}
+                    {d.evidence.length > 3 && <li className="text-[11px] text-ink-400">and in {d.evidence.length - 3} more</li>}
+                  </ul>
                 </div>
-                <div className="flex flex-wrap items-center gap-2 pl-6">
-                  <select
-                    aria-label="Category"
-                    className="rounded border border-elev/10 bg-elev/[0.04] px-1.5 py-0.5 text-xs outline-none"
-                    value={d.category}
-                    onChange={(e) => patch(i, { category: e.target.value })}
-                  >
-                    {MEMORY_CATEGORIES.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
-                  </select>
-                  <select
-                    aria-label="How long it holds"
-                    className="rounded border border-elev/10 bg-elev/[0.04] px-1.5 py-0.5 text-xs outline-none"
-                    value={d.durability}
-                    onChange={(e) => patch(i, { durability: e.target.value === 'volatile' ? 'volatile' : 'permanent' })}
-                  >
-                    <option value="permanent">Always true</option>
-                    <option value="volatile">True for now</option>
-                  </select>
-                  {d.status !== 'new' && (
-                    <span className="rounded bg-elev/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-300">
-                      {d.status === 'known' ? 'Already kept' : 'Update'}
-                    </span>
-                  )}
-                </div>
-                {(() => {
-                  const rivals = d.status === 'revision' ? drafts.filter((x, k) => k !== i && x.status === 'revision' && x.matches?.id === d.matches?.id).length : 0;
-                  const line = statusLine(d, rivals);
-                  return line && <p className="pl-6 text-[11px] text-ink-400">{line}</p>;
-                })()}
-                <ul className="flex flex-col gap-0.5 pl-6">
-                  {d.evidence.slice(0, 3).map((e, k) => (
-                    <li key={k} className="flex items-start gap-1 text-[11px] italic text-ink-400">
-                      <Quote size={10} className="mt-0.5 shrink-0" /> <span>{e.quote}</span>
-                    </li>
-                  ))}
-                  {d.evidence.length > 3 && <li className="text-[11px] text-ink-400">and in {d.evidence.length - 3} more</li>}
-                </ul>
-              </div>
-            ))}
-          </section>
-        ))}
-      </div>
+              ))}
+            </section>
+          ))}
+        </div>
+      </fieldset>
       {error && <p role="alert" className="text-xs text-danger-500">{error}</p>}
       <div className="flex items-center justify-end gap-2 border-t border-elev/10 pt-3">
-        <button type="button" onClick={onBack} className="rounded-md px-3 py-1.5 text-xs text-ink-300 hover:text-ink-100">Discard all</button>
+        <button type="button" onClick={onBack} disabled={saving} className="rounded-md px-3 py-1.5 text-xs text-ink-300 hover:text-ink-100 disabled:opacity-40">Discard all</button>
         <button
           type="button"
           onClick={save}

@@ -274,4 +274,27 @@ describe('MemoryModal', () => {
       { category: 'instructions', content: 'Prefers TypeScript', durability: 'permanent', evidence: ev, revises: '1' },
     ]));
   });
+
+  it('the review is locked while it saves, so nothing changed after Save is ignored (Codex on 516fc59)', async () => {
+    vi.mocked(api.fetchMemoryBuildChats).mockResolvedValue({ chats: [{ id: 'c1', title: 'Go', updatedAt: 2, turns: 4, worth: true }] });
+    let finishSave!: () => void;
+    vi.mocked(api.acceptMemories).mockReset().mockImplementation((items) => new Promise((resolve) => {
+      finishSave = () => resolve({ saved: items.map((it, k) => mem(`s${k}`, it.content, it.category)) });
+    }));
+    const socket = fakeSocket([
+      { category: 'facts', content: 'Fact one', durability: 'permanent', status: 'new', evidence: [{ conversationId: 'c1', quote: 'q', at: 1 }] },
+    ]);
+    render(<MemoryModal onClose={vi.fn()} socket={socket} providers={PROVIDERS} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Build from my chats/ }));
+    await screen.findByLabelText('Go', { exact: false });
+    await startBuild();
+    act(() => socket.finish());
+    const keep = await screen.findByRole('checkbox', { name: 'Keep: Fact one' });
+    fireEvent.click(screen.getByRole('button', { name: /Save 1 memory/ }));
+    await waitFor(() => expect(keep).toBeDisabled());
+    expect(screen.getByRole('textbox', { name: 'Memory' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Discard all' })).toBeDisabled();
+    await act(async () => finishSave());
+    expect(await screen.findByText(/Saved 1 memory/)).toBeInTheDocument();
+  });
 });
