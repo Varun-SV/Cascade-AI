@@ -13,19 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `git status` in a folder with no repository, and the next did the same
   and paid to learn it again. Now one board covers the whole run, every
   section's workers alike:
-  - **Facts about your machine** are read from what tools answer: a folder
-    that is not a git repository, a command your shell doesn't have (as
-    bash, cmd and PowerShell say it). Each worker is told the ones it
-    hasn't seen yet, before its next model call.
-  - **A read-only command run again** in the same folder (`ls`,
-    `git status`, judged by the same rules auto mode uses) gets the earlier
-    answer instead of running and being reasoned about twice. Anything
-    that can change things clears these, and while such a call is running
-    no earlier answer is given. Commands whose answer moves by itself,
-    like `date`, are never reused.
+  - **Facts about your machine** are read from commands that ran here and
+    failed: a folder that is not a git repository, a command your shell
+    doesn't have (as bash, cmd and PowerShell say it). A file or log that
+    only mentions such an error is not taken as one. Each worker is told
+    the ones it hasn't seen yet, before its next model call.
+  - **A command that only reads, run again** in the same folder (`ls`,
+    `git status`, `cat a | wc -l`; every part of a compound command is
+    checked) gets the earlier answer instead of running and being reasoned
+    about twice. Anything else that runs clears these, including git
+    config and git fetch, and while it's running no earlier answer is
+    given. Commands whose answer moves by itself, like `date` or `ps`, are
+    never reused, wherever they sit in a command.
   - **It grows with you.** The facts are kept in the project's knowledge,
     so the next run starts out knowing them. One that stops being true
-    (you run `git init`, a command starts working) is taken back out.
+    (git works in that folder now, a command starts working) is taken back
+    out.
   - Only short facts in Cascade's own words are kept, never what a tool
     printed. A subtask under your local-only `privacy.paths` neither adds
     to the board nor reads from it.

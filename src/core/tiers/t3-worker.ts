@@ -1433,6 +1433,9 @@ export class T3Worker extends BaseTier {
     const board = this.localOnlyMatch ? undefined : this.router.getRunMemory?.(this.artifactRoot());
     const reused = board?.reuse(tc.name, tc.input);
     if (reused) {
+      // Read as surely as if it had run: what this worker learns from it has the same
+      // unknown sources a command's output gives it (extractAndStoreFacts).
+      this.noteRan(tc.name);
       const note = `[Already run in this run${reused.by === this.id ? '' : ' by another worker'}, and nothing has changed since: its answer is given again rather than running it twice.]\n`;
       this.emit('tool:call', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), input: tc.input });
       this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), output: this.shareable(`${note}${reused.output}`, 'tool result'), durationMs: 0 });
@@ -1493,13 +1496,15 @@ export class T3Worker extends BaseTier {
       }
       const durationMs = Date.now() - toolStartMs;
       const text = typeof result === 'string' ? result : JSON.stringify(result);
-      board?.observe(tc.name, tc.input, text, this.id, boardAt);
+      // Judged now, not before the call: a read during it can make this subtask
+      // local-only, and then what it got stays here.
+      board?.observe(tc.name, tc.input, text, this.id, boardAt, { failed: /^Exit [1-9]\d*:/.test(text), publish: !this.localOnlyMatch });
       this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), output: this.shareable(text, 'tool result'), durationMs });
       return text;
     } catch (err) {
       const durationMs = Date.now() - toolStartMs;
       const errMsg = err instanceof Error ? err.message : String(err);
-      board?.observe(tc.name, tc.input, errMsg, this.id, boardAt);
+      board?.observe(tc.name, tc.input, errMsg, this.id, boardAt, { failed: true, publish: !this.localOnlyMatch });
       this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), error: this.shareable(errMsg, 'tool error'), durationMs });
       // Unrecoverable/systemic conditions (rate-limit, auth, quota, AND a 404
       // "model not found" — the shared classifier this reuses is the same one

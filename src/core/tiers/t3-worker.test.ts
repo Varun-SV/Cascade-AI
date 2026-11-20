@@ -2270,7 +2270,7 @@ describe('workers share what they find (run-memory.ts)', () => {
         getRunMemory: () => memory,
       }) as unknown as CascadeRouter;
       const execute = vi.fn(async (_name: string, input: Record<string, unknown>) => (
-        String(input['command']).startsWith('git') ? 'fatal: not a git repository (or any of the parent directories): .git' : 'a.txt'
+        String(input['command']).startsWith('git') ? 'Exit 128:\nfatal: not a git repository (or any of the parent directories): .git' : 'a.txt'
       ));
       const registry = makeToolRegistry({
         getToolDefinitions: () => [{ name: 'shell', description: 'Run a command', inputSchema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] } }],

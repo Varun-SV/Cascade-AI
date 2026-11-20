@@ -10,22 +10,26 @@
 //
 //  RunMemory is one board for the whole run, every section's workers alike:
 //
-//  - Facts about the machine, read from what tools answered: a folder that is
-//    not a git repository, a command the shell doesn't have. Each worker is
-//    shown the ones it hasn't seen yet before its next model call.
-//  - Results of read-only commands (shell and git, judged by the same risk
-//    rules auto mode uses): the same command in the same folder gives the
-//    earlier answer again instead of running, until anything that can change
-//    things runs. Then every stored result is dropped.
+//  - Facts about the machine, read from commands that ran here and failed: a
+//    folder that is not a git repository, a command the shell doesn't have.
+//    Each worker is shown the ones it hasn't seen yet before its next model
+//    call. Text that merely mentions such a failure (a log being read) is not
+//    evidence and is ignored.
+//  - Answers of commands that only read (a short list of commands and git
+//    subcommands, every part of a compound command checked): the same command
+//    in the same folder gives the earlier answer again instead of running,
+//    until anything that isn't on that list runs. Then every stored answer is
+//    dropped. Auto mode's "safe" rating is not used for this: it is about
+//    whether to ask, and counts some writes (git config, git fetch) as safe.
 //  - The facts are kept in the project's knowledge (entity "environment"), so
-//    the next run starts knowing them, and one that stops being true (a
-//    repository made, a command that now works) is taken back out.
+//    the next run starts knowing them, and one that stops being true (git
+//    working in that folder, the command now running) is taken back out.
 //
 //  Only short facts in Cascade's own words are kept, never a tool's output,
-//  and a local-only subtask (privacy.paths) adds nothing and reads nothing.
+//  and a local-only subtask (privacy.paths) adds nothing and reads nothing,
+//  including one that became local-only during the call being observed.
 
 import path from 'node:path';
-import { assessRisk } from '../permissions/risk.js';
 import type { WorldStateDB } from './world-state.js';
 
 /** A fact for the board: `key` identifies it (one per thing it is about). */
@@ -37,47 +41,123 @@ const ENTITY = 'environment';
 const MAX_FACTS = 60;
 const MAX_RESULTS = 200;
 const MAX_RESULT_CHARS = 20_000;
-/** Read-only commands whose answer changes by itself: never given again. */
-const TIME_BOUND = /^\s*(date|time|uptime|ps|top|free|vmstat|iostat|netstat|ss|get-date|get-process|tasklist|sleep)\b/i;
 
-/** The facts a tool's answer shows about the machine. */
-export function factsFrom(tool: string, input: Record<string, unknown>, output: string, cwdLabel: string): { learnt: (RunFact & Kept)[]; unlearnt: string[] } {
-  const learnt: (RunFact & Kept)[] = [];
-  const unlearnt: string[] = [];
-  const text = output.slice(0, 8000);
-  const command = typeof input['command'] === 'string' ? input['command'] : '';
-  const gitRelated = tool === 'git' || /^\s*git\b/.test(command) || /\bgit\s/.test(command);
-  // Lowercase, as the project's knowledge stores it, so a kept fact and a fresh one are the same fact.
-  const repoKey = `git-repo:${cwdLabel.toLowerCase()}`;
-  if (gitRelated && /not a git repository/i.test(text)) {
-    learnt.push({ key: repoKey, text: `${cwdLabel} is not a git repository: git commands there fail (run "git init" first if one is needed).`, from: '', relation: `git repository at ${cwdLabel.toLowerCase()}`, value: 'none' });
-  } else if (gitRelated && /\bgit\s+init\b/.test(command)) {
-    unlearnt.push(repoKey);
-  }
-  const missing = new Set<string>();
-  for (const m of text.matchAll(/(?:^|\n)(?:[\w./-]+: )?(?:(?:line )?\d+: )?([\w.+-]{1,40}): (?:command )?not found/g)) missing.add(m[1]!);
-  for (const m of text.matchAll(/'([\w.+-]{1,40})' is not recognized as an internal or external command/g)) missing.add(m[1]!);
-  for (const m of text.matchAll(/The term '([\w.+-]{1,40})' is not recognized as (?:the )?name of a cmdlet/g)) missing.add(m[1]!);
-  for (const name of missing) {
-    learnt.push({ key: `missing:${name.toLowerCase()}`, text: `\`${name}\` is not available in this machine's shell: use another way (another command, or run_code).`, from: '', relation: `command ${name.toLowerCase()}`, value: 'not available' });
-  }
-  return { learnt, unlearnt };
+/** Tools that only read, whatever their input. */
+const READ_TOOLS = new Set(['file_read', 'file_list', 'grep', 'glob', 'diff_view', 'code_search', 'graph_search']);
+
+/** Commands whose answer depends only on the files, and that change nothing. */
+const READ_COMMANDS = new Set([
+  'ls', 'dir', 'cat', 'type', 'head', 'tail', 'wc', 'grep', 'egrep', 'fgrep', 'rg', 'tree', 'stat', 'file',
+  'du', 'which', 'where', 'whereis', 'pwd', 'echo', 'printf', 'basename', 'dirname', 'realpath', 'readlink',
+  'cut', 'jq', 'diff', 'cmp', 'comm', 'find',
+  'get-childitem', 'gci', 'get-content', 'gc', 'select-string', 'test-path', 'resolve-path', 'get-location',
+]);
+/** git subcommands that only read; a few only in their listing form. */
+const GIT_READS = new Set(['status', 'log', 'diff', 'show', 'rev-parse', 'ls-files', 'describe', 'blame', 'shortlog', 'cat-file', 'ls-tree']);
+const GIT_LISTS = new Set(['branch', 'tag', 'remote']);
+/** Options that make an otherwise reading command write or run something. */
+const WRITES = /(^|\s)(-exec|-execdir|-delete|-ok|-fprint\S*|-fls|--output\S*|-o)(\s|=|$)/;
+
+/** Whether `args` (after a git subcommand) leave it reading only. */
+function gitReads(sub: string, args: string[]): boolean {
+  const s = sub.toLowerCase();
+  if (GIT_READS.has(s)) return !args.some((a) => /^--output/.test(a));
+  if (!GIT_LISTS.has(s)) return false;
+  // `git branch`, `git tag -l`, `git remote -v`: listing. Any other word names one to make or change.
+  return args.every((a) => /^(-a|-r|-v|-l|--list|--all|--remotes|--verbose|--show-current|-vv)$/.test(a));
 }
 
-/** The command a call ran, when it is a shell command. */
+/**
+ * Whether a shell command only reads, every part of it: no substitution or
+ * redirect, and each `&&`, `||`, `;` or `|` part a reading command (git only in
+ * its reading forms). Strict on purpose: answering a command from memory when
+ * it would have changed something is worse than running it twice.
+ */
+export function commandReadsOnly(command: string): boolean {
+  if (!command.trim() || /[`<>]|\$\(/.test(command)) return false;
+  const parts = command.split(/&&|\|\||;|\||\n/);
+  return parts.every((part) => {
+    const words = part.trim().split(/\s+/).filter(Boolean);
+    if (!words.length) return false;
+    const [head, ...rest] = words;
+    const cmd = head!.toLowerCase();
+    if (cmd === 'git') return rest.length > 0 && !rest[0]!.startsWith('-') && gitReads(rest[0]!, rest.slice(1));
+    return READ_COMMANDS.has(cmd) && !WRITES.test(` ${rest.join(' ')} `);
+  });
+}
+
+/** Whether a tool call only reads, judged as strictly as `commandReadsOnly`. */
+export function callReadsOnly(tool: string, input: Record<string, unknown>): boolean {
+  if (READ_TOOLS.has(tool)) return true;
+  if (tool === 'shell') return commandReadsOnly(typeof input['command'] === 'string' ? input['command'] : '');
+  if (tool === 'git') {
+    const op = typeof input['operation'] === 'string' ? input['operation'] : '';
+    const args = Array.isArray(input['args']) ? (input['args'] as unknown[]).map(String) : [];
+    return !!op && gitReads(op, args);
+  }
+  return false;
+}
+
+/** The command a call ran, when it ran one. */
 function commandOf(tool: string, input: Record<string, unknown>): string {
   if (tool === 'shell') return typeof input['command'] === 'string' ? input['command'] : '';
   if (tool === 'git') return `git ${String(input['operation'] ?? '')} ${Array.isArray(input['args']) ? (input['args'] as unknown[]).join(' ') : ''}`;
   return '';
 }
 
+/**
+ * The facts a command's answer shows about the machine. Only for a command that
+ * ran here (shell or git): a file being read can say anything. A fact is learnt
+ * only from a failure; `unlearnt` is what the answer shows to be no longer true.
+ */
+export function factsFrom(tool: string, input: Record<string, unknown>, output: string, cwdLabel: string, failed: boolean): { learnt: (RunFact & Kept)[]; unlearnt: string[] } {
+  const learnt: (RunFact & Kept)[] = [];
+  const unlearnt: string[] = [];
+  const command = commandOf(tool, input);
+  if (!command) return { learnt, unlearnt };
+  const text = output.slice(0, 8000);
+  // Lowercase, as the project's knowledge stores it, so a kept fact and a fresh one are the same fact.
+  const repoKey = `git-repo:${cwdLabel.toLowerCase()}`;
+  const gitRelated = tool === 'git' || /(^|[\s;&|])git\s/.test(` ${command}`);
+  if (gitRelated && failed && /not a git repository/i.test(text)) {
+    learnt.push({ key: repoKey, text: `${cwdLabel} is not a git repository: git commands there fail (run "git init" first if one is needed).`, from: '', relation: `git repository at ${cwdLabel.toLowerCase()}`, value: 'none' });
+  } else if (gitRelated && !/not a git repository/i.test(text) && (!failed || /\bgit\s+(init|clone)\b/.test(command))) {
+    // git worked there (or a repository was just made): it is one now.
+    unlearnt.push(repoKey);
+  }
+  if (failed) {
+    const words = new Set(command.toLowerCase().split(/[\s;&|()]+/).filter(Boolean));
+    const missing = new Set<string>();
+    for (const m of text.matchAll(/(?:^|\n)(?:[\w./-]+: )?(?:(?:line )?\d+: )?([\w.+-]{1,40}): (?:command )?not found/g)) missing.add(m[1]!);
+    for (const m of text.matchAll(/'([\w.+-]{1,40})' is not recognized as an internal or external command/g)) missing.add(m[1]!);
+    for (const m of text.matchAll(/The term '([\w.+-]{1,40})' is not recognized as (?:the )?name of a cmdlet/g)) missing.add(m[1]!);
+    // Only a command this call asked for: an error it printed about something else is not about this machine's shell.
+    for (const name of missing) {
+      if (!words.has(name.toLowerCase())) continue;
+      learnt.push({ key: `missing:${name.toLowerCase()}`, text: `\`${name}\` is not available in this machine's shell: use another way (another command, or run_code).`, from: '', relation: `command ${name.toLowerCase()}`, value: 'not available' });
+    }
+  }
+  return { learnt, unlearnt };
+}
+
+/** What `observe` needs to know about how the call went. */
+export interface Observed {
+  /** The call failed: it threw, or the command exited non-zero. */
+  failed: boolean;
+  /**
+   * Whether its answer may go on the board. False for a local-only subtask,
+   * judged after the call, since a read during it can make the subtask local-only.
+   */
+  publish: boolean;
+}
+
 export class RunMemory {
   private facts = new Map<string, RunFact & { relation?: string }>();
   private seen = new Map<string, Set<string>>();
   private results = new Map<string, { output: string; by: string; epoch: number }>();
-  /** Bumped by every call that can change anything: a stored result from before it is stale. */
+  /** Bumped by every call that may change anything: a stored answer from before it is stale. */
   private epoch = 0;
-  /** Calls that can change things, still running. */
+  /** Calls that may change things, still running. */
   private changing = 0;
 
   constructor(private readonly root: string, private readonly db?: WorldStateDB) {
@@ -103,11 +183,10 @@ export class RunMemory {
     return rel ? rel.split(path.sep).join('/') : 'The project folder';
   }
 
+  /** The key a stored answer is kept under, for a command that may be given again; else null. */
   private reusable(tool: string, input: Record<string, unknown>): string | null {
     if (tool !== 'shell' && tool !== 'git') return null;
-    const command = commandOf(tool, input);
-    if (!command.trim() || TIME_BOUND.test(command)) return null;
-    if (assessRisk(tool, input, this.root).level !== 'safe') return null;
+    if (!callReadsOnly(tool, input)) return null;
     return `${tool}\u0000${this.cwd(input)}\u0000${JSON.stringify(input)}`;
   }
 
@@ -122,30 +201,29 @@ export class RunMemory {
   }
 
   /**
-   * Called as a call starts. A call that can change things is counted while it
+   * Called as a call starts. A call that may change things is counted while it
    * runs: no stored answer is given meanwhile, as it may already be out of date.
    * Returns the moment it started, for `observe`.
    */
   begin(tool: string, input: Record<string, unknown>): number {
-    if (!this.readsOnly(tool, input)) this.changing += 1;
+    if (!callReadsOnly(tool, input)) this.changing += 1;
     return this.epoch;
   }
 
-  private readsOnly(tool: string, input: Record<string, unknown>): boolean {
-    try { return assessRisk(tool, input, this.root).level === 'safe'; } catch { return false; }
-  }
-
-  /** What a call answered, or the error it failed with: its facts go on the board, and a read-only answer is kept. */
-  observe(tool: string, input: Record<string, unknown>, output: string, by: string, startedAt: number): void {
-    const cwd = this.cwd(input);
-    const { learnt, unlearnt } = factsFrom(tool, input, output, this.label(cwd));
-    // Something that can change things, and finished (or failed part way): anything
+  /**
+   * How a call went (its answer, or the error it failed with). Always ends what
+   * `begin` started; its facts and answer go on the board only if `publish`.
+   */
+  observe(tool: string, input: Record<string, unknown>, output: string, by: string, startedAt: number, how: Observed): void {
+    // Something that may change things, and finished (or failed part way): anything
     // stored before it is stale.
-    if (!this.readsOnly(tool, input)) { this.epoch += 1; this.changing = Math.max(0, this.changing - 1); }
+    if (!callReadsOnly(tool, input)) { this.epoch += 1; this.changing = Math.max(0, this.changing - 1); }
+    if (!how.publish) return;
+    const { learnt, unlearnt } = factsFrom(tool, input, output, this.label(this.cwd(input)), how.failed);
     for (const key of unlearnt) this.forget(key);
-    // A command that worked is no longer missing.
+    // A command that ran is no longer missing.
     const ran = commandOf(tool, input).trim().split(/\s+/)[0]?.toLowerCase();
-    if (ran && !learnt.some((f) => f.key === `missing:${ran}`) && this.facts.has(`missing:${ran}`) && !/not (found|recognized)/i.test(output)) this.forget(`missing:${ran}`);
+    if (ran && !how.failed) this.forget(`missing:${ran}`);
     for (const f of learnt) {
       if (this.facts.size >= MAX_FACTS && !this.facts.has(f.key)) break;
       const isNew = !this.facts.has(f.key);
@@ -155,7 +233,7 @@ export class RunMemory {
       if (isNew) this.db?.upsertFact(ENTITY, f.relation, f.value, `run:${by}`, undefined, []);
     }
     const key = this.reusable(tool, input);
-    if (key && startedAt === this.epoch && output.length <= MAX_RESULT_CHARS) {
+    if (key && !how.failed && startedAt === this.epoch && output.length <= MAX_RESULT_CHARS) {
       if (this.results.size >= MAX_RESULTS) this.results.delete(this.results.keys().next().value!);
       this.results.set(key, { output, by, epoch: this.epoch });
     }
