@@ -6,6 +6,9 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import chalk from 'chalk';
 import type { Theme } from '../../../types.js';
+import { chartKind, parseChartSpec } from '../../../core/documents/blocks.js';
+import { chartFits, chartToLines } from '../../visuals/chart-text.js';
+import { fileLink, findImages, thumbnailFor, type Thumbnails } from '../../visuals/terminal-image.js';
 
 interface ChatMessageProps {
   role: 'user' | 'assistant' | 'system' | 'error';
@@ -13,9 +16,13 @@ interface ChatMessageProps {
   theme: Theme;
   timestamp?: string;
   isStreaming?: boolean;
+  /** Thumbnails for the images the reply shows, made before it was written (see terminal-image.ts). */
+  thumbnails?: Thumbnails;
+  /** Columns to draw charts in; the terminal's width when not given. */
+  width?: number;
 }
 
-export function ChatMessage({ role, content, theme, timestamp, isStreaming }: ChatMessageProps): React.ReactElement {
+export function ChatMessage({ role, content, theme, timestamp, isStreaming, thumbnails, width }: ChatMessageProps): React.ReactElement {
   const { label, color, prefix } = getRoleStyle(role, theme);
 
   return (
@@ -26,7 +33,7 @@ export function ChatMessage({ role, content, theme, timestamp, isStreaming }: Ch
         {isStreaming && <Text color={theme.colors.accent}> ⟳</Text>}
       </Box>
       <Box marginLeft={2} flexDirection="column">
-        {renderContent(normalizeContent(content), theme)}
+        {renderContent(normalizeContent(content), theme, thumbnails ?? {}, (width ?? process.stdout.columns ?? 80) - 6)}
       </Box>
     </Box>
   );
@@ -65,18 +72,29 @@ function normalizeContent(content: string | unknown): string {
 // commit (and, while still live, can't push the layout past the viewport).
 const MAX_CODE_LINES = 40;
 
-function renderContent(content: string, theme: Theme): React.ReactElement[] {
-  // Split into code blocks and text
-  const parts = content.split(/(```[\s\S]*?```)/g);
+function renderContent(content: string, theme: Theme, thumbnails: Thumbnails, width: number): React.ReactElement[] {
+  // Split into code blocks (``` or ~~~) and text
+  const parts = content.split(/(```[\s\S]*?```|~~~[\s\S]*?~~~)/g);
 
-  return parts.map((part, i) => {
-    if (part.startsWith('```')) {
+  return parts.flatMap((part, i): React.ReactElement[] => {
+    if (part.startsWith('```') || part.startsWith('~~~')) {
+      const tilde = part.startsWith('~~~');
       const lines = part.split('\n');
-      const lang = lines[0]?.replace('```', '').trim() ?? '';
+      const lang = lines[0]?.replace(/^(`{3,}|~{3,})/, '').trim() ?? '';
       const codeLines = lines.slice(1, -1);
+      // A chart the reply drew as data: drawn here too, and kept as code when it doesn't parse.
+      const chart = !tilde && /^chart\s*:/i.test(lang) ? chartKind(lang.replace(/^chart\s*:/i, '')) : null;
+      const spec = chart ? parseChartSpec(chart, codeLines.join('\n')) : null;
+      if (spec && chartFits(width - 4)) {
+        return [(
+          <Box key={i} flexDirection="column" marginY={1} paddingX={1} borderStyle="round" borderColor={theme.colors.border}>
+            {chartToLines(spec, width - 4).map((line, j) => <Text key={j} wrap="truncate-end">{line || ' '}</Text>)}
+          </Box>
+        )];
+      }
       const truncated = codeLines.length - MAX_CODE_LINES;
       const code = codeLines.slice(0, MAX_CODE_LINES).join('\n');
-      return (
+      return [(
         <Box key={i} flexDirection="column" marginY={1} paddingX={2}
           borderStyle="single" borderColor={theme.colors.border}>
           {lang && <Text color={theme.colors.muted}>{lang}</Text>}
@@ -85,16 +103,41 @@ function renderContent(content: string, theme: Theme): React.ReactElement[] {
             <Text color={theme.colors.muted} dimColor>… ({truncated} more lines — /export to get the full text)</Text>
           )}
         </Box>
-      );
+      )];
     }
 
-    // Render inline markdown-ish
-    const rendered = part
-      .replace(/\*\*(.*?)\*\*/g, (_, t) => chalk.bold(t))
-      .replace(/`(.*?)`/g, (_, t) => chalk.bgHex(theme.colors.border)(t));
-
-    return <Text key={i} wrap="wrap">{rendered}</Text>;
+    // Text, with each image it shows drawn in its place.
+    const out: React.ReactElement[] = [];
+    let at = 0;
+    for (const img of findImages(part)) {
+      if (img.start > at) out.push(<Text key={`${i}-t${at}`} wrap="wrap">{inline(part.slice(at, img.start), theme)}</Text>);
+      out.push(imageBlock(`${i}-i${img.start}`, img.alt, img.src, thumbnailFor(thumbnails, img.src), theme));
+      at = img.end;
+    }
+    if (at < part.length) out.push(<Text key={`${i}-t${at}`} wrap="wrap">{inline(part.slice(at), theme)}</Text>);
+    return out;
   });
+}
+
+// Render inline markdown-ish
+function inline(text: string, theme: Theme): string {
+  return text
+    .replace(/\*\*(.*?)\*\*/g, (_, t) => chalk.bold(t))
+    .replace(/`(.*?)`/g, (_, t) => chalk.bgHex(theme.colors.border)(t));
+}
+
+/** An image: its thumbnail and a link to open it, or, with none, what it is and where. */
+function imageBlock(key: string, alt: string, src: string, thumb: Thumbnails[string] | undefined, theme: Theme): React.ReactElement {
+  const label = alt.trim() || 'image';
+  if (!thumb) {
+    return <Text key={key} color={theme.colors.muted} wrap="wrap">{`▣ ${label}  `}{chalk.underline(src)}</Text>;
+  }
+  return (
+    <Box key={key} flexDirection="column" marginY={1}>
+      {thumb.lines.map((line, j) => <Text key={j}>{line}</Text>)}
+      <Text color={theme.colors.muted} wrap="truncate-end">{`▣ ${label}  `}{fileLink(thumb.file, chalk.underline('open full size'))}</Text>
+    </Box>
+  );
 }
 
 function formatTime(iso: string): string {
