@@ -80,11 +80,17 @@ function gitReads(sub: string, args: string[]): boolean {
  * it would have changed something is worse than running it twice.
  */
 export function commandReadsOnly(command: string): boolean {
-  if (!command.trim() || /[`<>]|\$\(/.test(command)) return false;
+  // Nothing the shell expands into words this can't see: substitution, a
+  // variable (`git diff $OPT` may be `--output=x`), braces, redirects.
+  if (!command.trim() || /[`<>${}]/.test(command)) return false;
   // A lone `&` ends a command too (it runs it in the background): `echo ready & touch x` is two.
   const parts = command.split(/&&|\|\||;|\||&|\n/);
   return parts.every((part) => {
-    const words = part.trim().split(/\s+/).filter(Boolean);
+    // Words as the program gets them: the shell takes quotes and backslashes
+    // away, so `'--output=x'` and `--out\put=x` are `--output=x` to git. A quote
+    // splitting a word across spaces only joins it, and the options are found
+    // all the same.
+    const words = part.trim().split(/\s+/).map((w) => w.replace(/['"\\]/g, '')).filter(Boolean);
     if (!words.length) return false;
     const [head, ...rest] = words;
     const cmd = head!.toLowerCase();

@@ -203,6 +203,27 @@ describe('Codex on b2b0aba', () => {
   });
 });
 
+describe('Codex on 5576cfc', () => {
+  it('a quoted or escaped option is the option: quotes do not hide a write', () => {
+    expect(commandReadsOnly("git diff '--output=patch.diff'")).toBe(false);
+    expect(commandReadsOnly('git diff "--output=patch.diff"')).toBe(false);
+    expect(commandReadsOnly("find . '-delete'")).toBe(false);
+    expect(commandReadsOnly('find . -del\\ete')).toBe(false);
+    expect(commandReadsOnly("rg '--pre=./pre' hit")).toBe(false);
+  });
+
+  it('nor anything the shell expands where this cannot see it', () => {
+    expect(commandReadsOnly('git diff $OPT')).toBe(false);
+    expect(commandReadsOnly('git diff ${OPT}')).toBe(false);
+    expect(commandReadsOnly('git diff {--output=a,}')).toBe(false);
+  });
+
+  it('control: quoted plain arguments still read', () => {
+    expect(commandReadsOnly('grep -n "hello world" notes.md')).toBe(true);
+    expect(commandReadsOnly("ls 'my folder'")).toBe(true);
+  });
+});
+
 describe('kept in the project, so the next run starts knowing', () => {
   it('only what may go to any model: privacy.paths holds for what an earlier run kept (Codex on 2abacac)', async () => {
     const { PrivacyPaths } = await import('../privacy/paths.js');
