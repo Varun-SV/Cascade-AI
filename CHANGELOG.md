@@ -25,9 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     config and git fetch, and while it's running no earlier answer is
     given. Commands whose answer moves by itself, like `date` or `ps`, are
     never reused, wherever they sit in a command. A change made by another
-    run in the same project, in this window or another, counts too.
+    run in the same project, in this window or another, counts too. `git
+    diff`, `git show`, `git blame` and `git log -p` can run helpers your
+    repository configures, so they are reused only with `--no-ext-diff
+    --no-textconv`.
   - **It grows with you.** The facts are kept in the project's knowledge,
-    so the next run starts out knowing them. One that stops being true
+    so the next run starts out knowing them, with folder names spelt as
+    they are (`Docs` and `docs` are two folders). One that stops being true
     (git works in that folder now, a command starts working) is taken back
     out.
   - Only short facts in Cascade's own words are kept, never what a tool

@@ -67,9 +67,24 @@ const GIT_LISTS = new Set(['branch', 'tag', 'remote']);
  */
 const WRITES = /(^|\s)(-exec|-execdir|-delete|-ok|-fprint\S*|-fls|--output\S*|-o|--pre|--pre-glob)(\s|=|$)/;
 
-/** Whether `args` (after a git subcommand) leave it reading only. */
+/** Subcommands whose output is a diff by default: git runs configured helpers for it. */
+const GIT_DIFFS = new Set(['diff', 'show', 'blame']);
+const GIT_PATCH_OPTIONS = /^(-p|-u|--patch|-U\d*|--unified(=.*)?|--patch-with-stat|--cc|-c)$/;
+
+/**
+ * Whether `args` (after a git subcommand) leave it reading only.
+ *
+ * A diff git shows may run programs the repository configures: `diff.external`
+ * (which `git diff` uses unless told not to) and textconv filters. They can do
+ * anything, so a command that may run them is not taken as a read unless it
+ * turns both off (`--no-ext-diff --no-textconv`), and one that asks for them is
+ * never taken as one.
+ */
 function gitReads(sub: string, args: string[]): boolean {
   const s = sub.toLowerCase();
+  if (args.some((a) => /^--(ext-diff|textconv|filters)$/.test(a))) return false;
+  const showsDiff = GIT_DIFFS.has(s) || (s === 'log' && args.some((a) => GIT_PATCH_OPTIONS.test(a)));
+  if (showsDiff && !(args.includes('--no-ext-diff') && args.includes('--no-textconv'))) return false;
   if (GIT_READS.has(s)) return !args.some((a) => /^--output/.test(a));
   if (!GIT_LISTS.has(s)) return false;
   // `git branch`, `git tag -l`, `git remote -v`: listing. Any other word names one to make or change.
@@ -142,17 +157,47 @@ function commandOf(tool: string, input: Record<string, unknown>): string {
  * ran here (shell or git): a file being read can say anything. A fact is learnt
  * only from a failure; `unlearnt` is what the answer shows to be no longer true.
  */
+/** How the project folder itself is named in facts. */
+const ROOT_LABEL = 'The project folder';
+
+/**
+ * The relation a "not a git repository" fact is kept under, for a folder as it
+ * is spelt. The project's knowledge lowercases relations, and on a filesystem
+ * that tells `Docs` from `docs` they are two folders: a name with capitals gets a
+ * short hash of its exact spelling, so the two never share (or retract) a fact.
+ * The exact spelling is kept in the fact's value (see repoValue). An all-lowercase
+ * name keeps the plain form, as facts kept before this have it.
+ */
+function repoRelation(folder: string): string {
+  const lower = folder.toLowerCase();
+  return lower === folder ? `git repository at ${folder}` : `git repository at ${lower} #${crypto.createHash('sha256').update(folder).digest('hex').slice(0, 8)}`;
+}
+function repoValue(folder: string): string {
+  return folder === folder.toLowerCase() ? 'none' : `none (at ${folder})`;
+}
+/** The folder a kept "not a git repository" fact is about, exactly as spelt; null when it is not one. */
+function repoFolderOf(relation: string, value: string): string | null {
+  const m = /^git repository at (.+?)(?: #([0-9a-f]{8}))?$/.exec(relation);
+  const v = /^none(?: \(at (.+)\))?$/i.exec(value.trim());
+  if (!m || !v) return null;
+  const folder = v[1] ?? m[1]!;
+  // The spelling in the value must be the one the relation was made for.
+  return repoRelation(folder) === relation ? folder : null;
+}
+
 export function factsFrom(tool: string, input: Record<string, unknown>, output: string, cwdLabel: string, failed: boolean): { learnt: (RunFact & Kept)[]; unlearnt: string[] } {
   const learnt: (RunFact & Kept)[] = [];
   const unlearnt: string[] = [];
   const command = commandOf(tool, input);
   if (!command) return { learnt, unlearnt };
   const text = output.slice(0, 8000);
-  // Lowercase, as the project's knowledge stores it, so a kept fact and a fresh one are the same fact.
-  const repoKey = `git-repo:${cwdLabel.toLowerCase()}`;
+  // The folder exactly as spelt: `Docs` and `docs` may be two folders. The project
+  // folder itself has a fixed name, as kept facts have it.
+  const folder = cwdLabel === ROOT_LABEL ? 'the project folder' : cwdLabel;
+  const repoKey = `git-repo:${folder}`;
   const gitRelated = (tool === 'git' || /(^|[\s;&|])git\s/.test(` ${command}`)) && !runsElsewhere(tool, input, command);
   if (gitRelated && failed && /not a git repository/i.test(text)) {
-    learnt.push({ key: repoKey, text: `${cwdLabel} is not a git repository: git commands there fail (run "git init" first if one is needed).`, from: '', relation: `git repository at ${cwdLabel.toLowerCase()}`, value: 'none' });
+    learnt.push({ key: repoKey, text: `${cwdLabel} is not a git repository: git commands there fail (run "git init" first if one is needed).`, from: '', relation: repoRelation(folder), value: repoValue(folder) });
   } else if (gitRelated && !/not a git repository/i.test(text) && (!failed || /\bgit\s+(init|clone)\b/.test(command))) {
     // git worked there (or a repository was just made): it is one now.
     unlearnt.push(repoKey);
@@ -265,13 +310,13 @@ export class RunMemory {
     // (factMayLeave), and one about a folder that is local-only now is left out.
     const rules = privacy();
     for (const f of db?.getFactsForEntities([ENTITY]) ?? []) {
-      const key = f.relation.startsWith('git repository at ') ? `git-repo:${f.relation.slice('git repository at '.length)}`
-        : f.relation.startsWith('command ') ? `missing:${f.relation.slice('command '.length)}` : '';
-      if (!key) continue;
       // Only the failure each relation records: the entity is general knowledge, and
       // a fact extracted or imported there may say the opposite ("command jq:
       // available"), which must not reach workers as something missing.
-      if (f.value.trim().toLowerCase() !== (key.startsWith('git-repo:') ? 'none' : 'not available')) continue;
+      const folder = f.relation.startsWith('git repository at ') ? repoFolderOf(f.relation, f.value) : null;
+      const key = folder !== null ? `git-repo:${folder}`
+        : f.relation.startsWith('command ') && f.value.trim().toLowerCase() === 'not available' ? `missing:${f.relation.slice('command '.length)}` : '';
+      if (!key) continue;
       if (!factMayLeave(f, rules, root)) continue;
       if (key.startsWith('git-repo:') && this.folderPrivate(key.slice('git-repo:'.length), rules)) continue;
       const text = key.startsWith('git-repo:')
@@ -300,7 +345,7 @@ export class RunMemory {
 
   private label(abs: string): string {
     const rel = path.relative(this.root, abs);
-    return rel ? rel.split(path.sep).join('/') : 'The project folder';
+    return rel ? rel.split(path.sep).join('/') : ROOT_LABEL;
   }
 
   /** The key a stored answer is kept under, for a command that may be given again; else null. */

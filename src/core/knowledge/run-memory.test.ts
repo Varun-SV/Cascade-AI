@@ -273,6 +273,51 @@ describe('Codex on 251b864: another run in the same workspace', () => {
   });
 });
 
+describe('Codex on 539316f', () => {
+  it('not a git command that may run a configured diff helper or textconv filter', () => {
+    // `git diff` runs diff.external unless told not to, and textconv filters by default.
+    expect(commandReadsOnly('git diff')).toBe(false);
+    expect(commandReadsOnly('git diff --ext-diff')).toBe(false);
+    expect(commandReadsOnly('git show HEAD')).toBe(false);
+    expect(commandReadsOnly('git log -p')).toBe(false);
+    expect(commandReadsOnly('git blame a.ts')).toBe(false);
+    expect(commandReadsOnly('git cat-file --textconv HEAD:a.pdf')).toBe(false);
+    expect(commandReadsOnly('git log -p --no-ext-diff --no-textconv --ext-diff')).toBe(false);
+    expect(callReadsOnly('git', { operation: 'diff', args: [] })).toBe(false);
+    // With both turned off, or no diff shown, it reads.
+    expect(commandReadsOnly('git diff --no-ext-diff --no-textconv')).toBe(true);
+    expect(commandReadsOnly('git log -p --no-ext-diff --no-textconv')).toBe(true);
+    expect(commandReadsOnly('git log --oneline -5')).toBe(true);
+    expect(commandReadsOnly('git status')).toBe(true);
+  });
+
+  it('`Docs` and `docs` are two folders, kept and retracted apart', () => {
+    // Paths only: nothing is made, so this holds on a case-insensitive filesystem too.
+    const db = new WorldStateDB(root);
+    try {
+      const mem = new RunMemory(root, db);
+      run(mem, 'shell', { command: 'git status', cwd: 'Docs' }, NOT_A_REPO, 'T3-a', bad);
+      run(mem, 'shell', { command: 'git status', cwd: 'docs' }, NOT_A_REPO, 'T3-a', bad);
+      expect(mem.all().map((f) => f.key).sort()).toEqual(['git-repo:Docs', 'git-repo:docs']);
+      expect(db.getFactsForEntities(['environment'])).toHaveLength(2);
+      // git working in `docs` says nothing about `Docs`.
+      run(mem, 'shell', { command: 'git status', cwd: 'docs' }, 'On branch main', 'T3-a');
+      expect(mem.all().map((f) => f.key)).toEqual(['git-repo:Docs']);
+      // The next run knows it, spelt as it is.
+      const next = new RunMemory(root, db);
+      expect(next.all().map((f) => [f.key, f.text.split(' ')[0]])).toEqual([['git-repo:Docs', 'Docs']]);
+    } finally { db.close(); }
+  });
+
+  it('a kept spelling that does not fit its relation is not taken', () => {
+    const db = new WorldStateDB(root);
+    try {
+      db.upsertFact('environment', 'git repository at docs', 'none (at DOCS)', 'x', undefined, []);
+      expect(new RunMemory(root, db).all()).toEqual([]);
+    } finally { db.close(); }
+  });
+});
+
 describe('kept in the project, so the next run starts knowing', () => {
   it('only what may go to any model: privacy.paths holds for what an earlier run kept (Codex on 2abacac)', async () => {
     const { PrivacyPaths } = await import('../privacy/paths.js');
