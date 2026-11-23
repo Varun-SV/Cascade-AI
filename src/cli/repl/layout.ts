@@ -10,6 +10,8 @@
 //
 //  Pure functions only — unit-testable without a TTY.
 
+import { expandCharts } from '../visuals/chart-text.js';
+
 /** Rows always present in the live area regardless of panels. */
 const FIXED_CHROME_ROWS =
   1 + // StatusBar
@@ -138,11 +140,13 @@ export interface TranscriptLine {
 }
 
 /** Flatten messages into renderable lines: one header + body lines each. */
-export function flattenTranscript(messages: TranscriptMessage[]): TranscriptLine[] {
+export function flattenTranscript(messages: TranscriptMessage[], width = 80): TranscriptLine[] {
   const lines: TranscriptLine[] = [];
   for (const msg of messages) {
     lines.push({ text: msg.role.toUpperCase(), headerRole: msg.role });
-    for (const line of msg.content.split('\n')) lines.push({ text: line });
+    // A reply's charts drawn, as in the scrollback (ChatMessage).
+    const content = msg.role === 'assistant' ? expandCharts(msg.content, width - 4) : msg.content;
+    for (const line of content.split('\n')) lines.push({ text: line });
     lines.push({ text: '' });
   }
   return lines;
