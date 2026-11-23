@@ -45,8 +45,19 @@ describe('which provider embeds, and where it is reached', () => {
     expect(pickOpenAIRoute([p({ type: 'gemini' }), p({ type: 'ollama' })])!.provider.type).toBe('ollama');
   });
 
-  it('a Gemini gateway keeps its root', () => {
-    expect(openAIRoute(p({ type: 'gemini', apiKey: 'g', baseUrl: 'https://proxy.test/google/' }))!.baseURL).toBe('https://proxy.test/google/v1beta/openai/');
+  it('a Gemini gateway keeps its root, however its version is spelt (Codex on d230b69)', () => {
+    const at = (baseUrl: string) => openAIRoute(p({ type: 'gemini', apiKey: 'g', baseUrl }))!.baseURL;
+    expect(at('https://proxy.test/google/')).toBe('https://proxy.test/google/v1beta/openai/');
+    // As the Gemini client reads it (geminiApiRoot): the version is not a second root.
+    expect(at('https://gemini-proxy.internal/v1beta')).toBe('https://gemini-proxy.internal/v1beta/openai/');
+    expect(at('https://gemini-proxy.internal/v1beta/')).toBe('https://gemini-proxy.internal/v1beta/openai/');
+  });
+
+  it('slashes are trimmed in linear time (CodeQL on d230b69)', () => {
+    const t0 = performance.now();
+    expect(openAIRoute(p({ type: 'ollama', baseUrl: `http://h${'/'.repeat(100_000)}x` }))!.baseURL).toMatch(/x\/v1$/);
+    expect(openAIRoute(p({ type: 'ollama', baseUrl: `http://h:11434${'/'.repeat(100_000)}` }))!.baseURL).toBe('http://h:11434/v1');
+    expect(performance.now() - t0).toBeLessThan(500);
   });
 
   it('the reranker picks the same provider', () => {

@@ -6,6 +6,7 @@ import OpenAI from 'openai';
 import type { ProviderConfig } from '../types.js';
 import type { Embedder } from './types.js';
 import { OLLAMA_BASE_URL } from '../constants.js';
+import { clientApiRoot, stripTrailingSlashes } from '../utils/net.js';
 
 const DEFAULT_OPENAI_EMBED_MODEL = 'text-embedding-3-small';
 const DEFAULT_OLLAMA_EMBED_MODEL = 'nomic-embed-text';
@@ -87,17 +88,17 @@ export interface OpenAIRoute {
  * OpenAI with a placeholder key and fail with 401.
  */
 export function openAIRoute(p: ProviderConfig): OpenAIRoute | null {
-  const trimmed = (u: string) => u.replace(/\/+$/, '');
   switch (p.type) {
     case 'openai':
       return p.apiKey || p.baseUrl ? { provider: p, apiKey: p.apiKey || 'sk-none', baseURL: p.baseUrl } : null;
     case 'openai-compatible':
       return p.baseUrl ? { provider: p, apiKey: p.apiKey || 'sk-none', baseURL: p.baseUrl } : null;
     case 'gemini':
-      // Gemini's OpenAI-compatible surface (embeddings and chat), under the same root its own client uses.
-      return p.apiKey ? { provider: p, apiKey: p.apiKey, baseURL: `${trimmed(p.baseUrl || GEMINI_ROOT)}/v1beta/openai/` } : null;
+      // Gemini's OpenAI-compatible surface (embeddings and chat), under the root its own
+      // client builds on: a configured `…/v1beta` is that root plus the version, not a new root.
+      return p.apiKey ? { provider: p, apiKey: p.apiKey, baseURL: `${clientApiRoot('gemini', p.baseUrl?.trim() || GEMINI_ROOT) || GEMINI_ROOT}/v1beta/openai/` } : null;
     case 'ollama': {
-      const root = trimmed(p.baseUrl || OLLAMA_BASE_URL);
+      const root = stripTrailingSlashes(p.baseUrl?.trim() || OLLAMA_BASE_URL);
       return { provider: p, apiKey: p.apiKey || 'ollama', baseURL: /\/v1$/.test(root) ? root : `${root}/v1` };
     }
     default:
