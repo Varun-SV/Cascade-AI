@@ -72,8 +72,20 @@ export function chartToLines(spec: ChartSpec, width: number): string[] {
   return lines;
 }
 
-function legend(spec: ChartSpec): string {
-  return spec.series.map((s, i) => `${colour(i)('■')} ${s.name}`).join('   ');
+/** The series names, as many to a row as fit in `w` columns: the rows and lines carry no names of their own. */
+function legend(spec: ChartSpec, w: number): string[] {
+  const rows: string[] = [];
+  let row = '';
+  let used = 0;
+  spec.series.forEach((s, i) => {
+    const name = cut(s.name, Math.max(1, w - 2));
+    const width = 2 + cols(name);
+    if (used && used + 3 + width > w) { rows.push(row); row = ''; used = 0; }
+    row += `${used ? '   ' : ''}${colour(i)('■')} ${name}`;
+    used += (used ? 3 : 0) + width;
+  });
+  if (row) rows.push(row);
+  return rows;
 }
 
 // ── Bars ─────────────────────────────────────────────────────────
@@ -100,7 +112,7 @@ function barLines(spec: ChartSpec, w: number): string[] {
     });
     if (many && ci < spec.categories.length - 1) out.push('');
   });
-  if (many) out.push('', legend(spec));
+  if (many) out.push('', ...legend(spec, w));
   return out;
 }
 
@@ -212,7 +224,7 @@ function plotLines(spec: ChartSpec, w: number): string[] {
   }
   const gap = lastShown ? Math.max(1, width - cols(firstShown) - cols(lastShown)) : 0;
   out.push(`${' '.repeat(axis + 2)}${firstShown}${' '.repeat(gap)}${lastShown}`);
-  if (spec.series.length > 1) out.push('', legend(spec));
+  if (spec.series.length > 1) out.push('', ...legend(spec, w));
   return out;
 }
 

@@ -165,3 +165,18 @@ describe('Codex on f238e53', () => {
     expect(draw('line', 'Month,Value\nJan,10\nDec,20', 40).some((l) => /^\s+Jan\s{3,}Dec$/.test(l))).toBe(true);
   });
 });
+
+describe('Codex on 6a8ae21', () => {
+  it('a legend of long series names wraps within the width, every series named', () => {
+    const body = 'Year,Revenue ($ millions),Operating Expenses ($ millions),Net Income ($ millions)\n2024,10,8,2\n2025,12,9,3';
+    for (const kind of ['bar', 'line'] as const) {
+      const lines = draw(kind, body, 60);
+      for (const l of lines) expect(stringWidth(l), l).toBeLessThanOrEqual(60);
+      const legendText = lines.filter((l) => l.includes('■')).join(' ');
+      for (const name of ['Revenue ($ millions)', 'Operating Expenses ($ millions)', 'Net Income ($ millions)']) expect(legendText, kind).toContain(name);
+      expect(lines.filter((l) => l.includes('■')).length, kind).toBeGreaterThan(1);
+    }
+    // Control: short names share one row.
+    expect(draw('bar', 'Q,A,B\nq1,1,2', 60).filter((l) => l.includes('■'))).toHaveLength(1);
+  });
+});

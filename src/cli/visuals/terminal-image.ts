@@ -37,7 +37,52 @@ const MAX_ROWS = 16;
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.avif', '.svg']);
 
 /** Every `![alt](src)` in `text`, in order. */
+/**
+ * The images `text` shows, in order. Not one written inside inline code
+ * (`` `![Cover](cover.png)` ``): that is an example to read and copy, and is left as written.
+ */
 export function findImages(text: string): ImageRef[] {
+  const found = scanImages(text);
+  const spans = codeSpans(text);
+  if (!spans.length) return found;
+  let k = 0;
+  return found.filter((img) => {
+    while (k < spans.length && spans[k]![1] <= img.start) k++;
+    return !(k < spans.length && spans[k]![0] <= img.start);
+  });
+}
+
+/**
+ * Inline code spans as [start, end), in order, the way Markdown finds them: a run
+ * of backticks opens one that the next run of exactly as many closes; a run with
+ * none to close it is plain text. Each run is looked at a fixed number of times.
+ */
+function codeSpans(text: string): Array<[number, number]> {
+  const runs: Array<{ at: number; len: number }> = [];
+  for (let i = 0; i < text.length;) {
+    if (text[i] !== '`') { i++; continue; }
+    let j = i;
+    while (j < text.length && text[j] === '`') j++;
+    runs.push({ at: i, len: j - i });
+    i = j;
+  }
+  const nextSame = new Array<number>(runs.length).fill(-1);
+  const lastOfLength = new Map<number, number>();
+  for (let r = runs.length - 1; r >= 0; r--) {
+    nextSame[r] = lastOfLength.get(runs[r]!.len) ?? -1;
+    lastOfLength.set(runs[r]!.len, r);
+  }
+  const spans: Array<[number, number]> = [];
+  for (let r = 0; r < runs.length;) {
+    const close = nextSame[r]!;
+    if (close < 0) { r++; continue; }
+    spans.push([runs[r]!.at, runs[close]!.at + runs[close]!.len]);
+    r = close + 1;
+  }
+  return spans;
+}
+
+function scanImages(text: string): ImageRef[] {
   // Scanned, not matched with one pattern: a reply is model-written, and a pattern
   // tried at every "![" takes quadratic time on a long run of them. Here the next
   // "]", ")", line end and space after a point are looked up once and remembered

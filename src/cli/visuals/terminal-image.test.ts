@@ -137,3 +137,17 @@ describe('Codex on 356220c', () => {
     }
   });
 });
+
+describe('Codex on 6a8ae21', () => {
+  it('an image written inside inline code is an example, not an image', () => {
+    expect(findImages('Use `![Cover](generated/cover.png)` in README')).toEqual([]);
+    expect(findImages('Use ``a ` b ![x](y.png)`` here')).toEqual([]);
+    // Control: outside the code, and with an unclosed backtick before it.
+    expect(findImages('See `this` and ![Cover](generated/cover.png)').map((i) => i.src)).toEqual(['generated/cover.png']);
+    expect(findImages('A stray ` then ![Cover](generated/cover.png)').map((i) => i.src)).toEqual(['generated/cover.png']);
+    // Still linear on a long run of backticks and openers.
+    const t0 = performance.now();
+    findImages('` ![a](b.png) '.repeat(20_000));
+    expect(performance.now() - t0).toBeLessThan(1000);
+  });
+});
