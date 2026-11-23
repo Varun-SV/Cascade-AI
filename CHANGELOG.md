@@ -24,7 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     about twice. Anything else that runs clears these, including git
     config and git fetch, and while it's running no earlier answer is
     given. Commands whose answer moves by itself, like `date` or `ps`, are
-    never reused, wherever they sit in a command.
+    never reused, wherever they sit in a command. A change made by another
+    run in the same project, in this window or another, counts too.
   - **It grows with you.** The facts are kept in the project's knowledge,
     so the next run starts out knowing them. One that stops being true
     (git works in that folder now, a command starts working) is taken back

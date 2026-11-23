@@ -31,7 +31,10 @@
 //  local-only during the call being observed; what it changes still makes the
 //  stored answers stale.
 
+import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
+import { statePath, STATE } from '../../config/project-state.js';
 import { factMayLeave, type FactPrivacy, type WorldStateDB } from './world-state.js';
 
 /** A fact for the board: `key` identifies it (one per thing it is about). */
@@ -169,6 +172,56 @@ export function factsFrom(tool: string, input: Record<string, unknown>, output: 
   return { learnt, unlearnt };
 }
 
+/**
+ * What the workspace has been through, as far as any run in it knows: every run's
+ * board (in this process or another) changes it when a call that may change the
+ * workspace starts and ends. A stored answer is given again only while it is the
+ * same as when that answer was got, so a write made by another run, in another
+ * window, makes this run's stored answers stale as surely as its own.
+ */
+export interface ChangeMarker {
+  /** The current mark. Two reads give the same mark only if nothing was marked between them. */
+  current(): string;
+  /** Mark a change. */
+  bump(): void;
+}
+
+/** One per process, so marks from two processes never coincide. */
+const INSTANCE = crypto.randomBytes(6).toString('hex');
+let marks = 0;
+
+/**
+ * The marker kept in the project's state folder, out of reach of tools. It holds
+ * only a random mark. When it can't be read or written, nothing is given again:
+ * a mark that can't be trusted never matches.
+ */
+export function workspaceChangeMarker(root: string): ChangeMarker {
+  let file: string | null = null;
+  let broken = false;
+  const where = (): string => (file ??= statePath(root, STATE.boardChanges));
+  const never = (): string => `unreadable:${INSTANCE}:${++marks}`;
+  return {
+    current() {
+      if (broken) return never();
+      try { return fs.readFileSync(where(), 'utf8'); } catch (err) {
+        return (err as NodeJS.ErrnoException).code === 'ENOENT' ? '' : never();
+      }
+    },
+    bump() {
+      try {
+        const target = where();
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        // Written whole, then renamed into place: a reader sees the old mark or the new one.
+        const tmp = `${target}.${INSTANCE}.${++marks}`;
+        fs.writeFileSync(tmp, `${INSTANCE}:${marks}:${Date.now()}`);
+        fs.renameSync(tmp, target);
+      } catch {
+        broken = true;
+      }
+    },
+  };
+}
+
 /** What `observe` needs to know about how the call went. */
 export interface Observed {
   /** The call failed: it threw, or the command exited non-zero. */
@@ -183,7 +236,10 @@ export interface Observed {
 export class RunMemory {
   private facts = new Map<string, RunFact & { relation?: string }>();
   private seen = new Map<string, Set<string>>();
-  private results = new Map<string, { output: string; by: string; epoch: number }>();
+  private results = new Map<string, { output: string; by: string; epoch: number; mark: string }>();
+  /** Calls begun and not yet observed: the epoch and workspace mark each started at. */
+  private started = new Map<number, { epoch: number; mark: string }>();
+  private nextTicket = 1;
   /** Bumped by every call that may change anything: a stored answer from before it is stale. */
   private epoch = 0;
   /** Calls that may change things, still running. */
@@ -200,6 +256,8 @@ export class RunMemory {
     private readonly keep: () => boolean = () => true,
     /** The project's privacy.paths rules: what the board shows goes to cloud models. */
     private readonly privacy: () => FactPrivacy | undefined = () => undefined,
+    /** Changes seen by every run in this workspace (see ChangeMarker). */
+    private readonly changes: ChangeMarker = workspaceChangeMarker(root),
   ) {
     // Start knowing what earlier runs found: only what may go to any model. The
     // entity is the project's general knowledge, not only what this board wrote,
@@ -259,27 +317,31 @@ export class RunMemory {
   reuse(tool: string, input: Record<string, unknown>): { output: string; by: string } | null {
     const key = this.reusable(tool, input);
     const hit = key ? this.results.get(key) : undefined;
-    return hit && hit.epoch === this.epoch && this.changing === 0 ? { output: hit.output, by: hit.by } : null;
+    return hit && hit.epoch === this.epoch && this.changing === 0 && hit.mark === this.changes.current() ? { output: hit.output, by: hit.by } : null;
   }
 
   /**
    * Called as a call starts. A call that may change things is counted while it
    * runs: no stored answer is given meanwhile, as it may already be out of date.
-   * Returns the moment it started, for `observe`.
+   * Returns a ticket for `observe`: what the board and the workspace were when it started.
    */
   begin(tool: string, input: Record<string, unknown>): number {
-    if (!callReadsOnly(tool, input)) this.changing += 1;
-    return this.epoch;
+    if (!callReadsOnly(tool, input)) { this.changing += 1; this.changes.bump(); }
+    const ticket = this.nextTicket++;
+    this.started.set(ticket, { epoch: this.epoch, mark: this.changes.current() });
+    return ticket;
   }
 
   /**
    * How a call went (its answer, or the error it failed with). Always ends what
    * `begin` started; its facts and answer go on the board only if `publish`.
    */
-  observe(tool: string, input: Record<string, unknown>, output: string, by: string, startedAt: number, how: Observed): void {
+  observe(tool: string, input: Record<string, unknown>, output: string, by: string, ticket: number, how: Observed): void {
+    const started = this.started.get(ticket);
+    this.started.delete(ticket);
     // Something that may change things, and finished (or failed part way): anything
-    // stored before it is stale.
-    if (!callReadsOnly(tool, input)) { this.epoch += 1; this.changing = Math.max(0, this.changing - 1); }
+    // stored before it is stale, here and in every other run in this workspace.
+    if (!callReadsOnly(tool, input)) { this.epoch += 1; this.changing = Math.max(0, this.changing - 1); this.changes.bump(); }
     if (!how.publish) return;
     const where = this.cwd(input);
     const { learnt, unlearnt } = factsFrom(tool, input, output, this.label(where), how.failed);
@@ -297,9 +359,10 @@ export class RunMemory {
       if (isNew && this.keep()) this.db?.upsertFact(ENTITY, f.relation, f.value, `run:${by}`, undefined, []);
     }
     const key = this.reusable(tool, input);
-    if (key && !how.failed && startedAt === this.epoch && output.length <= MAX_RESULT_CHARS) {
+    // Kept only if nothing changed while it ran, by this run or any other.
+    if (key && !how.failed && started && started.epoch === this.epoch && started.mark === this.changes.current() && output.length <= MAX_RESULT_CHARS) {
       if (this.results.size >= MAX_RESULTS) this.results.delete(this.results.keys().next().value!);
-      this.results.set(key, { output, by, epoch: this.epoch });
+      this.results.set(key, { output, by, epoch: this.epoch, mark: started.mark });
     }
   }
 
@@ -311,12 +374,14 @@ export class RunMemory {
    */
   hold(): () => void {
     this.changing += 1;
+    this.changes.bump();
     let done = false;
     return () => {
       if (done) return;
       done = true;
       this.epoch += 1;
       this.changing = Math.max(0, this.changing - 1);
+      this.changes.bump();
     };
   }
 

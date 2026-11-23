@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { RunMemory, callReadsOnly, commandReadsOnly, factsFrom, formatRunFacts } from './run-memory.js';
+import { RunMemory, callReadsOnly, commandReadsOnly, factsFrom, formatRunFacts, workspaceChangeMarker, type ChangeMarker } from './run-memory.js';
+import { statePath, STATE } from '../../config/project-state.js';
 import { WorldStateDB } from './world-state.js';
 
 let root = '';
@@ -221,6 +222,54 @@ describe('Codex on 5576cfc', () => {
   it('control: quoted plain arguments still read', () => {
     expect(commandReadsOnly('grep -n "hello world" notes.md')).toBe(true);
     expect(commandReadsOnly("ls 'my folder'")).toBe(true);
+  });
+});
+
+describe('Codex on 251b864: another run in the same workspace', () => {
+  // Two boards on one workspace: two runs, in one process or two windows.
+  it("a write made by another run makes this run's stored answers stale", () => {
+    const mine = new RunMemory(root);
+    const theirs = new RunMemory(root);
+    run(mine, 'shell', { command: 'cat a.txt' }, 'old', 'T3-a');
+    expect(mine.reuse('shell', { command: 'cat a.txt' })?.output).toBe('old');
+    run(theirs, 'file_write', { path: 'a.txt', content: 'new' }, 'written', 'T3-x');
+    expect(mine.reuse('shell', { command: 'cat a.txt' })).toBeNull();
+    // Read again, it is kept again.
+    run(mine, 'shell', { command: 'cat a.txt' }, 'new', 'T3-a');
+    expect(mine.reuse('shell', { command: 'cat a.txt' })?.output).toBe('new');
+  });
+
+  it('nor is a read kept that ran while another run was changing things', () => {
+    const mine = new RunMemory(root);
+    const theirs = new RunMemory(root);
+    const read = mine.begin('shell', { command: 'git status' });
+    run(theirs, 'shell', { command: 'git commit -am x' }, 'done', 'T3-x');
+    mine.observe('shell', { command: 'git status' }, 'dirty', 'T3-a', read, ok);
+    expect(mine.reuse('shell', { command: 'git status' })).toBeNull();
+    // …and their write still running stops anything stored before it being given.
+    run(mine, 'shell', { command: 'git status' }, 'clean', 'T3-a');
+    const writing = theirs.begin('shell', { command: 'touch b' });
+    expect(mine.reuse('shell', { command: 'git status' })).toBeNull();
+    theirs.observe('shell', { command: 'touch b' }, '', 'T3-x', writing, ok);
+  });
+
+  it("a mark that can't be read never matches, so nothing is given again", () => {
+    let n = 0;
+    const unreadable: ChangeMarker = { current: () => `unreadable:${++n}`, bump: () => {} };
+    const mem = new RunMemory(root, undefined, () => true, () => undefined, unreadable);
+    run(mem, 'shell', { command: 'ls' }, 'a.txt', 'T3-a');
+    expect(mem.reuse('shell', { command: 'ls' })).toBeNull();
+  });
+
+  it('the mark is in the state folder, and holds nothing from the workspace', () => {
+    const marker = workspaceChangeMarker(root);
+    const before = marker.current();
+    marker.bump();
+    const after = marker.current();
+    expect(after).not.toBe(before);
+    expect(fs.readFileSync(statePath(root, STATE.boardChanges), 'utf8')).toBe(after);
+    expect(after).toMatch(/^[0-9a-f]+:\d+:\d+$/);
+    expect(fs.existsSync(path.join(root, STATE.boardChanges))).toBe(false);
   });
 });
 

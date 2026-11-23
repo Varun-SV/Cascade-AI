@@ -456,6 +456,8 @@ export const STATE = {
   deadModels: 'dead-models.json',
   dynamicTools: 'dynamic-tools.json',
   gate: 'gate',
+  /** Changed by every run's board when it sees a call that may change the workspace (see knowledge/run-memory.ts). */
+  boardChanges: 'board-changes',
   tmp: 'tmp',
   screenshots: 'screenshots',
   private: 'private',
