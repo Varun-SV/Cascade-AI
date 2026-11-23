@@ -210,6 +210,13 @@ select option {
   transition-duration: 0.001ms !important;
   scroll-behavior: auto !important;
 }
+/* …except the one sign that a run is working: the lit arcs of its status mark
+   keep their pulse (cascadeLitStill, no travel; see "Chat motion" below). More
+   specific than the rule above, so its !important gives way to this one. */
+:root[data-reduce-motion="1"] .cascade-mark-lit > path[data-on='1'] {
+  animation-duration: 1.8s !important;
+  animation-iteration-count: infinite !important;
+}
 
 /* Ground: flat paper (light) or midnight (dark). No glows — the only colour
    on screen should be the tier ramp where work is happening. */

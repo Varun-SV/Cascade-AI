@@ -55,6 +55,18 @@ describe('the status mark, lit by the tiers working now', () => {
     expect(block(css.indexOf('@keyframes cascadeLitStill'))).not.toMatch(/transform/);
   });
 
+  // Codex on 4943dcf: Settings → Reduce motion also sets every animation's
+  // duration to 0.001ms and its count to 1, !important, on `*`. That outranks a
+  // plain shorthand, so the pulse ran once and stopped.
+  it("the app's Reduce motion setting doesn't cut the pulse to a single frame", () => {
+    const global = block(css.indexOf(':root[data-reduce-motion="1"] *,'));
+    expect(global).toMatch(/animation-duration:\s*0\.001ms !important/);
+    const keep = /:root\[data-reduce-motion="1"\] \.cascade-mark-lit > path\[data-on='1'\] \{([^}]*)\}/.exec(css);
+    expect(keep, 'an override for the lit arcs').not.toBeNull();
+    expect(keep![1]).toMatch(/animation-duration:\s*[1-9][\d.]*s !important/);
+    expect(keep![1]).toMatch(/animation-iteration-count:\s*infinite !important/);
+  });
+
   it('several lit arcs light in tier order, top down', () => {
     expect(css).toMatch(/\.cascade-mark-lit > path:nth-child\(2\)\[data-on='1'\] \{ animation-delay: 0\.18s; \}/);
     expect(css).toMatch(/\.cascade-mark-lit > path:nth-child\(3\)\[data-on='1'\] \{ animation-delay: 0\.36s; \}/);
