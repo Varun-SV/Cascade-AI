@@ -301,7 +301,9 @@ suite('the extension in a real Chromium', { timeout: 90_000 }, () => {
     await vi.waitFor(async () => expect(await consent.evaluate<string>("document.getElementById('error').textContent")).toMatch(/private network/));
     expect(consent.isClosed()).toBe(false);
     await consent.fill('#sites', 'http://allowed.test');
-    await consent.click('#allow');
+    // As the rig's answer() does: the window closes itself once the answer is
+    // taken, which can land before the click returns ("Target closed").
+    await consent.click('#allow').catch((e: unknown) => { if (!consent.isClosed()) throw e; });
     const relayed = await asked;
     relayed.close('done');
   });
