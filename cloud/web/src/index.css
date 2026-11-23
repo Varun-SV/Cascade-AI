@@ -210,6 +210,13 @@ select option {
   transition-duration: 0.001ms !important;
   scroll-behavior: auto !important;
 }
+/* …except the one sign that a run is working: the lit arcs of its status mark
+   keep their pulse (cascadeLitStill, no travel; see "Chat motion" below). More
+   specific than the rule above, so its !important gives way to this one. */
+:root[data-reduce-motion="1"] .cascade-mark-lit > path[data-on='1'] {
+  animation-duration: 1.8s !important;
+  animation-iteration-count: infinite !important;
+}
 
 /* Ground: flat paper (light) or midnight (dark). No glows — the only colour
    on screen should be the tier ramp where work is happening. */
@@ -460,11 +467,23 @@ body {
    Every effect below is off when the visitor asked for less motion, in the OS
    or in Settings → Reduce motion (App sets html[data-reduce-motion="1"]). */
 
-/* The status mark, lit by the tiers actually working right now. */
+/* The status mark, lit by the tiers actually working right now. A lit arc
+   pulses as the plain mark's arcs do, deep enough to read as busy: it used to
+   breathe from 0.75 to 1, which with one tier working for minutes looked like
+   a mark that had frozen. Several lit arcs light in tier order, top down. */
 .cascade-mark-lit > path { transition: opacity 0.4s ease, filter 0.4s ease; transform-origin: center; }
-.cascade-mark-lit > path[data-on='0'] { opacity: 0.25; }
-.cascade-mark-lit > path[data-on='1'] { filter: drop-shadow(0 0 2.5px currentColor); animation: cascadeLit 1.6s ease-in-out infinite; }
-@keyframes cascadeLit { 0%, 100% { opacity: 0.75; } 50% { opacity: 1; } }
+.cascade-mark-lit > path[data-on='0'] { opacity: 0.22; }
+.cascade-mark-lit > path[data-on='1'] { filter: drop-shadow(0 0 2.5px currentColor); animation: cascadeLit 1.5s ease-in-out infinite; }
+.cascade-mark-lit > path:nth-child(2)[data-on='1'] { animation-delay: 0.18s; }
+.cascade-mark-lit > path:nth-child(3)[data-on='1'] { animation-delay: 0.36s; }
+@keyframes cascadeLit {
+  0%, 100% { opacity: 0.4; transform: translateY(0); }
+  35%      { opacity: 1;   transform: translateY(0.6px); }
+  65%      { opacity: 0.55; transform: translateY(0); }
+}
+/* With less motion asked for, the busy signal stays (as the plain mark's does):
+   the pulse without the travel. */
+@keyframes cascadeLitStill { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
 
 /* The composer: while you write, the tier ramp flows around its edge. */
 @property --cz-ang { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
@@ -503,11 +522,13 @@ body {
 @keyframes czIdle { 0%, 88%, 100% { opacity: 1; } 92% { opacity: 0.35; } 96% { opacity: 1; } }
 
 @media (prefers-reduced-motion: reduce) {
-  .cascade-mark-lit > path[data-on='1'], .cz-composer::before, .cascade-answer.is-streaming > :last-child::after,
+  .cascade-mark-lit > path[data-on='1'] { animation: cascadeLitStill 1.8s ease-in-out infinite; }
+  .cz-composer::before, .cascade-answer.is-streaming > :last-child::after,
   .cascade-answer.cz-settle, .cz-idle-mark > path { animation: none; }
   .cz-draw-mark > path { animation: none; stroke-dashoffset: 0; }
 }
-html[data-reduce-motion='1'] .cascade-mark-lit > path[data-on='1'], html[data-reduce-motion='1'] .cz-composer::before,
+html[data-reduce-motion='1'] .cascade-mark-lit > path[data-on='1'] { animation: cascadeLitStill 1.8s ease-in-out infinite; }
+html[data-reduce-motion='1'] .cz-composer::before,
 html[data-reduce-motion='1'] .cascade-answer.is-streaming > :last-child::after, html[data-reduce-motion='1'] .cascade-answer.cz-settle,
 html[data-reduce-motion='1'] .cz-idle-mark > path { animation: none; }
 html[data-reduce-motion='1'] .cz-draw-mark > path { animation: none; stroke-dashoffset: 0; }
