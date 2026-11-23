@@ -194,6 +194,18 @@ function makesOrNeedsRepoHere({ sub, args }: { sub: string; args: string[] }): b
   return NEEDS_REPO.has(sub) && !args.includes('--no-index');
 }
 
+/**
+ * Whether a command may run with another program search path than the shell's
+ * own: a `NAME=value` before a command, `env`, `export`, `set`/`setx`, `path`,
+ * `source` or `.`, PowerShell's `$env:`, or a tool that activates an
+ * environment. Erring wide: a fact not learnt only costs finding it out again.
+ */
+function changesSearchPath(command: string): boolean {
+  // Looked for where a command starts, in each part: `jq . a.json` passes `.` as an argument.
+  return command.split(/&&|\|\||;|\||&|\n|\(/).some((part) =>
+    /^\s*([A-Za-z_][A-Za-z0-9_]*=|(env|export|set|setx|path|source|\.|conda|nvm|pyenv|rbenv|asdf|mise|direnv|nix-shell|poetry|pipenv|activate)(\s|$)|\$env:)/i.test(part));
+}
+
 /** How the project folder itself is named in facts. */
 const ROOT_LABEL = 'The project folder';
 
@@ -256,7 +268,10 @@ export function factsFrom(tool: string, input: Record<string, unknown>, output: 
     // A command that needs a repository worked there, or one was made there: it is one now.
     unlearnt.push(repoKey);
   }
-  if (failed) {
+  // A command that changes where the shell looks for programs (PATH=… cmd, env,
+  // export, set, source, an activated environment) says nothing about what this
+  // machine's shell has: `PATH=/nowhere ls` failing doesn't make `ls` missing.
+  if (failed && !changesSearchPath(command)) {
     const words = new Set(command.toLowerCase().split(/[\s;&|()]+/).filter(Boolean));
     const missing = new Set<string>();
     for (const m of text.matchAll(/(?:^|\n)(?:[\w./-]+: )?(?:(?:line )?\d+: )?([\w.+-]{1,40}): (?:command )?not found/g)) missing.add(m[1]!);

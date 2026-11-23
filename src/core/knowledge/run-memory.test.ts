@@ -528,6 +528,21 @@ describe('Codex on 784fe73', () => {
   });
 });
 
+describe('Codex on 4213fbf', () => {
+  it("a command run with another search path says nothing of what the machine's shell has", () => {
+    const keys = (command: string, out: string) => factsFrom('shell', { command }, out, '.', true).learnt.map((f) => f.key);
+    expect(keys('PATH=/definitely-missing ls', 'bash: ls: command not found')).toEqual([]);
+    expect(keys('env -i ls', 'env: ls: command not found')).toEqual([]);
+    expect(keys('export PATH=/x && jq .', 'bash: jq: command not found')).toEqual([]);
+    expect(keys('source venv/bin/activate && pytest', 'bash: pytest: command not found')).toEqual([]);
+    expect(keys('. ./env.sh; pytest', 'bash: pytest: command not found')).toEqual([]);
+    expect(keys('$env:Path = "C:\\x"; jq .', "The term 'jq' is not recognized as the name of a cmdlet")).toEqual([]);
+    expect(keys('conda activate x && pytest', 'bash: pytest: command not found')).toEqual([]);
+    // Control: the shell as it is.
+    expect(keys('jq . a.json', 'bash: jq: command not found')).toEqual(['missing:jq']);
+  });
+});
+
 describe('kept in the project, so the next run starts knowing', () => {
   it('only what may go to any model: privacy.paths holds for what an earlier run kept (Codex on 2abacac)', async () => {
     const { PrivacyPaths } = await import('../privacy/paths.js');
