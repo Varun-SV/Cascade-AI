@@ -369,6 +369,22 @@ describe('Codex on 539316f, again', () => {
   });
 });
 
+describe('Codex on 2ea2700', () => {
+  it('not ripgrep running a hostname helper, nor any command an option makes write or run', () => {
+    expect(commandReadsOnly('rg --hostname-bin=./host --hyperlink-format=default --color=always hit input.txt')).toBe(false);
+    expect(commandReadsOnly('rg --hostname-bin ./host hit')).toBe(false);
+    expect(commandReadsOnly("rg '--hostname-bin=./host' hit")).toBe(false);
+    expect(commandReadsOnly('find . -okdir rm {} ;')).toBe(false);
+    expect(commandReadsOnly('tree -o out.txt')).toBe(false);
+    expect(commandReadsOnly('file -C -m magic')).toBe(false);
+    expect(commandReadsOnly('grep --output=x a')).toBe(false);
+    // Per command: -o is only-matching to grep and rg, not an output file.
+    expect(commandReadsOnly('grep -o foo a.txt')).toBe(true);
+    expect(commandReadsOnly('rg -o foo')).toBe(true);
+    expect(commandReadsOnly('ls -C')).toBe(true);
+  });
+});
+
 describe('kept in the project, so the next run starts knowing', () => {
   it('only what may go to any model: privacy.paths holds for what an earlier run kept (Codex on 2abacac)', async () => {
     const { PrivacyPaths } = await import('../privacy/paths.js');

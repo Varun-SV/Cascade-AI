@@ -62,11 +62,23 @@ const READ_COMMANDS = new Set([
 const GIT_READS = new Set(['status', 'log', 'diff', 'show', 'rev-parse', 'ls-files', 'describe', 'blame', 'shortlog', 'cat-file', 'ls-tree']);
 const GIT_LISTS = new Set(['branch', 'tag', 'remote']);
 /**
- * Options that make an otherwise reading command write or run something: find's
- * actions, an output file, and ripgrep's `--pre`, which runs a program on every
- * file it searches.
+ * Options that make an otherwise reading command write a file or run a program,
+ * per command (one option means different things to different commands: `-o` is
+ * an output file to `tree` and only-matching to `grep`). Matched against each
+ * word as the program gets it, in either `--opt value` or `--opt=value` form.
  */
-const WRITES = /(^|\s)(-exec|-execdir|-delete|-ok|-fprint\S*|-fls|--output\S*|-o|--pre|--pre-glob)(\s|=|$)/;
+const COMMAND_WRITES: Readonly<Record<string, RegExp>> = {
+  find: /^-(exec|execdir|delete|ok|okdir|fprint\S*|fls)$/,
+  // --pre runs a program on every file searched; --hostname-bin runs one for hyperlinks.
+  rg: /^--(pre|pre-glob|hostname-bin)(=|$)/,
+  tree: /^(-o|--output)(=|$)/,
+  // Compiles a magic file, written next to it.
+  file: /^(-C|--compile)$/,
+};
+/** An output file, whichever command takes it. */
+const ANY_WRITES = /^--output(=|$)/;
+/** Whether a word given to `cmd` makes it write or run something. */
+const writes = (cmd: string, word: string): boolean => ANY_WRITES.test(word) || (COMMAND_WRITES[cmd]?.test(word) ?? false);
 
 /** Subcommands whose output is a diff by default: git runs configured helpers for it. */
 const GIT_DIFFS = new Set(['diff', 'show', 'blame']);
@@ -114,7 +126,7 @@ export function commandReadsOnly(command: string): boolean {
     const [head, ...rest] = words;
     const cmd = head!.toLowerCase();
     if (cmd === 'git') return rest.length > 0 && !rest[0]!.startsWith('-') && gitReads(rest[0]!, rest.slice(1));
-    return READ_COMMANDS.has(cmd) && !WRITES.test(` ${rest.join(' ')} `);
+    return READ_COMMANDS.has(cmd) && !rest.some((w) => writes(cmd, w));
   });
 }
 
