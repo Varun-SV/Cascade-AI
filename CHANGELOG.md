@@ -5,6 +5,26 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.97.5 - 2026-11-23
+
+### Fixed
+- **`cascade index` works with a Gemini key, and never sends a bare Ollama
+  entry to OpenAI.** Only OpenAI, OpenAI-compatible and Ollama providers could
+  embed, so with Gemini configured the index picked the Ollama entry Cascade
+  adds by default. That entry has no address, and the OpenAI library then
+  fell back to api.openai.com with a placeholder key, failing with
+  "401 Incorrect API key provided: sk-none". Now:
+  - A Gemini key embeds through Gemini (`gemini-embedding-001`), and reranks
+    with a small Gemini model.
+  - Ollama is reached at its address, `http://localhost:11434` by default.
+  - The order is OpenAI, an OpenAI-compatible endpoint, an Ollama you set an
+    address for, Gemini, then the default Ollama entry. Code search in runs
+    uses the same order.
+  - `cascade index` says which provider and model it embeds with, and a
+    failure is one line (a refused key is said plainly, without repeating
+    it) instead of a stack trace. In a run, the code index is skipped with
+    the same line.
+
 ## 0.97.4 - 2026-11-20
 
 ### Fixed

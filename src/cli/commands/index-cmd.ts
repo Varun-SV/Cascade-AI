@@ -16,7 +16,7 @@ import { PrivacyPaths } from '../../core/privacy/paths.js';
 import { statePath, STATE } from '../../config/project-state.js';
 import { WorkspaceGate } from '../../tools/workspace-gate.js';
 import { WorkspaceIndex } from '../../retrieval/workspace-index.js';
-import { embedderFromProviders } from '../../retrieval/embedder.js';
+import { describeEmbedFailure, embedderFromProviders } from '../../retrieval/embedder.js';
 import { LLMReranker, chatCompleterFromProviders } from '../../retrieval/rerank.js';
 
 export async function indexCommand(dirPath?: string): Promise<void> {
@@ -28,7 +28,7 @@ export async function indexCommand(dirPath?: string): Promise<void> {
   const embedder = embedderFromProviders(config.providers);
   if (!embedder) {
     console.log(chalk.red('\n  No embeddings-capable provider configured.'));
-    console.log(chalk.dim('  Add an OpenAI, OpenAI-compatible, or Ollama key, then re-run `cascade index`.\n'));
+    console.log(chalk.dim('  Add an OpenAI, OpenAI-compatible, Gemini or Ollama provider, then re-run `cascade index`.\n'));
     process.exitCode = 1;
     return;
   }
@@ -57,12 +57,21 @@ export async function indexCommand(dirPath?: string): Promise<void> {
     whileReading: whileReadingIn(workspace),
   });
 
-  console.log(chalk.magenta(`\n  ◈ Indexing ${workspace}\n`));
+  console.log(chalk.magenta(`\n  ◈ Indexing ${workspace}`));
+  console.log(chalk.dim(`    Embeddings: ${embedder.provider} · ${embedder.model}\n`));
   let seen = 0;
-  const res = await index.refresh(() => {
-    seen++;
-    if (seen % 10 === 0) process.stdout.write(chalk.dim(`  …embedded ${seen} changed files\r`));
-  });
+  let res: Awaited<ReturnType<typeof index.refresh>>;
+  try {
+    res = await index.refresh(() => {
+      seen++;
+      if (seen % 10 === 0) process.stdout.write(chalk.dim(`  …embedded ${seen} changed files\r`));
+    });
+  } catch (err) {
+    db.close();
+    console.log(chalk.red(`  ✗ ${describeEmbedFailure(err, embedder)}\n`));
+    process.exitCode = 1;
+    return;
+  }
 
   console.log(
     chalk.green(`  ✓ ${res.filesIndexed} file(s) indexed`) +
