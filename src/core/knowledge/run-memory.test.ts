@@ -410,6 +410,50 @@ describe('Codex on e3c4fe2: changes made outside any run', () => {
   });
 });
 
+describe('Codex on e3c4fe2: what stops being true, and command names as spelt', () => {
+  it('a worker shown a fact is told once it stops being true', () => {
+    const mem = new RunMemory(root);
+    run(mem, 'shell', { command: 'git status' }, NOT_A_REPO, 'T3-a', bad);
+    run(mem, 'shell', { command: 'jq . a.json' }, 'Exit 127:\nbash: jq: command not found', 'T3-a', bad);
+    expect(mem.unseenBy('T3-b').map((f) => f.key).sort()).toEqual(['git-repo:the project folder', 'missing:jq']);
+    // Another worker makes both untrue.
+    run(mem, 'shell', { command: 'git init' }, 'Initialized empty Git repository', 'T3-c');
+    run(mem, 'shell', { command: 'jq . a.json' }, '{}', 'T3-c');
+    const told = mem.unseenBy('T3-b');
+    expect(told.every((f) => f.retracted)).toBe(true);
+    expect(told.map((f) => f.text)).toEqual([
+      'The project folder is a git repository now: git commands work there.',
+      '`jq` runs in this machine\'s shell now: use it.',
+    ]);
+    expect(formatRunFacts(told)).toMatch(/^NO LONGER TRUE[\s\S]*git repository now/);
+    expect(formatRunFacts(told)).not.toContain('ALREADY FOUND');
+    // Once.
+    expect(mem.unseenBy('T3-b')).toEqual([]);
+    // A worker never shown them is told nothing.
+    expect(mem.unseenBy('T3-d')).toEqual([]);
+  });
+
+  it('`JQ` failing says nothing of `jq`, now or in the next run', () => {
+    const db = new WorldStateDB(root);
+    try {
+      const mem = new RunMemory(root, db);
+      run(mem, 'shell', { command: 'JQ . a.json' }, 'Exit 127:\nbash: JQ: command not found', 'T3-a', bad);
+      expect(mem.all().map((f) => f.key)).toEqual(['missing:JQ']);
+      const [kept] = db.getFactsForEntities(['environment']);
+      expect(kept!.relation).toMatch(/^command jq #[0-9a-f]{8}$/);
+      expect(kept!.value).toBe('not available (as JQ)');
+      // `jq` working doesn't retract it…
+      run(mem, 'shell', { command: 'jq . a.json' }, '{}', 'T3-a');
+      expect(mem.all().map((f) => f.key)).toEqual(['missing:JQ']);
+      // …and the next run is told of `JQ`, spelt as it is, not of `jq`.
+      expect(new RunMemory(root, db).all().map((f) => f.text.split(' ')[0])).toEqual(['`JQ`']);
+      // A plain lowercase fact, as kept before, still loads.
+      db.upsertFact('environment', 'command wc', 'not available', 'run:T3-old', undefined, []);
+      expect(new RunMemory(root, db).all().map((f) => f.key).sort()).toEqual(['missing:JQ', 'missing:wc']);
+    } finally { db.close(); }
+  });
+});
+
 describe('kept in the project, so the next run starts knowing', () => {
   it('only what may go to any model: privacy.paths holds for what an earlier run kept (Codex on 2abacac)', async () => {
     const { PrivacyPaths } = await import('../privacy/paths.js');

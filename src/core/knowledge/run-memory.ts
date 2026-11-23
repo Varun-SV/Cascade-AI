@@ -39,7 +39,13 @@ import { ownerState, ownerToken, STALE_LOCK_MS } from '../../utils/file-lock.js'
 import { factMayLeave, type FactPrivacy, type WorldStateDB } from './world-state.js';
 
 /** A fact for the board: `key` identifies it (one per thing it is about). */
-export interface RunFact { key: string; text: string; from: string }
+export interface RunFact {
+  key: string;
+  text: string;
+  from: string;
+  /** Set when this tells a worker that something it was shown is no longer true. */
+  retracted?: boolean;
+}
 
 interface Kept { relation: string; value: string }
 
@@ -180,28 +186,45 @@ function commandOf(tool: string, input: Record<string, unknown>): string {
 const ROOT_LABEL = 'The project folder';
 
 /**
- * The relation a "not a git repository" fact is kept under, for a folder as it
- * is spelt. The project's knowledge lowercases relations, and on a filesystem
- * that tells `Docs` from `docs` they are two folders: a name with capitals gets a
- * short hash of its exact spelling, so the two never share (or retract) a fact.
- * The exact spelling is kept in the fact's value (see repoValue). An all-lowercase
- * name keeps the plain form, as facts kept before this have it.
+ * The relation a fact about a name (a folder, a command) is kept under, for the
+ * name as it is spelt. The project's knowledge lowercases relations, and on a
+ * filesystem or shell that tells `Docs` from `docs`, or `JQ` from `jq`, they are
+ * two things: a name with capitals gets a short hash of its exact spelling, so
+ * the two never share (or retract) a fact. The exact spelling is kept in the
+ * fact's value (see keyedValue). An all-lowercase name keeps the plain form, as
+ * facts kept before this have it.
  */
-function repoRelation(folder: string): string {
-  const lower = folder.toLowerCase();
-  return lower === folder ? `git repository at ${folder}` : `git repository at ${lower} #${crypto.createHash('sha256').update(folder).digest('hex').slice(0, 8)}`;
+function keyedRelation(stem: string, name: string): string {
+  const lower = name.toLowerCase();
+  return lower === name ? `${stem}${name}` : `${stem}${lower} #${crypto.createHash('sha256').update(name).digest('hex').slice(0, 8)}`;
 }
-function repoValue(folder: string): string {
-  return folder === folder.toLowerCase() ? 'none' : `none (at ${folder})`;
+function keyedValue(fail: string, word: string, name: string): string {
+  return name === name.toLowerCase() ? fail : `${fail} (${word} ${name})`;
 }
-/** The folder a kept "not a git repository" fact is about, exactly as spelt; null when it is not one. */
-function repoFolderOf(relation: string, value: string): string | null {
-  const m = /^git repository at (.+?)(?: #([0-9a-f]{8}))?$/.exec(relation);
-  const v = /^none(?: \(at (.+)\))?$/i.exec(value.trim());
+/** The name a kept fact is about, exactly as spelt; null when it is not that failure. */
+function keyedNameOf(stem: string, fail: string, word: string, relation: string, value: string): string | null {
+  if (!relation.startsWith(stem)) return null;
+  const m = /^(.+?)(?: #[0-9a-f]{8})?$/.exec(relation.slice(stem.length));
+  const v = new RegExp(`^${fail}(?: \\(${word} (.+)\\))?$`, 'i').exec(value.trim());
   if (!m || !v) return null;
-  const folder = v[1] ?? m[1]!;
+  const name = v[1] ?? m[1]!;
   // The spelling in the value must be the one the relation was made for.
-  return repoRelation(folder) === relation ? folder : null;
+  return keyedRelation(stem, name) === relation ? name : null;
+}
+const REPO = { stem: 'git repository at ', fail: 'none', word: 'at' } as const;
+const COMMAND = { stem: 'command ', fail: 'not available', word: 'as' } as const;
+const repoRelation = (folder: string): string => keyedRelation(REPO.stem, folder);
+const repoValue = (folder: string): string => keyedValue(REPO.fail, REPO.word, folder);
+const missingText = (name: string): string => `\`${name}\` is not available in this machine's shell: use another way (another command, or run_code).`;
+const repoText = (folder: string): string => `${folder} is not a git repository: git commands there fail (run "git init" first if one is needed).`;
+
+/** What a worker shown a fact is told once it stops being true. */
+function retractionText(key: string): string {
+  if (key.startsWith('git-repo:')) {
+    const folder = key.slice('git-repo:'.length);
+    return `${folder === 'the project folder' ? ROOT_LABEL : folder} is a git repository now: git commands work there.`;
+  }
+  return `\`${key.slice('missing:'.length)}\` runs in this machine's shell now: use it.`;
 }
 
 export function factsFrom(tool: string, input: Record<string, unknown>, output: string, cwdLabel: string, failed: boolean): { learnt: (RunFact & Kept)[]; unlearnt: string[] } {
@@ -216,7 +239,7 @@ export function factsFrom(tool: string, input: Record<string, unknown>, output: 
   const repoKey = `git-repo:${folder}`;
   const gitRelated = (tool === 'git' || /(^|[\s;&|])git\s/.test(` ${command}`)) && !runsElsewhere(tool, input, command);
   if (gitRelated && failed && /not a git repository/i.test(text)) {
-    learnt.push({ key: repoKey, text: `${cwdLabel} is not a git repository: git commands there fail (run "git init" first if one is needed).`, from: '', relation: repoRelation(folder), value: repoValue(folder) });
+    learnt.push({ key: repoKey, text: repoText(cwdLabel), from: '', relation: repoRelation(folder), value: repoValue(folder) });
   } else if (gitRelated && !/not a git repository/i.test(text) && (!failed || /\bgit\s+(init|clone)\b/.test(command))) {
     // git worked there (or a repository was just made): it is one now.
     unlearnt.push(repoKey);
@@ -230,7 +253,8 @@ export function factsFrom(tool: string, input: Record<string, unknown>, output: 
     // Only a command this call asked for: an error it printed about something else is not about this machine's shell.
     for (const name of missing) {
       if (!words.has(name.toLowerCase())) continue;
-      learnt.push({ key: `missing:${name.toLowerCase()}`, text: `\`${name}\` is not available in this machine's shell: use another way (another command, or run_code).`, from: '', relation: `command ${name.toLowerCase()}`, value: 'not available' });
+      // As spelt: on a shell that tells `JQ` from `jq`, one failing says nothing of the other.
+      learnt.push({ key: `missing:${name}`, text: missingText(name), from: '', relation: keyedRelation(COMMAND.stem, name), value: keyedValue(COMMAND.fail, COMMAND.word, name) });
     }
   }
   return { learnt, unlearnt };
@@ -359,6 +383,8 @@ export interface Observed {
 export class RunMemory {
   private facts = new Map<string, RunFact & { relation?: string }>();
   private seen = new Map<string, Set<string>>();
+  /** Per worker: facts it was shown that have since stopped being true, to tell it. */
+  private retractions = new Map<string, RunFact[]>();
   private results = new Map<string, { output: string; by: string; epoch: number; mark: string; at: number }>();
   /** Calls begun and not yet observed: the epoch and workspace mark each started at. */
   private started = new Map<number, { epoch: number; mark: string; leave?: () => void }>();
@@ -393,15 +419,13 @@ export class RunMemory {
       // Only the failure each relation records: the entity is general knowledge, and
       // a fact extracted or imported there may say the opposite ("command jq:
       // available"), which must not reach workers as something missing.
-      const folder = f.relation.startsWith('git repository at ') ? repoFolderOf(f.relation, f.value) : null;
-      const key = folder !== null ? `git-repo:${folder}`
-        : f.relation.startsWith('command ') && f.value.trim().toLowerCase() === 'not available' ? `missing:${f.relation.slice('command '.length)}` : '';
+      const folder = keyedNameOf(REPO.stem, REPO.fail, REPO.word, f.relation, f.value);
+      const command = folder === null ? keyedNameOf(COMMAND.stem, COMMAND.fail, COMMAND.word, f.relation, f.value) : null;
+      const key = folder !== null ? `git-repo:${folder}` : command !== null ? `missing:${command}` : '';
       if (!key) continue;
       if (!factMayLeave(f, rules, root)) continue;
       if (key.startsWith('git-repo:') && this.folderPrivate(key.slice('git-repo:'.length), rules)) continue;
-      const text = key.startsWith('git-repo:')
-        ? `${key.slice('git-repo:'.length)} is not a git repository: git commands there fail (run "git init" first if one is needed).`
-        : `\`${key.slice('missing:'.length)}\` is not available in this machine's shell: use another way (another command, or run_code).`;
+      const text = folder !== null ? repoText(folder) : missingText(command!);
       this.facts.set(key, { key, text, from: 'an earlier run', relation: f.relation });
     }
   }
@@ -474,7 +498,7 @@ export class RunMemory {
     const { learnt, unlearnt } = factsFrom(tool, input, output, this.label(where), how.failed);
     for (const key of unlearnt) this.forget(key);
     // A command that ran is no longer missing.
-    const ran = commandOf(tool, input).trim().split(/\s+/)[0]?.toLowerCase();
+    const ran = commandOf(tool, input).trim().split(/\s+/)[0];
     if (ran && !how.failed) this.forget(`missing:${ran}`);
     for (const f of learnt) {
       if (f.key.startsWith('git-repo:') && this.folderPrivate(path.relative(this.root, where).split(path.sep).join('/') || 'the project folder')) continue;
@@ -529,6 +553,14 @@ export class RunMemory {
     const fact = this.facts.get(key);
     if (!fact) return;
     this.facts.delete(key);
+    // A worker that was shown it is working from it: told it no longer holds,
+    // before its next model call, and shown it afresh should it come back.
+    for (const [worker, seen] of this.seen) {
+      if (!seen.delete(key)) continue;
+      let queued = this.retractions.get(worker);
+      if (!queued) { queued = []; this.retractions.set(worker, queued); }
+      queued.push({ key: `retracted:${key}`, text: retractionText(key), from: '', retracted: true });
+    }
     if (fact.relation && this.keep()) this.persist(() => this.db?.deleteFact(ENTITY, fact.relation!));
   }
 
@@ -538,12 +570,17 @@ export class RunMemory {
     return s;
   }
 
-  /** The facts `worker` hasn't been shown yet, now marked shown. */
+  /**
+   * What `worker` hasn't been shown yet, now marked shown: facts found since, and
+   * facts it was shown that have stopped being true.
+   */
   unseenBy(worker: string): RunFact[] {
     const seen = this.seenBy(worker);
     const out = [...this.facts.values()].filter((f) => !seen.has(f.key));
     for (const f of out) seen.add(f.key);
-    return out.map(({ key, text, from }) => ({ key, text, from }));
+    const retracted = this.retractions.get(worker) ?? [];
+    this.retractions.delete(worker);
+    return [...retracted, ...out.map(({ key, text, from }) => ({ key, text, from }))];
   }
 
   /** Every fact on the board (for tests and readouts). */
@@ -554,5 +591,10 @@ export class RunMemory {
 
 /** How a worker is told what the others found, before its next model call. */
 export function formatRunFacts(facts: RunFact[]): string {
-  return `ALREADY FOUND IN THIS RUN (by other workers, or earlier runs in this project). Take these as known; don't spend calls finding them out again:\n${facts.map((f) => `- ${f.text}`).join('\n')}`;
+  const known = facts.filter((f) => !f.retracted);
+  const gone = facts.filter((f) => f.retracted);
+  const parts: string[] = [];
+  if (gone.length) parts.push(`NO LONGER TRUE (changed since you were told, by another worker): this replaces what you were told before:\n${gone.map((f) => `- ${f.text}`).join('\n')}`);
+  if (known.length) parts.push(`ALREADY FOUND IN THIS RUN (by other workers, or earlier runs in this project). Take these as known; don't spend calls finding them out again:\n${known.map((f) => `- ${f.text}`).join('\n')}`);
+  return parts.join('\n\n');
 }
