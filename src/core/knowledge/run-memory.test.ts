@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RunMemory, callReadsOnly, commandReadsOnly, factsFrom, formatRunFacts, workspaceChangeMarker, type ChangeMarker } from './run-memory.js';
 import { statePath, STATE } from '../../config/project-state.js';
+import { ownerToken } from '../../utils/file-lock.js';
 import { WorldStateDB } from './world-state.js';
 
 let root = '';
@@ -255,7 +256,7 @@ describe('Codex on 251b864: another run in the same workspace', () => {
 
   it("a mark that can't be read never matches, so nothing is given again", () => {
     let n = 0;
-    const unreadable: ChangeMarker = { current: () => `unreadable:${++n}`, bump: () => {} };
+    const unreadable: ChangeMarker = { current: () => `unreadable:${++n}`, bump: () => {}, enter: () => () => {}, busy: () => false };
     const mem = new RunMemory(root, undefined, () => true, () => undefined, unreadable);
     run(mem, 'shell', { command: 'ls' }, 'a.txt', 'T3-a');
     expect(mem.reuse('shell', { command: 'ls' })).toBeNull();
@@ -267,7 +268,7 @@ describe('Codex on 251b864: another run in the same workspace', () => {
     marker.bump();
     const after = marker.current();
     expect(after).not.toBe(before);
-    expect(fs.readFileSync(statePath(root, STATE.boardChanges), 'utf8')).toBe(after);
+    expect(fs.readFileSync(path.join(statePath(root, STATE.boardChanges), 'mark'), 'utf8')).toBe(after);
     expect(after).toMatch(/^[0-9a-f]+:\d+:\d+$/);
     expect(fs.existsSync(path.join(root, STATE.boardChanges))).toBe(false);
   });
@@ -315,6 +316,56 @@ describe('Codex on 539316f', () => {
       db.upsertFact('environment', 'git repository at docs', 'none (at DOCS)', 'x', undefined, []);
       expect(new RunMemory(root, db).all()).toEqual([]);
     } finally { db.close(); }
+  });
+});
+
+describe('Codex on 539316f, again', () => {
+  // Run B holds a fallback open (waiting on approval, say) and then writes through
+  // a replacement tool the board sees no call for. Run A must not answer from
+  // memory meanwhile, nor keep what it read meanwhile.
+  it("another run's held fallback counts as a change under way, for every run", () => {
+    const a = new RunMemory(root);
+    const b = new RunMemory(root);
+    run(a, 'shell', { command: 'cat a.txt' }, 'old', 'T3-a');
+    const release = b.hold();
+    expect(a.reuse('shell', { command: 'cat a.txt' })).toBeNull();
+    run(a, 'shell', { command: 'cat a.txt' }, 'old', 'T3-a');
+    expect(a.reuse('shell', { command: 'cat a.txt' })).toBeNull();
+    // (B's replacement writes a.txt here, unseen.)
+    release();
+    expect(a.reuse('shell', { command: 'cat a.txt' })).toBeNull();
+    run(a, 'shell', { command: 'cat a.txt' }, 'new', 'T3-a');
+    expect(a.reuse('shell', { command: 'cat a.txt' })?.output).toBe('new');
+  });
+
+  it('a note left by a process that has ended is cleared; one that may be running is not', () => {
+    const marker = workspaceChangeMarker(root);
+    const active = path.join(statePath(root, STATE.boardChanges), 'active');
+    fs.mkdirSync(active, { recursive: true });
+    fs.writeFileSync(path.join(active, 'gone.1'), ownerToken(2 ** 22 + 12345));
+    expect(marker.busy()).toBe(false);
+    expect(fs.existsSync(path.join(active, 'gone.1'))).toBe(false);
+    // Another host's: can't be checked, so it counts until it is old.
+    fs.writeFileSync(path.join(active, 'elsewhere.1'), JSON.stringify({ host: 'another-host', ns: '', pid: 1, started: '', nonce: 'x' }));
+    expect(marker.busy()).toBe(true);
+    const old = new Date(Date.now() - 11 * 60_000);
+    fs.utimesSync(path.join(active, 'elsewhere.1'), old, old);
+    expect(marker.busy()).toBe(false);
+  });
+
+  it("a knowledge store that can't be written never fails the call", () => {
+    const failing = {
+      getFactsForEntities: () => { throw new Error('SQLITE_BUSY'); },
+      upsertFact: () => { throw new Error('SQLITE_READONLY'); },
+      deleteFact: () => { throw new Error('SQLITE_READONLY'); },
+    } as unknown as WorldStateDB;
+    const mem = new RunMemory(root, failing);
+    expect(() => run(mem, 'shell', { command: 'git status' }, NOT_A_REPO, 'T3-a', bad)).not.toThrow();
+    // Still on the board for this run…
+    expect(mem.all().map((f) => f.key)).toEqual(['git-repo:the project folder']);
+    // …and `git init` working retracts it without throwing either.
+    expect(() => run(mem, 'shell', { command: 'git init' }, 'Initialized empty Git repository', 'T3-a')).not.toThrow();
+    expect(mem.all()).toEqual([]);
   });
 });
 

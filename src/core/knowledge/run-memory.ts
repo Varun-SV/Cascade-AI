@@ -35,6 +35,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { statePath, STATE } from '../../config/project-state.js';
+import { ownerState, ownerToken, STALE_LOCK_MS } from '../../utils/file-lock.js';
 import { factMayLeave, type FactPrivacy, type WorldStateDB } from './world-state.js';
 
 /** A fact for the board: `key` identifies it (one per thing it is about). */
@@ -219,43 +220,53 @@ export function factsFrom(tool: string, input: Record<string, unknown>, output: 
 
 /**
  * What the workspace has been through, as far as any run in it knows: every run's
- * board (in this process or another) changes it when a call that may change the
- * workspace starts and ends. A stored answer is given again only while it is the
- * same as when that answer was got, so a write made by another run, in another
- * window, makes this run's stored answers stale as surely as its own.
+ * board (in this process or another) changes the mark when a call that may change
+ * the workspace starts and ends, and leaves an "active" note while it runs (or
+ * while a fallback is held open). A stored answer is given again only while the
+ * mark is the one it was got under and no run has a change under way, so a write
+ * made by another run, in another window, makes this run's stored answers stale
+ * as surely as its own.
  */
 export interface ChangeMarker {
   /** The current mark. Two reads give the same mark only if nothing was marked between them. */
   current(): string;
   /** Mark a change. */
   bump(): void;
+  /** A change under way, until the returned function is called. */
+  enter(): () => void;
+  /** Whether any run has a change under way. */
+  busy(): boolean;
 }
 
-/** One per process, so marks from two processes never coincide. */
+/** One per process, so marks and notes from two processes never coincide. */
 const INSTANCE = crypto.randomBytes(6).toString('hex');
 let marks = 0;
 
 /**
- * The marker kept in the project's state folder, out of reach of tools. It holds
- * only a random mark. When it can't be read or written, nothing is given again:
- * a mark that can't be trusted never matches.
+ * The marker kept in the project's state folder, out of reach of tools: a `mark`
+ * file holding only a random mark, and `active/`, one note per change under way,
+ * holding only which process left it (file-lock.ts's owner token). A note left by
+ * a process that has ended is cleared; one whose process can't be checked (another
+ * host, no /proc) counts until it is STALE_LOCK_MS old. When any of it can't be
+ * read or written, nothing is given again: a mark that can't be trusted never
+ * matches, and the workspace counts as busy.
  */
 export function workspaceChangeMarker(root: string): ChangeMarker {
-  let file: string | null = null;
+  let dir: string | null = null;
   let broken = false;
-  const where = (): string => (file ??= statePath(root, STATE.boardChanges));
+  const where = (): string => (dir ??= statePath(root, STATE.boardChanges));
   const never = (): string => `unreadable:${INSTANCE}:${++marks}`;
   return {
     current() {
       if (broken) return never();
-      try { return fs.readFileSync(where(), 'utf8'); } catch (err) {
+      try { return fs.readFileSync(path.join(where(), 'mark'), 'utf8'); } catch (err) {
         return (err as NodeJS.ErrnoException).code === 'ENOENT' ? '' : never();
       }
     },
     bump() {
       try {
-        const target = where();
-        fs.mkdirSync(path.dirname(target), { recursive: true });
+        const target = path.join(where(), 'mark');
+        fs.mkdirSync(where(), { recursive: true });
         // Written whole, then renamed into place: a reader sees the old mark or the new one.
         const tmp = `${target}.${INSTANCE}.${++marks}`;
         fs.writeFileSync(tmp, `${INSTANCE}:${marks}:${Date.now()}`);
@@ -263,6 +274,44 @@ export function workspaceChangeMarker(root: string): ChangeMarker {
       } catch {
         broken = true;
       }
+    },
+    enter() {
+      const note = path.join(where(), 'active', `${INSTANCE}.${++marks}`);
+      try {
+        fs.mkdirSync(path.dirname(note), { recursive: true });
+        fs.writeFileSync(note, ownerToken(process.pid));
+      } catch {
+        broken = true;
+      }
+      let left = false;
+      return () => {
+        if (left) return;
+        left = true;
+        try { fs.rmSync(note, { force: true }); } catch { broken = true; }
+      };
+    },
+    busy() {
+      if (broken) return true;
+      const active = path.join(where(), 'active');
+      let names: string[];
+      try { names = fs.readdirSync(active); } catch (err) {
+        return (err as NodeJS.ErrnoException).code !== 'ENOENT';
+      }
+      for (const name of names) {
+        // This process's own notes are its own changes, under way.
+        if (name.startsWith(`${INSTANCE}.`)) return true;
+        const note = path.join(active, name);
+        try {
+          const state = ownerState(fs.readFileSync(note, 'utf8'));
+          const stale = state === 'dead' || (state === 'unknown' && Date.now() - fs.statSync(note).mtimeMs > STALE_LOCK_MS);
+          if (!stale) return true;
+          fs.rmSync(note, { force: true });
+        } catch (err) {
+          // Gone meanwhile: that change has ended. Anything else: assume it hasn't.
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return true;
+        }
+      }
+      return false;
     },
   };
 }
@@ -283,7 +332,7 @@ export class RunMemory {
   private seen = new Map<string, Set<string>>();
   private results = new Map<string, { output: string; by: string; epoch: number; mark: string }>();
   /** Calls begun and not yet observed: the epoch and workspace mark each started at. */
-  private started = new Map<number, { epoch: number; mark: string }>();
+  private started = new Map<number, { epoch: number; mark: string; leave?: () => void }>();
   private nextTicket = 1;
   /** Bumped by every call that may change anything: a stored answer from before it is stale. */
   private epoch = 0;
@@ -309,7 +358,9 @@ export class RunMemory {
     // so each fact passes the same gate as T1's plan and graph_search
     // (factMayLeave), and one about a folder that is local-only now is left out.
     const rules = privacy();
-    for (const f of db?.getFactsForEntities([ENTITY]) ?? []) {
+    let kept: ReturnType<WorldStateDB['getFactsForEntities']> = [];
+    try { kept = db?.getFactsForEntities([ENTITY]) ?? []; } catch { /* starts empty */ }
+    for (const f of kept) {
       // Only the failure each relation records: the entity is general knowledge, and
       // a fact extracted or imported there may say the opposite ("command jq:
       // available"), which must not reach workers as something missing.
@@ -362,7 +413,7 @@ export class RunMemory {
   reuse(tool: string, input: Record<string, unknown>): { output: string; by: string } | null {
     const key = this.reusable(tool, input);
     const hit = key ? this.results.get(key) : undefined;
-    return hit && hit.epoch === this.epoch && this.changing === 0 && hit.mark === this.changes.current() ? { output: hit.output, by: hit.by } : null;
+    return hit && hit.epoch === this.epoch && this.changing === 0 && hit.mark === this.changes.current() && !this.changes.busy() ? { output: hit.output, by: hit.by } : null;
   }
 
   /**
@@ -371,9 +422,10 @@ export class RunMemory {
    * Returns a ticket for `observe`: what the board and the workspace were when it started.
    */
   begin(tool: string, input: Record<string, unknown>): number {
-    if (!callReadsOnly(tool, input)) { this.changing += 1; this.changes.bump(); }
+    let leave: (() => void) | undefined;
+    if (!callReadsOnly(tool, input)) { this.changing += 1; leave = this.changes.enter(); this.changes.bump(); }
     const ticket = this.nextTicket++;
-    this.started.set(ticket, { epoch: this.epoch, mark: this.changes.current() });
+    this.started.set(ticket, { epoch: this.epoch, mark: this.changes.current(), leave });
     return ticket;
   }
 
@@ -386,7 +438,7 @@ export class RunMemory {
     this.started.delete(ticket);
     // Something that may change things, and finished (or failed part way): anything
     // stored before it is stale, here and in every other run in this workspace.
-    if (!callReadsOnly(tool, input)) { this.epoch += 1; this.changing = Math.max(0, this.changing - 1); this.changes.bump(); }
+    if (!callReadsOnly(tool, input)) { this.epoch += 1; this.changing = Math.max(0, this.changing - 1); this.changes.bump(); started?.leave?.(); }
     if (!how.publish) return;
     const where = this.cwd(input);
     const { learnt, unlearnt } = factsFrom(tool, input, output, this.label(where), how.failed);
@@ -401,11 +453,11 @@ export class RunMemory {
       this.facts.set(f.key, { key: f.key, text: f.text, from: by, relation: f.relation });
       // Who found it has seen it.
       this.seenBy(by).add(f.key);
-      if (isNew && this.keep()) this.db?.upsertFact(ENTITY, f.relation, f.value, `run:${by}`, undefined, []);
+      if (isNew && this.keep()) this.persist(() => this.db?.upsertFact(ENTITY, f.relation, f.value, `run:${by}`, undefined, []));
     }
     const key = this.reusable(tool, input);
     // Kept only if nothing changed while it ran, by this run or any other.
-    if (key && !how.failed && started && started.epoch === this.epoch && started.mark === this.changes.current() && output.length <= MAX_RESULT_CHARS) {
+    if (key && !how.failed && started && started.epoch === this.epoch && started.mark === this.changes.current() && !this.changes.busy() && output.length <= MAX_RESULT_CHARS) {
       if (this.results.size >= MAX_RESULTS) this.results.delete(this.results.keys().next().value!);
       this.results.set(key, { output, by, epoch: this.epoch, mark: started.mark });
     }
@@ -419,6 +471,9 @@ export class RunMemory {
    */
   hold(): () => void {
     this.changing += 1;
+    // Under way for every run in the workspace, not only this one: another run must
+    // not answer from memory while this fallback may be writing.
+    const leave = this.changes.enter();
     this.changes.bump();
     let done = false;
     return () => {
@@ -427,14 +482,24 @@ export class RunMemory {
       this.epoch += 1;
       this.changing = Math.max(0, this.changing - 1);
       this.changes.bump();
+      leave();
     };
+  }
+
+  /**
+   * A write to the project's knowledge, best-effort: the board is for this run
+   * first, and a store that can't be written (read-only, locked) must not turn a
+   * command that succeeded into a failed tool call.
+   */
+  private persist(write: () => void): void {
+    try { write(); } catch { /* kept for this run only */ }
   }
 
   private forget(key: string): void {
     const fact = this.facts.get(key);
     if (!fact) return;
     this.facts.delete(key);
-    if (fact.relation && this.keep()) this.db?.deleteFact(ENTITY, fact.relation);
+    if (fact.relation && this.keep()) this.persist(() => this.db?.deleteFact(ENTITY, fact.relation!));
   }
 
   private seenBy(worker: string): Set<string> {
