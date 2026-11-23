@@ -29,9 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     does a file saved in the desktop app's editor. An answer is reused for a
     minute at most, since an edit made in another editor or a terminal
     can't be seen. `git
-    diff`, `git show`, `git blame` and `git log -p` can run helpers your
-    repository configures, so they are reused only with `--no-ext-diff
-    --no-textconv`.
+    show`, `git blame` and `git log -p` can run helpers your repository
+    configures, so they are reused only with `--no-ext-diff --no-textconv`,
+    and `git status`, `git diff` and `git ls-files`, which may run its
+    `core.fsmonitor` hook, are never reused.
   - **It grows with you.** The facts are kept in the project's knowledge,
     so the next run starts out knowing them, with folder names spelt as
     they are (`Docs` and `docs` are two folders). One that stops being true

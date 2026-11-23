@@ -71,7 +71,10 @@ const READ_COMMANDS = new Set([
   'get-childitem', 'gci', 'get-content', 'gc', 'select-string', 'test-path', 'resolve-path', 'get-location',
 ]);
 /** git subcommands that only read; a few only in their listing form. */
-const GIT_READS = new Set(['status', 'log', 'diff', 'show', 'rev-parse', 'ls-files', 'describe', 'blame', 'shortlog', 'cat-file', 'ls-tree']);
+// Not status, diff, ls-files or describe --dirty: they look at the working tree,
+// and to do that git may run the repository's core.fsmonitor hook, which can
+// do anything. What reads only history runs no such program.
+const GIT_READS = new Set(['log', 'show', 'rev-parse', 'describe', 'blame', 'shortlog', 'cat-file', 'ls-tree']);
 const GIT_LISTS = new Set(['branch', 'tag', 'remote']);
 /**
  * Options that make an otherwise reading command write a file or run a program,
@@ -110,6 +113,7 @@ function gitReads(sub: string, args: string[]): boolean {
   if (args.some((a) => /^--(ext-diff|textconv|filters)$/.test(a))) return false;
   const showsDiff = GIT_DIFFS.has(s) || (s === 'log' && args.some((a) => GIT_PATCH_OPTIONS.test(a)));
   if (showsDiff && !(args.includes('--no-ext-diff') && args.includes('--no-textconv'))) return false;
+  if (s === 'describe' && args.some((a) => /^--(dirty|broken)(=|$)/.test(a))) return false;
   if (GIT_READS.has(s)) return !args.some((a) => /^--output/.test(a));
   if (!GIT_LISTS.has(s)) return false;
   // `git branch`, `git tag -l`, `git remote -v`: listing. Any other word names one to make or change.

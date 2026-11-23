@@ -67,7 +67,7 @@ describe('facts read from commands that ran here and failed', () => {
 
 describe('what may be answered again: only commands that read (Codex on 9789d5b)', () => {
   it('reading commands, and every part of a compound one', () => {
-    for (const c of ['ls -la', 'git status', 'git log --oneline -5', 'cat a.md | wc -l', 'git branch', 'git remote -v', 'find . -name "*.ts"']) {
+    for (const c of ['ls -la', 'git rev-parse HEAD', 'git log --oneline -5', 'cat a.md | wc -l', 'git branch', 'git remote -v', 'find . -name "*.ts"']) {
       expect(commandReadsOnly(c), c).toBe(true);
     }
   });
@@ -96,7 +96,7 @@ describe('what may be answered again: only commands that read (Codex on 9789d5b)
   });
 
   it('the git tool, by its operation', () => {
-    expect(callReadsOnly('git', { operation: 'status' })).toBe(true);
+    expect(callReadsOnly('git', { operation: 'log', args: ['--oneline'] })).toBe(true);
     expect(callReadsOnly('git', { operation: 'fetch' })).toBe(false);
     expect(callReadsOnly('git', { operation: 'config', args: ['--add', 'a.b', 'c'] })).toBe(false);
   });
@@ -129,10 +129,10 @@ describe('one board for the whole run', () => {
   it('git config and git fetch clear stored answers too', () => {
     for (const command of ['git config --add test.value x', 'git fetch']) {
       const mem = new RunMemory(root);
-      run(mem, 'shell', { command: 'git status' }, 'clean', 'T3-a');
-      expect(mem.reuse('shell', { command: 'git status' })).not.toBeNull();
+      run(mem, 'shell', { command: 'git log --oneline' }, 'abc first', 'T3-a');
+      expect(mem.reuse('shell', { command: 'git log --oneline' })).not.toBeNull();
       run(mem, 'shell', { command }, 'done', 'T3-b');
-      expect(mem.reuse('shell', { command: 'git status' }), command).toBeNull();
+      expect(mem.reuse('shell', { command: 'git log --oneline' }), command).toBeNull();
     }
   });
 
@@ -286,10 +286,10 @@ describe('Codex on 539316f', () => {
     expect(commandReadsOnly('git log -p --no-ext-diff --no-textconv --ext-diff')).toBe(false);
     expect(callReadsOnly('git', { operation: 'diff', args: [] })).toBe(false);
     // With both turned off, or no diff shown, it reads.
-    expect(commandReadsOnly('git diff --no-ext-diff --no-textconv')).toBe(true);
+    expect(commandReadsOnly('git show HEAD --no-ext-diff --no-textconv')).toBe(true);
     expect(commandReadsOnly('git log -p --no-ext-diff --no-textconv')).toBe(true);
     expect(commandReadsOnly('git log --oneline -5')).toBe(true);
-    expect(commandReadsOnly('git status')).toBe(true);
+    expect(commandReadsOnly('git rev-parse HEAD')).toBe(true);
   });
 
   it('`Docs` and `docs` are two folders, kept and retracted apart', () => {
@@ -401,11 +401,11 @@ describe('Codex on e3c4fe2: changes made outside any run', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
       const mem = new RunMemory(root);
-      run(mem, 'shell', { command: 'git status' }, 'clean', 'T3-a');
+      run(mem, 'shell', { command: 'git log --oneline' }, 'abc first', 'T3-a');
       vi.setSystemTime(Date.now() + MAX_ANSWER_AGE_MS - 1_000);
-      expect(mem.reuse('shell', { command: 'git status' })?.output).toBe('clean');
+      expect(mem.reuse('shell', { command: 'git log --oneline' })?.output).toBe('abc first');
       vi.setSystemTime(Date.now() + 2_000);
-      expect(mem.reuse('shell', { command: 'git status' })).toBeNull();
+      expect(mem.reuse('shell', { command: 'git log --oneline' })).toBeNull();
     } finally { vi.useRealTimers(); }
   });
 });
@@ -451,6 +451,26 @@ describe('Codex on e3c4fe2: what stops being true, and command names as spelt', 
       db.upsertFact('environment', 'command wc', 'not available', 'run:T3-old', undefined, []);
       expect(new RunMemory(root, db).all().map((f) => f.key).sort()).toEqual(['missing:JQ', 'missing:wc']);
     } finally { db.close(); }
+  });
+});
+
+describe('Codex on 463c220', () => {
+  // git may run the repository's core.fsmonitor hook whenever it looks at the
+  // working tree: status, diff, ls-files, describe --dirty.
+  it("not a git command that looks at the working tree, where a configured hook can run", () => {
+    for (const c of ['git status', 'git status --short', 'git diff --no-ext-diff --no-textconv', 'git ls-files', 'git describe --dirty']) {
+      expect(commandReadsOnly(c), c).toBe(false);
+    }
+    expect(callReadsOnly('git', { operation: 'status', args: [] })).toBe(false);
+    // So it counts as a change: what was stored before it is not given again.
+    const mem = new RunMemory(root);
+    run(mem, 'shell', { command: 'cat a.txt' }, 'old', 'T3-a');
+    run(mem, 'shell', { command: 'git status' }, 'On branch main', 'T3-b');
+    expect(mem.reuse('shell', { command: 'cat a.txt' })).toBeNull();
+    // What reads only history still reads.
+    for (const c of ['git log --oneline', 'git rev-parse HEAD', 'git describe --tags', 'git cat-file -p HEAD', 'git branch']) {
+      expect(commandReadsOnly(c), c).toBe(true);
+    }
   });
 });
 
