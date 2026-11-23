@@ -75,7 +75,7 @@ import { PrivacyPaths } from './privacy/paths.js';
 import { CascadeIgnore } from '../config/ignore.js';
 import { statePath, STATE } from '../config/project-state.js';
 import { WorkspaceIndex } from '../retrieval/workspace-index.js';
-import { embedderFromProviders } from '../retrieval/embedder.js';
+import { describeEmbedFailure, embedderFromProviders } from '../retrieval/embedder.js';
 import { LLMReranker, chatCompleterFromProviders } from '../retrieval/rerank.js';
 import { CodeSearchTool } from '../tools/code-search.js';
 import { GraphSearchTool } from '../tools/graph-search.js';
@@ -398,7 +398,15 @@ export class Cascade extends EventEmitter {
     });
 
     if (ci.autoRefresh) {
-      const res = await index.refresh();
+      let res: Awaited<ReturnType<typeof index.refresh>>;
+      try {
+        res = await index.refresh();
+      } catch (err) {
+        // Said once, in a line, and the run goes on without code_search.
+        db.close();
+        this.emit('log', { level: 'warn', message: `Code index not built: ${describeEmbedFailure(err, embedder)}` });
+        return;
+      }
       this.emit('log', { level: 'info', message: `Code index refreshed: ${res.filesIndexed} indexed, ${res.filesUnchanged} unchanged, ${res.chunks} chunks.` });
     } else {
       // No refresh to drop them, so drop them here: files protected or made
