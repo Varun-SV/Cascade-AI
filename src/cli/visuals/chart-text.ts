@@ -25,6 +25,8 @@ const colour = (i: number) => chalk.hex(PALETTE[i % PALETTE.length]!);
 /** A number as people write it: 9542 → "9,542", 0.125 → "0.13", 1.5e6 → "1.5M". */
 export function shortNumber(n: number): string {
   const abs = Math.abs(n);
+  // Small but not zero: two significant digits (0.001, 0.0042, 1.5e-7), not "0".
+  if (abs > 0 && abs < 0.01) return String(Number(n.toPrecision(2)));
   if (abs >= 1e9) return `${trim(n / 1e9)}B`;
   if (abs >= 1e6) return `${trim(n / 1e6)}M`;
   if (abs >= 1e4) return Math.round(n).toLocaleString('en-US');
@@ -51,11 +53,22 @@ const cut = (s: string, n: number): string => {
   return `${out}…`;
 };
 
-/** The lines that draw `spec` within `width` columns. */
+/**
+ * The narrowest a chart is drawn in. Below it the block is shown as written:
+ * a chart squeezed narrower would cut off the values it exists to show.
+ */
+export const MIN_CHART_WIDTH = 24;
+
+/** Whether there is room to draw a chart in `width` columns. */
+export function chartFits(width: number): boolean {
+  return width >= MIN_CHART_WIDTH;
+}
+
+/** The lines that draw `spec` within `width` columns (at least MIN_CHART_WIDTH: see chartFits). */
 export function chartToLines(spec: ChartSpec, width: number): string[] {
-  const w = Math.max(30, Math.min(width, 120));
+  const w = Math.max(MIN_CHART_WIDTH, Math.min(width, 120));
   const lines: string[] = [];
-  if (spec.title) lines.push(chalk.bold(spec.title));
+  if (spec.title) lines.push(chalk.bold(cut(spec.title, w)));
   switch (spec.kind) {
     case 'pie':
     case 'doughnut':
@@ -253,7 +266,7 @@ export function expandCharts(text: string, width: number): string {
     const chart = fence[0] === '`' && end < lines.length ? /^[ \t]*chart[ \t]*:(.*)$/i.exec(open[2]!) : null;
     const k = chart ? chartKind(chart[1]!) : null;
     const spec = k ? parseChartSpec(k, lines.slice(i + 1, end).join('\n')) : null;
-    out.push(...(spec ? chartToLines(spec, width) : lines.slice(i, end + 1)));
+    out.push(...(spec && chartFits(width) ? chartToLines(spec, width) : lines.slice(i, end + 1)));
     i = end;
   }
   return out.join('\n');

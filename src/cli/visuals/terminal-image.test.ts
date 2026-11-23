@@ -151,3 +151,15 @@ describe('Codex on 6a8ae21', () => {
     expect(performance.now() - t0).toBeLessThan(1000);
   });
 });
+
+describe('Codex on 6b9809a', () => {
+  it('an image inside a fenced block, ``` or ~~~, is an example', () => {
+    expect(findImages('~~~markdown\n![Cover](generated/cover.png)\n~~~')).toEqual([]);
+    expect(findImages('```md\n![Cover](generated/cover.png)\n```')).toEqual([]);
+    // Unclosed: to the end, as Markdown reads it.
+    expect(findImages('~~~\n![Cover](generated/cover.png)')).toEqual([]);
+    // Control: after the block, and a ~~~ that is closed by a longer run only.
+    expect(findImages('~~~\nx\n~~~\n![Cover](generated/cover.png)').map((i) => i.src)).toEqual(['generated/cover.png']);
+    expect(findImages('~~~~\n~~~\n![a](a.png)\n~~~~\n![b](b.png)').map((i) => i.src)).toEqual(['b.png']);
+  });
+});

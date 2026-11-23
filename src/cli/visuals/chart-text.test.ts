@@ -180,3 +180,48 @@ describe('Codex on 6a8ae21', () => {
     expect(draw('bar', 'Q,A,B\nq1,1,2', 60).filter((l) => l.includes('■'))).toHaveLength(1);
   });
 });
+
+describe('Codex on 6b9809a', () => {
+  const SAMPLES: Record<string, string> = {
+    bar: WORDS,
+    pie: 'Format,Words\nCommercial Novel Target,80000\nFlash Fiction,1000\nShort Story,7500',
+    line: 'Month,Revenue,Costs\nJanuary,-120000,90000\nDecember,250000,110000',
+    area: 'Day,Profit\nMon,10\nTue,-20\nWed,15',
+    scatter: 'x,y\n1,0.001\n2,999999',
+  };
+
+  it('a chart keeps to the width it is given, down to the narrowest it is drawn in', async () => {
+    const { MIN_CHART_WIDTH } = await import('./chart-text.js');
+    expect(MIN_CHART_WIDTH).toBe(24);
+    for (const [kind, body] of Object.entries(SAMPLES)) {
+      for (let w = 24; w <= 40; w++) {
+        for (const l of draw(kind as Parameters<typeof parseChartSpec>[0], body, w)) expect(stringWidth(l), `${kind} at ${w}: ${l}`).toBeLessThanOrEqual(w);
+      }
+    }
+    // The value the report saw clipped, whole at 25.
+    expect(draw('bar', WORDS, 25).find((l) => l.startsWith('Comm'))).toMatch(/80,000$/);
+  });
+
+  it('narrower than that, the block is shown as written', async () => {
+    const { expandCharts } = await import('./chart-text.js');
+    const block = '```chart:bar\nItem,Value\nA,1\n```';
+    expect(expandCharts(block, 20)).toBe(block);
+    // Control: drawn where there is room.
+    expect(expandCharts(block, 40)).not.toContain('```');
+  });
+
+  it('small values keep their digits rather than reading 0', () => {
+    expect(shortNumber(0.001)).toBe('0.001');
+    expect(shortNumber(0.0042)).toBe('0.0042');
+    expect(shortNumber(-0.004)).toBe('-0.004');
+    expect(shortNumber(1.5e-7)).toBe('1.5e-7');
+    expect(shortNumber(0)).toBe('0');
+    expect(shortNumber(0.125)).toBe('0.13');
+    const bars = draw('bar', 'Step,Seconds\nparse,0.001\nrender,0.004', 40);
+    expect(bars.find((l) => l.startsWith('parse'))).toMatch(/0\.001$/);
+    expect(bars.find((l) => l.startsWith('render'))).toMatch(/0\.004$/);
+    const plot = draw('line', 'Step,Seconds\nparse,0.001\nrender,0.004', 40);
+    expect(plot.some((l) => /^\s*0\.004 ┤/.test(l))).toBe(true);
+    expect(plot.some((l) => /^\s*0\.001 ┤/.test(l))).toBe(true);
+  });
+});

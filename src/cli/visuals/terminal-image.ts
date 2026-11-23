@@ -43,13 +43,38 @@ const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bm
  */
 export function findImages(text: string): ImageRef[] {
   const found = scanImages(text);
-  const spans = codeSpans(text);
+  const spans = [...codeSpans(text), ...fenceSpans(text)].sort((a, b) => a[0] - b[0]);
   if (!spans.length) return found;
   let k = 0;
   return found.filter((img) => {
     while (k < spans.length && spans[k]![1] <= img.start) k++;
     return !(k < spans.length && spans[k]![0] <= img.start);
   });
+}
+
+/**
+ * Fenced code blocks as [start, end), in order: a line of ``` or ~~~ to the next
+ * line of at least as many of the same, or to the end. An image inside one is
+ * an example. Each line is read once.
+ */
+function fenceSpans(text: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  let open: { at: number; char: string; len: number } | null = null;
+  let at = 0;
+  for (const line of text.split('\n')) {
+    const fence = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (open) {
+      if (fence && fence[1]![0] === open.char && fence[1]!.length >= open.len && /^ {0,3}(`+|~+)[ \t]*$/.test(line)) {
+        spans.push([open.at, at + line.length]);
+        open = null;
+      }
+    } else if (fence && !(fence[1]![0] === '`' && line.slice(fence[0].length).includes('`'))) {
+      open = { at, char: fence[1]![0]!, len: fence[1]!.length };
+    }
+    at += line.length + 1;
+  }
+  if (open) spans.push([open.at, text.length]);
+  return spans;
 }
 
 /**

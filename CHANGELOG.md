@@ -21,13 +21,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     An area chart is shaded to zero from either side, and a line chart
     names both its first and last label. A chart written out as an example
     inside an ordinary code block stays as written, and a legend of long
-    series names wraps instead of running off the edge. This works in the
+    series names wraps instead of running off the edge. Charts keep to
+    narrow terminals and split panes (below 24 columns the block is shown
+    as written), and small values like 0.004 keep their digits. This works in the
     alt-screen view too.
   - **Images** on your machine, inside the project or Cascade's own folders,
     are drawn as a small colour thumbnail made of half blocks, with an
     "open full size" link. This includes the browser's screenshots
-    (`@screenshots/...`). Image syntax written inside inline code is an
-    example and stays as text. Terminals with clickable links open the image in
+    (`@screenshots/...`). Image syntax written inside inline code or a
+    code block (``` or ~~~) is an example and stays as text. Terminals with clickable links open the image in
     your viewer. A web address is never fetched: it stays a link.
 
 ## 0.97.4 - 2026-11-20

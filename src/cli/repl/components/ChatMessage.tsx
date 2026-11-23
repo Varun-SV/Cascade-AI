@@ -7,7 +7,7 @@ import { Box, Text } from 'ink';
 import chalk from 'chalk';
 import type { Theme } from '../../../types.js';
 import { chartKind, parseChartSpec } from '../../../core/documents/blocks.js';
-import { chartToLines } from '../../visuals/chart-text.js';
+import { chartFits, chartToLines } from '../../visuals/chart-text.js';
 import { fileLink, findImages, thumbnailFor, type Thumbnails } from '../../visuals/terminal-image.js';
 
 interface ChatMessageProps {
@@ -73,18 +73,19 @@ function normalizeContent(content: string | unknown): string {
 const MAX_CODE_LINES = 40;
 
 function renderContent(content: string, theme: Theme, thumbnails: Thumbnails, width: number): React.ReactElement[] {
-  // Split into code blocks and text
-  const parts = content.split(/(```[\s\S]*?```)/g);
+  // Split into code blocks (``` or ~~~) and text
+  const parts = content.split(/(```[\s\S]*?```|~~~[\s\S]*?~~~)/g);
 
   return parts.flatMap((part, i): React.ReactElement[] => {
-    if (part.startsWith('```')) {
+    if (part.startsWith('```') || part.startsWith('~~~')) {
+      const tilde = part.startsWith('~~~');
       const lines = part.split('\n');
-      const lang = lines[0]?.replace('```', '').trim() ?? '';
+      const lang = lines[0]?.replace(/^(`{3,}|~{3,})/, '').trim() ?? '';
       const codeLines = lines.slice(1, -1);
       // A chart the reply drew as data: drawn here too, and kept as code when it doesn't parse.
-      const chart = /^chart\s*:/i.test(lang) ? chartKind(lang.replace(/^chart\s*:/i, '')) : null;
+      const chart = !tilde && /^chart\s*:/i.test(lang) ? chartKind(lang.replace(/^chart\s*:/i, '')) : null;
       const spec = chart ? parseChartSpec(chart, codeLines.join('\n')) : null;
-      if (spec) {
+      if (spec && chartFits(width - 4)) {
         return [(
           <Box key={i} flexDirection="column" marginY={1} paddingX={1} borderStyle="round" borderColor={theme.colors.border}>
             {chartToLines(spec, width - 4).map((line, j) => <Text key={j} wrap="truncate-end">{line || ' '}</Text>)}
