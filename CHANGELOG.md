@@ -5,6 +5,33 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.98.0 - 2026-11-20
+
+### Added
+- **Charts and images in the CLI.** A reply's charts and pictures used to
+  show up in the terminal as their raw text: a `chart:bar` block as CSV, an
+  image as `![...](generated\...png)`. Now:
+  - **Charts** are drawn with characters every terminal has. Bars are scaled
+    to the widest value with each value written out. Line, area and scatter
+    charts are drawn in braille dots, with the range and the first and last
+    labels on the axes. A pie is one bar split by share, with a legend of
+    percentages. Several series get a colour each and a legend. A chart
+    that doesn't parse is shown as written. Labels in Chinese, Japanese or
+    Korean are measured by the columns they take, so values stay in view.
+    An area chart is shaded to zero from either side, and a line chart
+    names both its first and last label. A chart written out as an example
+    inside an ordinary code block stays as written, and a legend of long
+    series names wraps instead of running off the edge. Charts keep to
+    narrow terminals and split panes (below 24 columns the block is shown
+    as written), and small values like 0.004 keep their digits. This works in the
+    alt-screen view too.
+  - **Images** on your machine, inside the project or Cascade's own folders,
+    are drawn as a small colour thumbnail made of half blocks, with an
+    "open full size" link. This includes the browser's screenshots
+    (`@screenshots/...`). Image syntax written inside inline code or a
+    code block (``` or ~~~) is an example and stays as text. Terminals with clickable links open the image in
+    your viewer. A web address is never fetched: it stays a link.
+
 ## 0.97.4 - 2026-11-20
 
 ### Fixed
