@@ -28,6 +28,11 @@ interface StatusBarProps {
   checkpoint?: number | null;
   /** How long the current (or last) run took, in ms. */
   elapsedMs?: number;
+  /**
+   * Calls to a model Cascade has no price for. Their tokens are counted and their
+   * cost can't be, so the cost shown is what the rest cost: "$8.51+".
+   */
+  unpricedCalls?: number;
 }
 
 /** "anthropic:claude-opus-4-1-20250805" → "opus-4-1"; unset → "auto". */
@@ -38,7 +43,7 @@ export function shortModel(id: string | undefined): string {
 }
 
 function StatusBarInternal({
-  theme, tierModels, tokens, costUsd, savedUsd = 0, isExecuting, autonomy = 'manual', checkpoint, elapsedMs,
+  theme, tierModels, tokens, costUsd, savedUsd = 0, isExecuting, autonomy = 'manual', checkpoint, elapsedMs, unpricedCalls = 0,
 }: StatusBarProps): React.ReactElement {
   const { stdout } = useStdout();
   const width = stdout?.columns ?? 100;
@@ -48,7 +53,10 @@ function StatusBarInternal({
   const models = ` T1 ${shortModel(tierModels.t1)} · T2 ${shortModel(tierModels.t2)} · T3 ${shortModel(tierModels.t3)} `;
   const time = elapsedMs !== undefined && elapsedMs > 0 ? ` · ${formatClock(elapsedMs)}` : '';
   const saved = savedUsd > 0 && width >= 100 ? ` · saved $${savedUsd.toFixed(2)}` : '';
-  const right = ` $${costUsd.toFixed(costUsd < 1 ? 3 : 2)} · ${formatTokens(tokens)}${saved}${time} ${isExecuting ? '⚡' : ' '} `;
+  // A "+" when some calls couldn't be priced: the total is a floor, not the spend.
+  const partial = unpricedCalls > 0 ? '+' : '';
+  const unpriced = unpricedCalls > 0 && width >= 110 ? ` · ${unpricedCalls} call${unpricedCalls === 1 ? '' : 's'} not priced` : '';
+  const right = ` $${costUsd.toFixed(costUsd < 1 ? 3 : 2)}${partial}${unpriced} · ${formatTokens(tokens)}${saved}${time} ${isExecuting ? '⚡' : ' '} `;
 
   // The models go first when the line is too narrow for all three parts.
   const showModels = width - left.length - right.length - models.length >= 4;
