@@ -15,6 +15,10 @@
 import OpenAI from 'openai';
 import type { ProviderConfig } from '../types.js';
 import type { ScoredChunk } from './types.js';
+import { pickOpenAIRoute } from './embedder.js';
+
+/** A small, cheap Gemini model for ordering a handful of candidates. */
+const DEFAULT_GEMINI_RERANK_MODEL = 'gemini-3.5-flash-lite';
 
 export interface Reranker {
   readonly name: string;
@@ -86,21 +90,22 @@ export class LLMReranker implements Reranker {
 
 /**
  * Build a completion function from the user's providers using an OpenAI-
- * compatible `/chat/completions` endpoint (OpenAI, compatible gateways, Ollama).
+ * compatible `/chat/completions` endpoint (OpenAI, compatible gateways, Ollama,
+ * Gemini).
  * Returns null when no such provider is configured (reranking then no-ops and
- * the fused order stands). Mirrors embedderFromProviders so the same key powers
- * both stages.
+ * the fused order stands). Picks the provider the way embedderFromProviders does
+ * (pickOpenAIRoute), so the same key powers both stages.
  */
 export function chatCompleterFromProviders(
   providers: ProviderConfig[],
   opts: { model?: string } = {},
 ): CompleteFn | null {
-  const capable = new Set(['openai', 'openai-compatible', 'ollama']);
-  const ranked = [...providers].sort((a, b) => rank(a.type) - rank(b.type));
-  const chosen = ranked.find((p) => capable.has(p.type) && (p.apiKey || p.type === 'ollama' || p.baseUrl));
-  if (!chosen) return null;
-  const model = opts.model || chosen.model || (chosen.type === 'ollama' ? 'llama3' : 'gpt-4o-mini');
-  const client = new OpenAI({ apiKey: chosen.apiKey || 'sk-none', baseURL: chosen.baseUrl });
+  const route = pickOpenAIRoute(providers);
+  if (!route) return null;
+  const type = route.provider.type;
+  const model = opts.model || route.provider.model
+    || (type === 'ollama' ? 'llama3' : type === 'gemini' ? DEFAULT_GEMINI_RERANK_MODEL : 'gpt-4o-mini');
+  const client = new OpenAI({ apiKey: route.apiKey, baseURL: route.baseURL });
   return async (prompt: string) => {
     const res = await client.chat.completions.create({
       model,
@@ -112,9 +117,3 @@ export function chatCompleterFromProviders(
   };
 }
 
-function rank(type: string): number {
-  if (type === 'openai') return 0;
-  if (type === 'openai-compatible') return 1;
-  if (type === 'ollama') return 2;
-  return 9;
-}
