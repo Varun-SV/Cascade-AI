@@ -393,7 +393,8 @@ export interface Observed {
 }
 
 export class RunMemory {
-  private facts = new Map<string, RunFact & { relation?: string }>();
+  /** `sources`: what a fact kept by an earlier run was drawn from, checked again each time it is shown. */
+  private facts = new Map<string, RunFact & { relation?: string; sources?: string[] | null }>();
   private seen = new Map<string, Set<string>>();
   /** Per worker: facts it was shown that have since stopped being true, to tell it. */
   private retractions = new Map<string, RunFact[]>();
@@ -438,7 +439,7 @@ export class RunMemory {
       if (!factMayLeave(f, rules, root)) continue;
       if (key.startsWith('git-repo:') && this.folderPrivate(key.slice('git-repo:'.length), rules)) continue;
       const text = folder !== null ? repoText(folder) : missingText(command!);
-      this.facts.set(key, { key, text, from: 'an earlier run', relation: f.relation });
+      this.facts.set(key, { key, text, from: 'an earlier run', relation: f.relation, sources: f.sources ?? null });
     }
   }
 
@@ -588,11 +589,22 @@ export class RunMemory {
    */
   unseenBy(worker: string): RunFact[] {
     const seen = this.seenBy(worker);
-    const out = [...this.facts.values()].filter((f) => !seen.has(f.key));
+    // The privacy rules as they are now, not as they were when the board began: a
+    // file a local-only subtask has written since is local-only now, and so is a
+    // fact drawn from it, or about a folder that has become local-only. One held
+    // back now is not marked shown, and is shown should the rules loosen.
+    const rules = this.privacy();
+    const out = [...this.facts.values()].filter((f) => !seen.has(f.key) && this.mayShow(f, rules));
     for (const f of out) seen.add(f.key);
     const retracted = this.retractions.get(worker) ?? [];
     this.retractions.delete(worker);
     return [...retracted, ...out.map(({ key, text, from }) => ({ key, text, from }))];
+  }
+
+  /** Whether a fact may go to any model now (see unseenBy). */
+  private mayShow(f: RunFact & { sources?: string[] | null }, rules: FactPrivacy | undefined): boolean {
+    if ('sources' in f && !factMayLeave({ sources: f.sources } as Parameters<typeof factMayLeave>[0], rules, this.root)) return false;
+    return !(f.key.startsWith('git-repo:') && this.folderPrivate(f.key.slice('git-repo:'.length), rules));
   }
 
   /** Every fact on the board (for tests and readouts). */

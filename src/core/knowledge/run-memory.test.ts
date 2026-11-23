@@ -506,6 +506,28 @@ describe('Codex on 4b60938', () => {
   });
 });
 
+describe('Codex on 784fe73', () => {
+  // A local-only subtask writes a file after the board began: the file is
+  // local-only from then on, and a kept fact drawn from it may no longer leave.
+  it("a kept fact is checked against the privacy rules as they are when it's shown", async () => {
+    const { PrivacyPaths } = await import('../privacy/paths.js');
+    const db = new WorldStateDB(root);
+    try {
+      db.upsertFact('environment', 'command wc', 'not available', 'T3-old', undefined, ['setup.md']);
+      db.upsertFact('environment', 'git repository at docs', 'none', 'run:T3-old', undefined, []);
+      let rules = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]);
+      const mem = new RunMemory(root, db, () => true, () => rules);
+      expect(mem.all().map((f) => f.key).sort()).toEqual(['git-repo:docs', 'missing:wc']);
+      // Since then, setup.md and docs/ have become local-only.
+      rules = new PrivacyPaths([{ pattern: 'setup.md', policy: 'local-only' }, { pattern: 'docs/**', policy: 'local-only' }, { pattern: 'docs', policy: 'local-only' }]);
+      expect(mem.unseenBy('T3-cloud')).toEqual([]);
+      // Loosened again, they are shown: holding back didn't count as shown.
+      rules = new PrivacyPaths([]);
+      expect(mem.unseenBy('T3-cloud').map((f) => f.key).sort()).toEqual(['git-repo:docs', 'missing:wc']);
+    } finally { db.close(); }
+  });
+});
+
 describe('kept in the project, so the next run starts knowing', () => {
   it('only what may go to any model: privacy.paths holds for what an earlier run kept (Codex on 2abacac)', async () => {
     const { PrivacyPaths } = await import('../privacy/paths.js');
