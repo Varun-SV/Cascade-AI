@@ -400,29 +400,42 @@ function registerIPC(): void {
     const { readFile } = require('node:fs/promises');
     return readFile(filePath, 'utf8');
   });
+  // The editor's own changes to the workspace: a run in progress must not answer
+  // from what it read before them (knowledge/run-memory.ts).
+  const noteChanged = (...paths: string[]): void => {
+    try {
+      const { noteWorkspaceChange } = loadCore() as { noteWorkspaceChange?: (root: string, changed: string) => void };
+      for (const p of paths) noteWorkspaceChange?.(getWorkspacePath(), p);
+    } catch { /* the change itself is done; this only keeps runs fresh */ }
+  };
   ipcMain.handle('fs:writeFile', async (_e, filePath: string, content: string) => {
     const { writeFile } = require('node:fs/promises');
     await writeFile(filePath, content, 'utf8');
+    noteChanged(filePath);
     return { ok: true };
   });
   ipcMain.handle('fs:mkdir', async (_e, dirPath: string) => {
     const { mkdir } = require('node:fs/promises');
     await mkdir(dirPath, { recursive: true });
+    noteChanged(dirPath);
     return { ok: true };
   });
   ipcMain.handle('fs:createFile', async (_e, filePath: string) => {
     const { writeFile, access } = require('node:fs/promises');
     try { await access(filePath); } catch { await writeFile(filePath, '', 'utf8'); }
+    noteChanged(filePath);
     return { ok: true };
   });
   ipcMain.handle('fs:rename', async (_e, oldPath: string, newPath: string) => {
     const { rename } = require('node:fs/promises');
     await rename(oldPath, newPath);
+    noteChanged(oldPath, newPath);
     return { ok: true };
   });
   ipcMain.handle('fs:delete', async (_e, targetPath: string) => {
     const { shell } = require('electron');
     await shell.trashItem(targetPath); // OS trash (recoverable)
+    noteChanged(targetPath);
     return { ok: true };
   });
   // Bounded recursive text search across the workspace.

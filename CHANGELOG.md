@@ -25,7 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     config and git fetch, and while it's running no earlier answer is
     given. Commands whose answer moves by itself, like `date` or `ps`, are
     never reused, wherever they sit in a command. A change made by another
-    run in the same project, in this window or another, counts too. `git
+    run in the same project, in this window or another, counts too, and so
+    does a file saved in the desktop app's editor. An answer is reused for a
+    minute at most, since an edit made in another editor or a terminal
+    can't be seen. `git
     diff`, `git show`, `git blame` and `git log -p` can run helpers your
     repository configures, so they are reused only with `--no-ext-diff
     --no-textconv`.

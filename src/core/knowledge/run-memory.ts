@@ -47,6 +47,12 @@ const ENTITY = 'environment';
 const MAX_FACTS = 60;
 const MAX_RESULTS = 200;
 const MAX_RESULT_CHARS = 20_000;
+/**
+ * How long a stored answer is given again. Runs mark their own changes, and the
+ * desktop editor marks its saves, but an edit made in another editor or a
+ * terminal isn't seen at all: this bounds how long one can go unnoticed.
+ */
+export const MAX_ANSWER_AGE_MS = 60_000;
 
 /** Tools that only read, whatever their input. */
 const READ_TOOLS = new Set(['file_read', 'file_list', 'grep', 'glob', 'diff_view', 'code_search', 'graph_search']);
@@ -328,6 +334,17 @@ export function workspaceChangeMarker(root: string): ChangeMarker {
   };
 }
 
+/**
+ * For a host that writes to the workspace itself (the desktop app's editor
+ * saving a file): every run's stored answers there are stale from now on. A
+ * path outside the workspace changes nothing.
+ */
+export function noteWorkspaceChange(root: string, changed: string): void {
+  const rel = path.relative(path.resolve(root), path.resolve(changed));
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return;
+  workspaceChangeMarker(root).bump();
+}
+
 /** What `observe` needs to know about how the call went. */
 export interface Observed {
   /** The call failed: it threw, or the command exited non-zero. */
@@ -342,7 +359,7 @@ export interface Observed {
 export class RunMemory {
   private facts = new Map<string, RunFact & { relation?: string }>();
   private seen = new Map<string, Set<string>>();
-  private results = new Map<string, { output: string; by: string; epoch: number; mark: string }>();
+  private results = new Map<string, { output: string; by: string; epoch: number; mark: string; at: number }>();
   /** Calls begun and not yet observed: the epoch and workspace mark each started at. */
   private started = new Map<number, { epoch: number; mark: string; leave?: () => void }>();
   private nextTicket = 1;
@@ -425,7 +442,8 @@ export class RunMemory {
   reuse(tool: string, input: Record<string, unknown>): { output: string; by: string } | null {
     const key = this.reusable(tool, input);
     const hit = key ? this.results.get(key) : undefined;
-    return hit && hit.epoch === this.epoch && this.changing === 0 && hit.mark === this.changes.current() && !this.changes.busy() ? { output: hit.output, by: hit.by } : null;
+    return hit && hit.epoch === this.epoch && this.changing === 0 && Date.now() - hit.at <= MAX_ANSWER_AGE_MS
+      && hit.mark === this.changes.current() && !this.changes.busy() ? { output: hit.output, by: hit.by } : null;
   }
 
   /**
@@ -471,7 +489,7 @@ export class RunMemory {
     // Kept only if nothing changed while it ran, by this run or any other.
     if (key && !how.failed && started && started.epoch === this.epoch && started.mark === this.changes.current() && !this.changes.busy() && output.length <= MAX_RESULT_CHARS) {
       if (this.results.size >= MAX_RESULTS) this.results.delete(this.results.keys().next().value!);
-      this.results.set(key, { output, by, epoch: this.epoch, mark: started.mark });
+      this.results.set(key, { output, by, epoch: this.epoch, mark: started.mark, at: Date.now() });
     }
   }
 

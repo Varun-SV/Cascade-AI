@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { RunMemory, callReadsOnly, commandReadsOnly, factsFrom, formatRunFacts, workspaceChangeMarker, type ChangeMarker } from './run-memory.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { MAX_ANSWER_AGE_MS, RunMemory, callReadsOnly, commandReadsOnly, factsFrom, formatRunFacts, noteWorkspaceChange, workspaceChangeMarker, type ChangeMarker } from './run-memory.js';
 import { statePath, STATE } from '../../config/project-state.js';
 import { ownerToken } from '../../utils/file-lock.js';
 import { WorldStateDB } from './world-state.js';
@@ -382,6 +382,31 @@ describe('Codex on 2ea2700', () => {
     expect(commandReadsOnly('grep -o foo a.txt')).toBe(true);
     expect(commandReadsOnly('rg -o foo')).toBe(true);
     expect(commandReadsOnly('ls -C')).toBe(true);
+  });
+});
+
+describe('Codex on e3c4fe2: changes made outside any run', () => {
+  it("the desktop editor's save makes stored answers stale", () => {
+    const mem = new RunMemory(root);
+    run(mem, 'shell', { command: 'cat a.txt' }, 'old', 'T3-a');
+    // A path outside the workspace changes nothing…
+    noteWorkspaceChange(root, path.join(os.tmpdir(), 'elsewhere', 'a.txt'));
+    expect(mem.reuse('shell', { command: 'cat a.txt' })?.output).toBe('old');
+    // …one inside it does.
+    noteWorkspaceChange(root, path.join(root, 'a.txt'));
+    expect(mem.reuse('shell', { command: 'cat a.txt' })).toBeNull();
+  });
+
+  it("an answer is given again for a minute at most: an edit made where Cascade can't see bounds itself", () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const mem = new RunMemory(root);
+      run(mem, 'shell', { command: 'git status' }, 'clean', 'T3-a');
+      vi.setSystemTime(Date.now() + MAX_ANSWER_AGE_MS - 1_000);
+      expect(mem.reuse('shell', { command: 'git status' })?.output).toBe('clean');
+      vi.setSystemTime(Date.now() + 2_000);
+      expect(mem.reuse('shell', { command: 'git status' })).toBeNull();
+    } finally { vi.useRealTimers(); }
   });
 });
 
