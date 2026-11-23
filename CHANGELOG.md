@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     only mentions such an error is not taken as one. Each worker is told
     the ones it hasn't seen yet, before its next model call.
   - **A command that only reads, run again** in the same folder (`ls`,
-    `git status`, `cat a | wc -l`; every part of a compound command is
+    `rg -n todo`, `cat a | wc -l`; every part of a compound command is
     checked) gets the earlier answer instead of running and being reasoned
     about twice. Anything else that runs clears these, including git
     config and git fetch, and while it's running no earlier answer is
@@ -28,11 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     run in the same project, in this window or another, counts too, and so
     does a file saved in the desktop app's editor. An answer is reused for a
     minute at most, since an edit made in another editor or a terminal
-    can't be seen. `git
-    show`, `git blame` and `git log -p` can run helpers your repository
-    configures, so they are reused only with `--no-ext-diff --no-textconv`,
-    and `git status`, `git diff` and `git ls-files`, which may run its
-    `core.fsmonitor` hook, are never reused.
+    can't be seen. git commands are never reused: your repository's
+    configuration can make any of them run a program (a hook, a diff
+    helper, a signature check).
   - **It grows with you.** The facts are kept in the project's knowledge,
     so the next run starts out knowing them, with folder names spelt as
     they are (`Docs` and `docs` are two folders). One that stops being true

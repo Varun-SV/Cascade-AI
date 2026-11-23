@@ -67,7 +67,7 @@ describe('facts read from commands that ran here and failed', () => {
 
 describe('what may be answered again: only commands that read (Codex on 9789d5b)', () => {
   it('reading commands, and every part of a compound one', () => {
-    for (const c of ['ls -la', 'git rev-parse HEAD', 'git log --oneline -5', 'cat a.md | wc -l', 'git branch', 'git remote -v', 'find . -name "*.ts"']) {
+    for (const c of ['ls -la', 'head -5 a.md', 'cat a.md | wc -l', 'rg -n hit', 'find . -name "*.ts"']) {
       expect(commandReadsOnly(c), c).toBe(true);
     }
   });
@@ -95,8 +95,8 @@ describe('what may be answered again: only commands that read (Codex on 9789d5b)
     }
   });
 
-  it('the git tool, by its operation', () => {
-    expect(callReadsOnly('git', { operation: 'log', args: ['--oneline'] })).toBe(true);
+  it('the git tool: never a read (see the Codex on 4b60938 tests)', () => {
+    expect(callReadsOnly('git', { operation: 'log', args: ['--oneline'] })).toBe(false);
     expect(callReadsOnly('git', { operation: 'fetch' })).toBe(false);
     expect(callReadsOnly('git', { operation: 'config', args: ['--add', 'a.b', 'c'] })).toBe(false);
   });
@@ -129,10 +129,10 @@ describe('one board for the whole run', () => {
   it('git config and git fetch clear stored answers too', () => {
     for (const command of ['git config --add test.value x', 'git fetch']) {
       const mem = new RunMemory(root);
-      run(mem, 'shell', { command: 'git log --oneline' }, 'abc first', 'T3-a');
-      expect(mem.reuse('shell', { command: 'git log --oneline' })).not.toBeNull();
+      run(mem, 'shell', { command: 'ls -la' }, 'a.txt', 'T3-a');
+      expect(mem.reuse('shell', { command: 'ls -la' })).not.toBeNull();
       run(mem, 'shell', { command }, 'done', 'T3-b');
-      expect(mem.reuse('shell', { command: 'git log --oneline' }), command).toBeNull();
+      expect(mem.reuse('shell', { command: 'ls -la' }), command).toBeNull();
     }
   });
 
@@ -286,10 +286,9 @@ describe('Codex on 539316f', () => {
     expect(commandReadsOnly('git log -p --no-ext-diff --no-textconv --ext-diff')).toBe(false);
     expect(callReadsOnly('git', { operation: 'diff', args: [] })).toBe(false);
     // With both turned off, or no diff shown, it reads.
-    expect(commandReadsOnly('git show HEAD --no-ext-diff --no-textconv')).toBe(true);
-    expect(commandReadsOnly('git log -p --no-ext-diff --no-textconv')).toBe(true);
-    expect(commandReadsOnly('git log --oneline -5')).toBe(true);
-    expect(commandReadsOnly('git rev-parse HEAD')).toBe(true);
+    // Nor, since 4b60938, with them turned off: no git command is a read.
+    expect(commandReadsOnly('git show HEAD --no-ext-diff --no-textconv')).toBe(false);
+    expect(commandReadsOnly('git log -p --no-ext-diff --no-textconv')).toBe(false);
   });
 
   it('`Docs` and `docs` are two folders, kept and retracted apart', () => {
@@ -401,11 +400,11 @@ describe('Codex on e3c4fe2: changes made outside any run', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
       const mem = new RunMemory(root);
-      run(mem, 'shell', { command: 'git log --oneline' }, 'abc first', 'T3-a');
+      run(mem, 'shell', { command: 'ls -la' }, 'a.txt', 'T3-a');
       vi.setSystemTime(Date.now() + MAX_ANSWER_AGE_MS - 1_000);
-      expect(mem.reuse('shell', { command: 'git log --oneline' })?.output).toBe('abc first');
+      expect(mem.reuse('shell', { command: 'ls -la' })?.output).toBe('a.txt');
       vi.setSystemTime(Date.now() + 2_000);
-      expect(mem.reuse('shell', { command: 'git log --oneline' })).toBeNull();
+      expect(mem.reuse('shell', { command: 'ls -la' })).toBeNull();
     } finally { vi.useRealTimers(); }
   });
 });
@@ -467,10 +466,43 @@ describe('Codex on 463c220', () => {
     run(mem, 'shell', { command: 'cat a.txt' }, 'old', 'T3-a');
     run(mem, 'shell', { command: 'git status' }, 'On branch main', 'T3-b');
     expect(mem.reuse('shell', { command: 'cat a.txt' })).toBeNull();
-    // What reads only history still reads.
-    for (const c of ['git log --oneline', 'git rev-parse HEAD', 'git describe --tags', 'git cat-file -p HEAD', 'git branch']) {
-      expect(commandReadsOnly(c), c).toBe(true);
+    // Since 4b60938, nor does what reads only history: see below.
+  });
+});
+
+describe('Codex on 4b60938', () => {
+  // A signature check runs gpg.program (log.showSignature turns it on with no
+  // option at all); with fsmonitor, diff helpers and textconv, configuration can
+  // make any git command run a program. So none is a read.
+  it('no git command is a read, and each counts as a change', () => {
+    for (const c of ['git log --oneline', 'git log --show-signature -1', 'git rev-parse HEAD', 'git describe --tags', 'git cat-file -p HEAD', 'git branch', 'git remote -v', 'ls && git log']) {
+      expect(commandReadsOnly(c), c).toBe(false);
     }
+    const mem = new RunMemory(root);
+    run(mem, 'shell', { command: 'cat a.txt' }, 'old', 'T3-a');
+    run(mem, 'shell', { command: 'git log -1' }, 'abc', 'T3-b');
+    expect(mem.reuse('shell', { command: 'cat a.txt' })).toBeNull();
+    // Facts are still learnt from it.
+    run(mem, 'shell', { command: 'git log -1' }, NOT_A_REPO, 'T3-b', bad);
+    expect(mem.all().map((f) => f.key)).toEqual(['git-repo:the project folder']);
+  });
+
+  it('only evidence about this folder says it is a repository now', () => {
+    const unlearnt = (command: string, output = 'ok', failed = false) =>
+      factsFrom('shell', { command }, output, 'The project folder', failed).unlearnt;
+    // Says nothing about this folder.
+    expect(unlearnt('git clone https://example.test/r.git child')).toEqual([]);
+    expect(unlearnt('git --version', 'git version 2.56.1')).toEqual([]);
+    expect(unlearnt('git init child')).toEqual([]);
+    expect(unlearnt('git diff --no-index a b')).toEqual([]);
+    expect(unlearnt('git config --global user.name x')).toEqual([]);
+    // A failed init or clone made nothing.
+    expect(unlearnt('git init', 'fatal: cannot mkdir', true)).toEqual([]);
+    // Evidence: a command that needs a repository worked here, or one was made here.
+    for (const c of ['git status', 'git --no-pager log -1', 'git init', 'git init .', 'git clone https://example.test/r.git .']) {
+      expect(unlearnt(c), c).toEqual(['git-repo:the project folder']);
+    }
+    expect(factsFrom('git', { operation: 'status', args: [] }, 'On branch main', 'The project folder', false).unlearnt).toEqual(['git-repo:the project folder']);
   });
 });
 

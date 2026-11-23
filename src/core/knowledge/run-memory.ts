@@ -70,12 +70,14 @@ const READ_COMMANDS = new Set([
   'cut', 'jq', 'diff', 'cmp', 'comm', 'find',
   'get-childitem', 'gci', 'get-content', 'gc', 'select-string', 'test-path', 'resolve-path', 'get-location',
 ]);
-/** git subcommands that only read; a few only in their listing form. */
-// Not status, diff, ls-files or describe --dirty: they look at the working tree,
-// and to do that git may run the repository's core.fsmonitor hook, which can
-// do anything. What reads only history runs no such program.
-const GIT_READS = new Set(['log', 'show', 'rev-parse', 'describe', 'blame', 'shortlog', 'cat-file', 'ls-tree']);
-const GIT_LISTS = new Set(['branch', 'tag', 'remote']);
+/**
+ * git is never taken as a read, whatever the subcommand: what it runs depends on
+ * the repository's configuration, and that can run programs on its own (a
+ * core.fsmonitor hook to look at the working tree, diff.external and textconv
+ * filters to show a diff, gpg.program to check a signature, and more). So no git
+ * command is answered from the board, and each counts as a change. Facts are
+ * still learnt from all of them (factsFrom).
+ */
 /**
  * Options that make an otherwise reading command write a file or run a program,
  * per command (one option means different things to different commands: `-o` is
@@ -94,31 +96,6 @@ const COMMAND_WRITES: Readonly<Record<string, RegExp>> = {
 const ANY_WRITES = /^--output(=|$)/;
 /** Whether a word given to `cmd` makes it write or run something. */
 const writes = (cmd: string, word: string): boolean => ANY_WRITES.test(word) || (COMMAND_WRITES[cmd]?.test(word) ?? false);
-
-/** Subcommands whose output is a diff by default: git runs configured helpers for it. */
-const GIT_DIFFS = new Set(['diff', 'show', 'blame']);
-const GIT_PATCH_OPTIONS = /^(-p|-u|--patch|-U\d*|--unified(=.*)?|--patch-with-stat|--cc|-c)$/;
-
-/**
- * Whether `args` (after a git subcommand) leave it reading only.
- *
- * A diff git shows may run programs the repository configures: `diff.external`
- * (which `git diff` uses unless told not to) and textconv filters. They can do
- * anything, so a command that may run them is not taken as a read unless it
- * turns both off (`--no-ext-diff --no-textconv`), and one that asks for them is
- * never taken as one.
- */
-function gitReads(sub: string, args: string[]): boolean {
-  const s = sub.toLowerCase();
-  if (args.some((a) => /^--(ext-diff|textconv|filters)$/.test(a))) return false;
-  const showsDiff = GIT_DIFFS.has(s) || (s === 'log' && args.some((a) => GIT_PATCH_OPTIONS.test(a)));
-  if (showsDiff && !(args.includes('--no-ext-diff') && args.includes('--no-textconv'))) return false;
-  if (s === 'describe' && args.some((a) => /^--(dirty|broken)(=|$)/.test(a))) return false;
-  if (GIT_READS.has(s)) return !args.some((a) => /^--output/.test(a));
-  if (!GIT_LISTS.has(s)) return false;
-  // `git branch`, `git tag -l`, `git remote -v`: listing. Any other word names one to make or change.
-  return args.every((a) => /^(-a|-r|-v|-l|--list|--all|--remotes|--verbose|--show-current|-vv)$/.test(a));
-}
 
 /**
  * Whether a shell command only reads, every part of it: no substitution or
@@ -141,7 +118,6 @@ export function commandReadsOnly(command: string): boolean {
     if (!words.length) return false;
     const [head, ...rest] = words;
     const cmd = head!.toLowerCase();
-    if (cmd === 'git') return rest.length > 0 && !rest[0]!.startsWith('-') && gitReads(rest[0]!, rest.slice(1));
     return READ_COMMANDS.has(cmd) && !rest.some((w) => writes(cmd, w));
   });
 }
@@ -150,11 +126,6 @@ export function commandReadsOnly(command: string): boolean {
 export function callReadsOnly(tool: string, input: Record<string, unknown>): boolean {
   if (READ_TOOLS.has(tool)) return true;
   if (tool === 'shell') return commandReadsOnly(typeof input['command'] === 'string' ? input['command'] : '');
-  if (tool === 'git') {
-    const op = typeof input['operation'] === 'string' ? input['operation'] : '';
-    const args = Array.isArray(input['args']) ? (input['args'] as unknown[]).map(String) : [];
-    return !!op && gitReads(op, args);
-  }
   return false;
 }
 
@@ -186,6 +157,43 @@ function commandOf(tool: string, input: Record<string, unknown>): string {
  * ran here (shell or git): a file being read can say anything. A fact is learnt
  * only from a failure; `unlearnt` is what the answer shows to be no longer true.
  */
+/** The git invocations in a call: each subcommand and the words after it. */
+function gitInvocations(tool: string, input: Record<string, unknown>, command: string): Array<{ sub: string; args: string[] }> {
+  if (tool === 'git') {
+    const sub = typeof input['operation'] === 'string' ? input['operation'] : '';
+    return sub ? [{ sub: sub.toLowerCase(), args: Array.isArray(input['args']) ? (input['args'] as unknown[]).map(String) : [] }] : [];
+  }
+  const out: Array<{ sub: string; args: string[] }> = [];
+  for (const part of command.split(/&&|\|\||;|\||&|\n/)) {
+    const words = part.trim().split(/\s+/).map((w) => w.replace(/['"\\]/g, '')).filter(Boolean);
+    if (words[0]?.toLowerCase() !== 'git') continue;
+    // The subcommand is the first word that isn't an option (`git --no-pager log`).
+    const at = words.findIndex((w, i) => i > 0 && !w.startsWith('-'));
+    if (at > 0) out.push({ sub: words[at]!.toLowerCase(), args: words.slice(at + 1) });
+  }
+  return out;
+}
+
+/** Subcommands that fail outside a repository: one working is evidence that this folder is one. */
+const NEEDS_REPO = new Set([
+  'status', 'log', 'show', 'rev-parse', 'branch', 'tag', 'ls-files', 'add', 'commit', 'checkout', 'switch',
+  'restore', 'reset', 'stash', 'describe', 'blame', 'shortlog', 'cat-file', 'ls-tree', 'merge', 'rebase',
+  'fetch', 'pull', 'push', 'remote', 'rm', 'mv', 'diff', 'grep',
+]);
+
+/**
+ * Whether a git invocation that worked shows this folder is a repository: one
+ * that needs a repository (not `--no-index`, which works anywhere), or `git init`
+ * or `git clone … .` aimed at this folder itself. `git clone url child` made
+ * `child` one, and `git --version` says nothing about any folder.
+ */
+function makesOrNeedsRepoHere({ sub, args }: { sub: string; args: string[] }): boolean {
+  const targets = args.filter((a) => !a.startsWith('-'));
+  if (sub === 'init') return targets.length === 0 || (targets.length === 1 && targets[0] === '.');
+  if (sub === 'clone') return targets.at(-1) === '.';
+  return NEEDS_REPO.has(sub) && !args.includes('--no-index');
+}
+
 /** How the project folder itself is named in facts. */
 const ROOT_LABEL = 'The project folder';
 
@@ -244,8 +252,8 @@ export function factsFrom(tool: string, input: Record<string, unknown>, output: 
   const gitRelated = (tool === 'git' || /(^|[\s;&|])git\s/.test(` ${command}`)) && !runsElsewhere(tool, input, command);
   if (gitRelated && failed && /not a git repository/i.test(text)) {
     learnt.push({ key: repoKey, text: repoText(cwdLabel), from: '', relation: repoRelation(folder), value: repoValue(folder) });
-  } else if (gitRelated && !/not a git repository/i.test(text) && (!failed || /\bgit\s+(init|clone)\b/.test(command))) {
-    // git worked there (or a repository was just made): it is one now.
+  } else if (gitRelated && !failed && !/not a git repository/i.test(text) && gitInvocations(tool, input, command).some(makesOrNeedsRepoHere)) {
+    // A command that needs a repository worked there, or one was made there: it is one now.
     unlearnt.push(repoKey);
   }
   if (failed) {
