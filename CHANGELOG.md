@@ -46,6 +46,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     named on the board. What git says after a
     `cd`, or with `git -C` or `--git-dir`, isn't taken as being about the
     folder the command started in.
+## 0.98.2 - 2026-11-23
+
+### Fixed
+- **The web app's run mark no longer looks frozen while a run works.** The
+  Cascade mark beside a run's status lights the tiers working right now. A
+  lit arc only breathed between 75% and full brightness, so with one tier
+  busy for minutes the mark looked stuck. With reduced motion on (the
+  system setting, which Windows sets when animation effects are off, or
+  Settings → Reduce motion), it didn't move at all. Now a lit arc pulses
+  clearly, several lit arcs light in tier order from the top, and with
+  reduced motion the pulse stays and only the small movement goes.
 ## 0.98.1 - 2026-11-23
 
 ### Fixed
