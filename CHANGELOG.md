@@ -33,6 +33,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Azure deployments are no longer sent `reasoning_effort`.** A GPT-6 Luna or
   Sol deployment was sent the `none` that OpenAI's own API needs for tool calls.
 
+## 0.99.3 - 2026-11-24
+
+### Fixed
+- **A "Syntax error in text" graphic no longer appears at the bottom of the
+  desktop app.** When a Mermaid diagram in a reply didn't parse, which happens on
+  nearly every chunk while a diagram is still streaming in, Mermaid drew its own
+  error graphic into a hidden scratch element and left it on the page, below
+  the chat. Diagrams are now checked before they are drawn, Mermaid's error
+  graphic is turned off, and anything a failed render leaves behind is removed.
+  The reply still shows the diagram's source until the diagram is complete. The
+  web app gets the same protection.
+
 ## 0.99.2 - 2026-11-24
 
 ### Added
