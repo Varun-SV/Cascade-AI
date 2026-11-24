@@ -39,6 +39,9 @@ describe('the desktop service with the real SDK', () => {
     const dir = path.join(tmp, 'project');
     fs.mkdirSync(dir);
     fs.writeFileSync(path.join(dir, 'README.md'), 'hello from the desktop\n');
+    fs.mkdirSync(path.join(dir, 'private'));
+    fs.writeFileSync(path.join(dir, 'private', 'customers.csv'), 'name,email\n');
+    fs.writeFileSync(path.join(dir, '.cascadeignore'), 'private/\n');
 
     // The server side: one hub, the device's public key registered under its account.
     const server = createIdentity('server');
@@ -107,6 +110,10 @@ describe('the desktop service with the real SDK', () => {
       remote.tools.find((t) => t.name === name)!.execute(input, { tierId: 't3', sessionId: 's', requireApproval: false });
 
     expect(await call('file_read', { path: 'README.md' })).toContain('hello from the desktop');
+    // What the folder's .cascadeignore lists, no run reads or writes.
+    await expect(call('file_read', { path: 'private/customers.csv' })).rejects.toThrow();
+    await expect(call('file_write', { path: 'private/customers.csv', content: 'x' })).rejects.toThrow();
+    expect(fs.readFileSync(path.join(dir, 'private', 'customers.csv'), 'utf8')).toBe('name,email\n');
     await call('file_write', { path: 'new.txt', content: 'made by the run\n' });
     expect(fs.existsSync(path.join(dir, 'new.txt'))).toBe(true);
     // The run is never told where the folder is.

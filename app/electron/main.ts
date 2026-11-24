@@ -852,7 +852,7 @@ function registerIPC(): void {
   let workspace: ReturnType<typeof registerWorkspaceIpc> | null = null;
   registerRelayIpc({ loadCore, cloudAuth: () => cloudAuth, mainWindow: () => mainWindow, onForgotten: () => workspace?.deviceChanged() });
   // A folder on this computer as a cloud run's workspace: serves with the same pairing; off until turned on.
-  workspace = registerWorkspaceIpc({ loadCore, cloudAuth: () => cloudAuth, mainWindow: () => mainWindow });
+  workspace = registerWorkspaceIpc({ loadCore, cloudAuth: () => cloudAuth, mainWindow: () => mainWindow, ensureWindow: () => { if (!mainWindow && app.isReady()) createWindow(); } });
 }
 
 // ─── Desktop meta store (persistent JSON in userData) ─────────────────────────

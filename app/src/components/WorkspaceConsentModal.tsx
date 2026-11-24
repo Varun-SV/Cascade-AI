@@ -33,6 +33,9 @@ export function WorkspaceConsentModal() {
     w.onAskClosed(({ id }) => setAsks((q) => q.filter((a) => a.id !== id)));
     w.onCallAsk((a) => setCalls((q) => [...q, a]));
     w.onCallAskClosed(({ id }) => setCalls((q) => q.filter((a) => a.id !== id)));
+    // Asked before this window loaded (it was closed, or the app was starting): shown now.
+    const add = <T extends { id: number }>(q: T[], more: T[]) => [...q, ...more.filter((m) => !q.some((x) => x.id === m.id))];
+    void w.pending?.().then((p) => { setAsks((q) => add(q, p.asks)); setCalls((q) => add(q, p.calls)); }).catch(() => {});
   }, []);
   const ask = asks[0];
   useEffect(() => {

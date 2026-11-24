@@ -35,8 +35,8 @@ function harness(over: { device?: StoredDesktopDevice | null; account?: string |
       return new Promise<'stopped' | 'refused'>((r) => o.signal.addEventListener('abort', () => r('stopped')));
     },
     createWorkspaceExecutor: (o: unknown) => { executors.push(o); return { finish: async () => {} }; },
-    ToolRegistry: class { constructor(public config: unknown, public root: string) {} },
-    ConfigManager: class { async load() {} getConfig() { return { tools: { x: 1 }, privacy: { paths: [{ pattern: 'secret/**', policy: 'local-only' }] } }; } },
+    ToolRegistry: class { ignored: string[] | null = null; constructor(public config: unknown, public root: string) {} setIgnoredPaths(p: string[]) { this.ignored = p; } },
+    ConfigManager: class { async load() {} getConfig() { return { tools: { x: 1 }, privacy: { paths: [{ pattern: 'secret/**', policy: 'local-only' }] } }; } getIgnore() { return { getUserPatterns: () => ['private/**', '*.csv'] }; } },
     PrivacyPaths: class { constructor(public policies: unknown) {} },
     Checkpoints: class { constructor() { return checkpoints as never; } },
     statePath: (root: string, p: string) => path.join(root, '.state', p),
@@ -199,6 +199,8 @@ describe('a served run', () => {
     expect(exec.registry.root).toBe(PROJ);
     expect(exec.registry.config).toMatchObject({ x: 1, enabledTools: ['file_read', 'file_write', 'shell'], browserEnabled: false });
     expect(exec.privacy().policies).toEqual([{ pattern: 'secret/**', policy: 'local-only' }]);
+    // The folder's .cascadeignore protects what it lists from the run, as in a local run.
+    expect(exec.registry.ignored).toEqual(['private/**', '*.csv']);
     expect(await exec.checkpoints.begin('x')).toEqual({ n: 3 });
   });
 
@@ -298,5 +300,41 @@ describe('a served run', () => {
     b.s.onServing!({ runId: 'run-1', userId: 'u', expiresAt: 1, label: 'proj' });
     b.s.onServing!(null);
     expect(h.ws.status().lastRun).toMatchObject({ canUndo: false, changed: 0 });
+  });
+
+  it('never undoes another run: not once this run was undone from Cascade, and not past a newer one undone', async () => {
+    const h = harness();
+    const a = await opened(h);
+    a.s.onServing!({ runId: 'run-1', userId: 'u', expiresAt: 1, label: 'proj' });
+    await a.exec.checkpoints.begin('run');
+    // Undone with /undo elsewhere: the newest is still n 3, and undo(1) would pick n 2.
+    h.checkpoints.list.mockReturnValue([{ n: 2, changed: 5 }, { n: 3, changed: 2 }]);
+    a.s.onServing!(null);
+    h.checkpoints.list.mockReturnValue([{ n: 2, changed: 5 }, { n: 3, changed: 2, undone: true }]);
+    expect(await h.ws.undoLastRun()).toMatchObject({ error: expect.stringMatching(/already undone/) });
+    expect(h.checkpoints.undo).not.toHaveBeenCalled();
+    expect(h.ws.status().lastRun).toMatchObject({ undone: true, canUndo: false });
+
+    // A newer run that was itself undone: undo(1) picks this run's, so it may.
+    const b = await opened(h);
+    b.s.onServing!({ runId: 'run-1', userId: 'u', expiresAt: 1, label: 'proj' });
+    await b.exec.checkpoints.begin('run');
+    h.checkpoints.list.mockReturnValue([{ n: 3, changed: 2 }]);
+    b.s.onServing!(null);
+    h.checkpoints.list.mockReturnValue([{ n: 3, changed: 2 }, { n: 4, changed: 1, undone: true }]);
+    expect(await h.ws.undoLastRun()).toMatchObject({ ok: true });
+  });
+
+  it('keeps open questions for a window that opens later, and drops them once answered or closed', async () => {
+    const h = harness();
+    h.ws.enable();
+    h.connect();
+    const s = h.served[0]!;
+    const asked = s.askUser(run());
+    expect(h.ws.pending().asks).toEqual([expect.objectContaining({ runId: 'run-1', device: expect.any(String) })]);
+    const id = (h.ws.pending().asks[0] as { id: number }).id;
+    h.ws.answer(id, null);
+    expect(await asked).toBeNull();
+    expect(h.ws.pending()).toEqual({ asks: [], calls: [] });
   });
 });

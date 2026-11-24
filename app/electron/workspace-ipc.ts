@@ -17,6 +17,8 @@ export function registerWorkspaceIpc(opts: {
   loadCore: () => unknown;
   cloudAuth: () => CloudAuthHandle | null;
   mainWindow: () => BrowserWindow | null;
+  /** Opens the main window when there is none (macOS keeps the app running with none). */
+  ensureWindow?: () => void;
 }): DesktopWorkspace {
   const settingsPath = join(app.getPath('userData'), SETTINGS_FILE);
   const devicePath = join(app.getPath('userData'), DEVICE_FILE);
@@ -39,9 +41,13 @@ export function registerWorkspaceIpc(opts: {
       save: (s) => writeFileSync(settingsPath, JSON.stringify(s, null, 2), { mode: 0o600 }),
     },
     notify: (channel, payload) => {
+      const asking = channel === 'workspace:ask' || channel === 'workspace:call-ask';
+      // A question with no window to show it in opens one; the window's renderer then
+      // reads what is open with workspace:pending, so nothing asked before it loaded is lost.
+      if (asking && !opts.mainWindow()) opts.ensureWindow?.();
       const win = opts.mainWindow();
       if (win && !win.isDestroyed()) {
-        if (channel === 'workspace:ask' || channel === 'workspace:call-ask') { if (win.isMinimized()) win.restore(); win.show(); }
+        if (asking) { if (win.isMinimized()) win.restore(); win.show(); }
         win.webContents.send(channel, payload);
       }
     },
@@ -51,6 +57,7 @@ export function registerWorkspaceIpc(opts: {
     try { return await fn(); } catch (e) { return { error: e instanceof Error ? e.message : String(e) }; }
   };
   ipcMain.handle('workspace:status', () => ws.status());
+  ipcMain.handle('workspace:pending', () => ws.pending());
   ipcMain.handle('workspace:enable', () => wrap(() => ws.enable()));
   ipcMain.handle('workspace:disable', () => wrap(() => ws.disable()));
   ipcMain.handle('workspace:clear-defaults', () => wrap(() => ws.clearDefaults()));

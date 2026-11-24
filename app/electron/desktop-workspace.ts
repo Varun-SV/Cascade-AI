@@ -30,7 +30,7 @@ export interface WorkspaceSettings {
   labelMode?: LabelMode;
 }
 
-interface CheckpointRecord { n: number; changed?: number; after?: string }
+interface CheckpointRecord { n: number; changed?: number; after?: string; undone?: boolean }
 interface CheckpointStore {
   begin(label: string): Promise<{ n: number } | null>;
   end(cp: { n: number }): Promise<unknown>;
@@ -57,8 +57,8 @@ export interface DesktopWorkspaceCore {
   createWorkspaceExecutor(opts: {
     registry: unknown; tools: readonly string[]; ask: AskFn; checkpoints?: unknown; privacy?: () => unknown; label?: string; log?(line: string): void;
   }): unknown;
-  ToolRegistry: new (config: Record<string, unknown>, root: string) => unknown;
-  ConfigManager: new (root: string) => { load(): Promise<void>; getConfig(): { tools?: Record<string, unknown>; privacy?: { paths?: Array<{ pattern: string; policy: 'local-only' }> } }; getStore?(): { close?(): void } | undefined };
+  ToolRegistry: new (config: Record<string, unknown>, root: string) => { setIgnoredPaths(patterns: string[]): void };
+  ConfigManager: new (root: string) => { load(): Promise<void>; getConfig(): { tools?: Record<string, unknown>; privacy?: { paths?: Array<{ pattern: string; policy: 'local-only' }> } }; getIgnore(): { getUserPatterns(): string[] }; getStore?(): { close?(): void } | undefined };
   PrivacyPaths: new (policies: Array<{ pattern: string; policy: 'local-only' }>, opts: { workspaceRoot: string }) => unknown;
   Checkpoints: new (root: string, dir: string) => CheckpointStore;
   statePath(root: string, ...parts: string[]): string;
@@ -111,8 +111,8 @@ export interface DesktopWorkspaceStatus {
 
 export type WorkspaceAnswer = { folder: string; tools: string[]; labelMode?: LabelMode };
 
-interface Ask { id: number; runId: string; resolve(c: WorkspaceAnswer | null): void }
-interface CallAsk { id: number; resolve(yes: boolean): void }
+interface Ask { id: number; runId: string; resolve(c: WorkspaceAnswer | null): void; payload: Record<string, unknown> | null }
+interface CallAsk { id: number; resolve(yes: boolean): void; payload: Record<string, unknown> | null }
 
 const DEFAULT_TOOLS: string[] = ['file_list', 'file_read', 'glob', 'grep'];
 
@@ -198,19 +198,22 @@ export function createDesktopWorkspace(deps: DesktopWorkspaceDeps) {
         publish();
         resolve({ tools, label });
       };
-      asks.set(id, { id, runId: r.runId, resolve: done });
+      asks.set(id, { id, runId: r.runId, resolve: done, payload: null });
       // Unanswered within the offer's time is a no; so is the offer being withdrawn.
       timer = setTimeout(() => done(null), consentWindowMs(r.expiresAt, now()));
       r.signal.addEventListener('abort', () => done(null), { once: true });
       const s = deps.settings.load();
       const d = deps.device.load();
-      deps.notify('workspace:ask', {
+      const payload = {
         id, runId: r.runId, expiresAt: r.expiresAt,
         // Which computer is asking: the run's own hint, when it sent one.
         chat: r.hint?.chat ?? null,
         device: d?.name ?? hostname(),
         defaults: { folder: s.folder ?? null, tools: sanitizeTools(s.tools).length ? sanitizeTools(s.tools) : DEFAULT_TOOLS, labelMode: s.labelMode ?? 'device' },
-      });
+      };
+      // Kept while open: a window opened later (or reloaded) asks for it with pending().
+      asks.get(id)!.payload = payload;
+      deps.notify('workspace:ask', payload);
     });
 
   // ── Per-call approval ─────────────────────────────────────────────────────
@@ -227,14 +230,16 @@ export function createDesktopWorkspace(deps: DesktopWorkspaceDeps) {
         deps.notify('workspace:call-ask-closed', { id });
         resolve(yes);
       };
-      callAsks.set(id, { id, resolve: done });
+      callAsks.set(id, { id, resolve: done, payload: null });
       // Unanswered, or the run withdrew the call: refused.
       timer = setTimeout(() => done(false), callTimeout);
       q.signal.addEventListener('abort', () => done(false), { once: true });
-      deps.notify('workspace:call-ask', {
+      const payload = {
         id, tool: q.tool, summary: summarizeCall(q.tool, q.input), risk: q.risk.level, reason: q.risk.reason,
         label: current?.label ?? null, expiresAt: now() + callTimeout,
-      });
+      };
+      callAsks.get(id)!.payload = payload;
+      deps.notify('workspace:call-ask', payload);
     });
 
   // ── Opening the folder ────────────────────────────────────────────────────
@@ -253,6 +258,8 @@ export function createDesktopWorkspace(deps: DesktopWorkspaceDeps) {
     const cfg = mgr.getConfig();
     try { mgr.getStore?.()?.close?.(); } catch { /* nothing to release */ }
     const registry = new core.ToolRegistry({ ...(cfg.tools ?? {}), enabledTools: consent.tools, browserEnabled: false }, v.folder);
+    // The folder's .cascadeignore, as a local run applies it: what it protects, no run reads or changes.
+    registry.setIgnoredPaths(mgr.getIgnore().getUserPatterns());
     const privacy = new core.PrivacyPaths(cfg.privacy?.paths ?? [], { workspaceRoot: v.folder });
     const store = new core.Checkpoints(v.folder, core.statePath(v.folder, core.STATE.checkpoints));
     const run_: NonNullable<typeof current> = { runId: run.runId, label: consent.label, folder: v.folder, allowAll: false, live: false, store, cp: null };
@@ -415,8 +422,12 @@ export function createDesktopWorkspace(deps: DesktopWorkspaceDeps) {
       const v = validateFolder(last.folder, folderFs);
       if ('error' in v) return v;
       const store = new deps.core.Checkpoints(v.folder, deps.core.statePath(v.folder, deps.core.STATE.checkpoints));
-      // undo(1) puts back the newest checkpoint: only the run's own.
-      if (store.list().at(-1)?.n !== last.n) return { error: 'A newer checkpoint exists for this folder, so undoing the run from here could put back more than it changed. Use /undo in Cascade for that folder.' };
+      // undo(1) puts back the newest checkpoint not yet undone: it must be this run's own.
+      const all = store.list();
+      const mine = all.find((c) => c.n === last!.n);
+      if (!mine) return { error: 'That run\'s checkpoint is gone, so there is nothing to undo from here.' };
+      if (mine.undone) { last = { ...last, undone: true, canUndo: false, note: 'Already undone (from Cascade).' }; publish(); return { error: 'That run\'s changes were already undone.' }; }
+      if (all.filter((c) => !c.undone).at(-1)?.n !== last.n) return { error: 'A newer checkpoint exists for this folder, so undoing the run from here could put back more than it changed. Use /undo in Cascade for that folder.' };
       const r = await store.undo(1);
       last = { ...last, undone: true, canUndo: false, note: r.skipped.length ? `${r.skipped.length} file(s) changed since the run were left as they are.` : null };
       publish();
@@ -424,6 +435,14 @@ export function createDesktopWorkspace(deps: DesktopWorkspaceDeps) {
     },
 
     dismissLastRun(): void { last = null; publish(); },
+
+    /** The questions still open, for a window that opened (or reloaded) after they were asked. */
+    pending(): { asks: unknown[]; calls: unknown[] } {
+      return {
+        asks: [...asks.values()].map((a) => a.payload).filter(Boolean),
+        calls: [...callAsks.values()].map((c) => c.payload).filter(Boolean),
+      };
+    },
 
     /** At start: serve if the user left it on, the app is still paired, and its account is the one signed in. */
     resume(): void {

@@ -193,6 +193,7 @@ contextBridge.exposeInMainWorld('cascade', {
   // A folder on this computer as a cloud run's workspace (workspace-ipc.ts).
   workspace: {
     status: () => ipcRenderer.invoke('workspace:status'),
+    pending: () => ipcRenderer.invoke('workspace:pending'),
     enable: () => ipcRenderer.invoke('workspace:enable'),
     disable: () => ipcRenderer.invoke('workspace:disable'),
     clearDefaults: () => ipcRenderer.invoke('workspace:clear-defaults'),

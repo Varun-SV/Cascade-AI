@@ -181,6 +181,7 @@ declare global {
         stop(): Promise<{ ok: true } | { error: string }>;
         undo(): Promise<{ ok: true; restored: number; removed: number; skipped: number } | { error: string }>;
         dismissLast(): Promise<{ ok: true }>;
+        pending(): Promise<{ asks: WorkspaceAsk[]; calls: WorkspaceCallAsk[] }>;
         onAsk(cb: (a: WorkspaceAsk) => void): void;
         onAskClosed(cb: (a: { id: number }) => void): void;
         onCallAsk(cb: (a: WorkspaceCallAsk) => void): void;
