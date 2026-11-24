@@ -1,7 +1,7 @@
 # Your own machine as a coding environment for cloud runs
 
-Status: design for phase 1 (desktop host). Phase 3 (a cloud sandbox host) is
-deliberately left open: see "Cloud environments" at the end.
+Status: design. Only the user's own machine is an environment: Cascade hosts
+no cloud sandboxes (see "No cloud environments" at the end).
 
 ## What it is
 
@@ -20,8 +20,6 @@ cloud run's coding tools execute.
   folder, and its result sent back.
 - Nothing runs without a yes **on the machine**, never in the web app alone.
 
-The same protocol is meant to be served later by a headless Cascade inside a
-disposable cloud sandbox; the run side does not change.
 
 ## Reused from the browser relay
 
@@ -94,9 +92,10 @@ the chosen folder, with everything a local run has:
   proxy tool per listed tool. A proxy's `execute` sends a `call` and resolves on
   its `result`; aborting the run cancels what is in flight and ends the lease.
 - The run's shared board (`src/core/knowledge/run-memory.ts`) watches files on
-  the machine it runs on. For a remote environment that is the server, so its
-  file tracking and fact checks are **off** for such runs; reuse of read-only
-  answers keeps its coarse rule.
+  the machine it runs on. For a remote environment that is the server, so remote
+  calls are kept **off** it: no reuse of their answers, no file tracking and no
+  fact checks from them. Phase 2 brings the "files changed since you read them"
+  note back for remote workspaces from the machine's side (below).
 - **Logging**: the server relays frames and keeps nothing of them beyond what
   the run's transcript already holds (the calls the model made and what they
   returned, as for any run). No file contents, paths or command output are
@@ -108,16 +107,19 @@ the chosen folder, with everything a local run has:
    and the run's proxy tools, in the SDK, tested end to end in memory.
 2. **Server and desktop:** the endpoints and the run option; in the desktop app,
    a Settings switch, folder choice, the consent window, per-call approval and
-   Stop.
+   Stop. And the machine reports changes back: it keeps, per worker, the files
+   that worker read there, and tells the run which have changed since (by the
+   run, by the user, by anything else on the machine), so the worker is told
+   before its next model call, as on a local run. Paths relative to the folder
+   only, never contents, and never a local-only file's name.
 3. **Web app:** an environment picker beside the model picker, the run's changes
    as a file list and diffs, and approval prompts mirrored from the machine
    (answered on the machine).
 
-## Cloud environments
+## No cloud environments
 
-Hosting sandboxes means holding users' code and secrets and paying for their
-compute, with abuse (mining, scanning) to defend against. Before any of it is
-built, a comparison of providers and of self-hosting, with isolation, cost,
-data handling and fit, is to be written for a decision, which may well be not to
-offer them. Nothing in phases 1 to 3 depends on that decision: a sandbox host
-would be one more device speaking this protocol.
+Cascade does not host coding environments. Hosting sandboxes would mean holding
+users' code and secrets on Cascade's side and paying for their compute, with
+abuse (mining, scanning) to defend against: risks to data security, privacy and
+cost that a user's own machine doesn't carry. A run that needs a shell, files or
+git uses a machine the user owns, through the desktop app, or runs locally.
