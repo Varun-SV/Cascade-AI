@@ -39,6 +39,11 @@ export function CodeView({ socket }: { socket: Socket | null }) {
   const [results, setResults] = useState<SearchHit[]>([]);
   const [searching, setSearching] = useState(false);
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
+  const monacoRef = useRef<Parameters<OnMount>[1] | null>(null);
+  // Paths whose editor model is kept alive (keepCurrentModel) so undo history
+  // survives a preview tab. A model is released once its tab is closed, so a
+  // reopened file shows what is on disk, not the old buffer.
+  const keptModels = useRef(new Set<string>());
   const splitRef = useRef<HTMLDivElement>(null);
   const [chatWidth, setChatWidth] = useState(320);
   const [resizingChat, setResizingChat] = useState(false);
@@ -63,6 +68,21 @@ export function CodeView({ socket }: { socket: Socket | null }) {
   }, [resizingChat]);
 
   const active = activeIdx >= 0 ? openFiles[activeIdx] : null;
+
+  useEffect(() => {
+    if (active?.kind === 'text') keptModels.current.add(active.path);
+  }, [active?.path, active?.kind]);
+  useEffect(() => {
+    // After the editor has moved off it: dispose the model of every closed tab.
+    const monaco = monacoRef.current;
+    if (!monaco) return;
+    const open = new Set(openFiles.map((f) => f.path));
+    for (const path of [...keptModels.current]) {
+      if (open.has(path)) continue;
+      monaco.editor.getModel(monaco.Uri.parse(path))?.dispose();
+      keptModels.current.delete(path);
+    }
+  }, [openFiles]);
 
   const openFile = async (filePath: string): Promise<void> => {
     if (!window.cascade) return;
@@ -249,7 +269,7 @@ export function CodeView({ socket }: { socket: Socket | null }) {
                 path={active.path}
                 value={active.content}
                 language={active.language}
-                onMount={(editor) => { editorRef.current = editor; }}
+                onMount={(editor, monaco) => { editorRef.current = editor; monacoRef.current = monaco; }}
                 onChange={onChange}
               />
             ) : !workspacePath ? (
