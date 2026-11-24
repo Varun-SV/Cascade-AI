@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import {
+  peerEventForSession,
   normalizePermissionDecisionPayload,
   normalizeRuntimeRefreshPayload,
   normalizeSessionSubscriptionPayload,
@@ -103,5 +105,16 @@ describe('the save acknowledgement means durable, not merely handled', () => {
     const here = nodePath.dirname(url.fileURLToPath(import.meta.url));
     const source = await fs.readFile(nodePath.join(here, 'server.ts'), 'utf-8');
     expect(source).not.toMatch(/syncGlobalCredentials|saveGlobalCredentials\(/);
+  });
+
+  it('stamps the run\'s session onto a worker\'s peer message so it reaches the session\'s clients', () => {
+    const fromWorker = { sessionId: '', fromId: 'T3-1', toId: 'T3-2', syncType: 'SHARE_OUTPUT', payload: 'hi', timestamp: 't' };
+    expect(peerEventForSession('sess-1', fromWorker)).toMatchObject({ sessionId: 'sess-1', fromId: 'T3-1', payload: 'hi' });
+  });
+
+  it('server routes every peer:message listener through peerEventForSession', () => {
+    const src = readFileSync(new URL('./server.ts', import.meta.url), 'utf8');
+    expect(src).not.toContain("emitPeerMessage(e as");
+    expect((src.match(/peerEventForSession\(sessionId, e\)/g) ?? []).length).toBe(3);
   });
 });
