@@ -18,20 +18,23 @@ export default function Mermaid({ code }: { code: string }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      const id = `mmd-${Date.now()}-${seq++}`;
       try {
         if (!mermaidPromise) {
           mermaidPromise = import('mermaid').then((m) => {
-            m.default.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'dark' });
+            // suppressErrorRendering: mermaid 11 otherwise draws a "Syntax error in
+            // text" graphic into a scratch element on document.body and leaves it there.
+            m.default.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'dark', suppressErrorRendering: true });
             return m.default;
           });
         }
         const mermaid = await mermaidPromise;
-        const id = `mmd-${Date.now()}-${seq++}`;
         // parse() throws on invalid syntax before we attempt a render.
         await mermaid.parse(code);
         const { svg: out } = await mermaid.render(id, code);
         if (!cancelled) { setSvg(out); setError(null); }
       } catch (e) {
+        for (const el of [id, `d${id}`, `i${id}`]) document.getElementById(el)?.remove();
         if (!cancelled) setError(e instanceof Error ? e.message : 'Could not render diagram');
       }
     })();
