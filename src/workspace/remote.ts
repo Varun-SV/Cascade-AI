@@ -121,6 +121,19 @@ const workerId = (tierId: unknown): string | undefined => {
   return id || undefined;
 };
 
+/** The note changedNote() ends a tool result with, at its very end. */
+const CHANGED_NOTE_AT_END = /\n\n(\[Files in the workspace changed since you read them: [^\n]* — read them again before relying on them\.\])$/;
+
+/**
+ * A tool result split into what the tool returned and the change note after it, so
+ * whatever shortens the result for a model's context can keep the note whole: the
+ * machine has already counted those files as reported.
+ */
+export function splitChangedNote(text: string): { rest: string; note: string | null } {
+  const m = CHANGED_NOTE_AT_END.exec(text);
+  return m ? { rest: text.slice(0, m.index), note: m[1]! } : { rest: text, note: null };
+}
+
 /** What the run's model is told when files it read have changed on the machine. */
 export function changedNote(changed: string[]): string {
   const shown = changed.slice(0, MAX_CHANGED);
