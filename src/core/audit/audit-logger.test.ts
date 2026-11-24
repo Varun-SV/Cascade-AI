@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { AuditLogger } from './audit-logger.js';
+import { AuditLogger, auditedToolEvent } from './audit-logger.js';
 import { projectStateDir } from '../../config/project-state.js';
 
 let dir: string;
@@ -67,5 +67,20 @@ describe('AuditLogger hash chain', () => {
     const v = reopened.verifyChain();
     reopened.close();
     expect(v.ok).toBe(false);
+  });
+});
+
+describe('auditedToolEvent', () => {
+  it("keeps a local tool's event as it is", () => {
+    const e = { id: 't1', tierId: 'T3-1', toolName: 'web_search', input: { q: 'x' } };
+    expect(auditedToolEvent(e, false)).toBe(e);
+  });
+
+  it("keeps only that a tool on the user's own machine ran: never its input, output or error", () => {
+    const call = auditedToolEvent({ id: 't1', tierId: 'T3-1', toolName: 'file_read', input: { path: 'secret/plan.md' } }, true);
+    const result = auditedToolEvent({ id: 't1', tierId: 'T3-1', toolName: 'file_read', output: 'LAUNCH on Monday', error: 'x in secret/plan.md', durationMs: 12 }, true);
+    expect(call).toEqual({ id: 't1', tierId: 'T3-1', toolName: 'file_read', remote: true });
+    expect(result).toEqual({ id: 't1', tierId: 'T3-1', toolName: 'file_read', remote: true, durationMs: 12 });
+    expect(JSON.stringify([call, result])).not.toMatch(/secret|LAUNCH/);
   });
 });

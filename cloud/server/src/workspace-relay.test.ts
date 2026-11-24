@@ -255,6 +255,35 @@ describe('a run that asks for a workspace', () => {
     await expect(openWorkspaceForRun(w.relay, w.store, { userId: alice.id, deviceId: device.id, runId: 'r' })).rejects.toThrow(/did not open a workspace for this run: .*declined/);
   });
 
+  it('stopping the run while the machine is still asking withdraws the offer and ends the start at once', async () => {
+    const w = await server();
+    const alice = w.user('alice');
+    const { device, identity } = w.register(alice.id, 'Work PC');
+    let asked = 0;
+    let cancelled = false;
+    const client = connectWorkspaceDevice({
+      controlUrl: w.ws + WORKSPACE_CONTROL_PATH, runUrl: w.ws + WORKSPACE_RUN_PATH,
+      device: identity, serverId: w.relay.identity.id, serverKey: w.relay.identity.publicKey,
+      // The user never answers; the offer being withdrawn is what closes the question.
+      askUser: async ({ signal }) => {
+        asked++;
+        return new Promise((resolve) => signal.addEventListener('abort', () => { cancelled = true; resolve(null); }, { once: true }));
+      },
+      open: async () => { throw new Error('unreachable'); },
+    });
+    cleanup.push(() => client.close());
+    await client.ready;
+    await vi.waitFor(() => expect(w.relay.hub.deviceOnline(alice.id, device.id)).toBe(true));
+    const stop = new AbortController();
+    const started = openWorkspaceForRun(w.relay, w.store, { userId: alice.id, deviceId: device.id, runId: 'r-stop', signal: stop.signal });
+    await vi.waitFor(() => expect(asked).toBe(1));
+    const t0 = Date.now();
+    stop.abort();
+    await expect(started).rejects.toThrow(/stopped before its workspace opened/);
+    expect(Date.now() - t0).toBeLessThan(2_000);
+    await vi.waitFor(() => expect(cancelled).toBe(true));
+  });
+
   it('the workspace ends with the run: stopping it closes the machine\'s session, and the machine dropping ends the run\'s', async () => {
     const w = await server();
     const alice = w.user('alice');

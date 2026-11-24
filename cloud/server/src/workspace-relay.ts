@@ -106,24 +106,41 @@ export async function openWorkspaceForRun(
   if (!relay.hub.deviceOnline(req.userId, device.id)) {
     throw new WorkspaceRunError(`Your computer ${named} is not serving workspaces right now. Open the Cascade desktop app on it and turn workspace serving on, then try again.`);
   }
-  if (req.signal?.aborted) throw new WorkspaceRunError('The run was stopped before its workspace opened.');
-  await relay.ready;
+  const stopped = (): WorkspaceRunError => new WorkspaceRunError('The run was stopped before its workspace opened.');
+  if (req.signal?.aborted) throw stopped();
+  // Listened for from here on: a run stopped while the user is still being asked
+  // withdraws the offer (the desktop's prompt closes) and closes what has opened.
+  let socket: WebSocket | null = null;
+  const onEarlyAbort = (): void => {
+    relay.hub.endRun(req.runId, 'the run was stopped');
+    socket?.close();
+  };
+  req.signal?.addEventListener('abort', onEarlyAbort, { once: true });
   let lease: Awaited<ReturnType<RelayHub['requestBrowser']>>;
-  try {
-    lease = await relay.hub.requestBrowser({ userId: req.userId, deviceId: device.id, runId: req.runId });
-  } catch (e) {
-    const why = e instanceof RelayRefused ? e.reason : 'it could not be reached';
-    throw new WorkspaceRunError(`Your computer ${named} did not open a workspace for this run: ${why}.`);
-  }
-  // Made before it opens, and handed over at once: the machine's first frame can arrive in the read that opens it.
-  const socket = new WebSocket(relay.agentUrl(lease.token), { perMessageDeflate: false });
   let remote: RemoteWorkspace;
   try {
-    remote = await openRemoteWorkspace(socket);
-  } catch (e) {
-    lease.close('the workspace did not open');
-    const why = e instanceof WorkspaceUnavailable ? e.message : 'it could not be opened';
-    throw new WorkspaceRunError(`Your computer ${named} did not open a workspace for this run: ${why}.`);
+    await relay.ready;
+    if (req.signal?.aborted) throw stopped();
+    try {
+      lease = await relay.hub.requestBrowser({ userId: req.userId, deviceId: device.id, runId: req.runId });
+    } catch (e) {
+      if (req.signal?.aborted) throw stopped();
+      const why = e instanceof RelayRefused ? e.reason : 'it could not be reached';
+      throw new WorkspaceRunError(`Your computer ${named} did not open a workspace for this run: ${why}.`);
+    }
+    if (req.signal?.aborted) { lease.close('the run was stopped'); throw stopped(); }
+    // Made before it opens, and handed over at once: the machine's first frame can arrive in the read that opens it.
+    socket = new WebSocket(relay.agentUrl(lease.token), { perMessageDeflate: false });
+    try {
+      remote = await openRemoteWorkspace(socket);
+    } catch (e) {
+      lease.close('the workspace did not open');
+      if (req.signal?.aborted) throw stopped();
+      const why = e instanceof WorkspaceUnavailable ? e.message : 'it could not be opened';
+      throw new WorkspaceRunError(`Your computer ${named} did not open a workspace for this run: ${why}.`);
+    }
+  } finally {
+    req.signal?.removeEventListener('abort', onEarlyAbort);
   }
   // Either end going ends both: the lease ends the hub's sockets, which ends the remote.
   let released = false;
@@ -138,6 +155,6 @@ export async function openWorkspaceForRun(
   const onAbort = (): void => release('the run was stopped');
   req.signal?.addEventListener('abort', onAbort, { once: true });
   void remote.closed.then(() => req.signal?.removeEventListener('abort', onAbort));
-  if (req.signal?.aborted) onAbort();
+  if (req.signal?.aborted) { onAbort(); throw stopped(); }
   return { remote, device: { id: device.id, name: device.name }, release };
 }

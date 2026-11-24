@@ -572,5 +572,22 @@ describe('the machine tells each worker which files it read have changed', () =>
     expect(listed).toHaveLength(MAX_CHANGED);
     expect(listed.every((p) => /^f\d+\.txt$/.test(p))).toBe(true);
     expect(out).not.toContain(dir);
+    // The ones over the cap are not dropped: the next call reports them, and then none.
+    const rest = (await a('file_list', { path: '.' })).match(NOTE)![1]!.split(', ');
+    expect(rest).toHaveLength(N - MAX_CHANGED);
+    expect(new Set([...listed, ...rest]).size).toBe(N);
+    expect(await a('file_list', { path: '.' })).not.toMatch(NOTE);
+  });
+
+  it('a listing or a search naming a file it read is no change of its own: a later edit still reaches it', async () => {
+    const w = await world();
+    const dir = folder();
+    await machine(w, dir, { answer: { tools: ['file_read', 'file_list', 'grep'], label: 'p' } });
+    const { ws } = await runWorkspace(w);
+    const a = as(ws, 'worker-a');
+    await a('file_read', { path: 'README.md' });
+    await a('grep', { pattern: 'x', path: 'README.md' });
+    fs.writeFileSync(path.join(dir, 'README.md'), 'edited on the machine after the search\n');
+    expect((await a('file_list', { path: '.' })).match(NOTE)?.[1]).toBe('README.md');
   });
 });

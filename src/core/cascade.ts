@@ -58,7 +58,7 @@ import { McpClient } from '../mcp/client.js';
 import { fileOAuthProvider, withOAuthStoreLock } from '../mcp/oauth.js';
 import { distillSessionFacts, buildSessionTranscript, sessionWorthRemembering } from './knowledge/session-memory.js';
 import { AuditLogger } from '../audit/log.js';
-import { AuditLogger as EncryptedAuditLogger } from './audit/audit-logger.js';
+import { AuditLogger as EncryptedAuditLogger, auditedToolEvent } from './audit/audit-logger.js';
 import { MemoryStore } from '../memory/store.js';
 import { PermissionEscalator } from './permissions/escalator.js';
 import { RISK_LABELS } from './permissions/risk.js';
@@ -1894,8 +1894,11 @@ export class Cascade extends EventEmitter {
 
       // Phase 3: Wire encrypted audit logger to capture global events
       if (this.encryptedAuditLogger) {
-        this.on('tool:call', (e) => this.encryptedAuditLogger!.logEvent('tool_call', e.tierId || 'unknown', e));
-        this.on('tool:result', (e) => this.encryptedAuditLogger!.logEvent('tool_result', e.tierId || 'unknown', e));
+        // A tool run on another machine (the user's own workspace) reads and writes their
+        // files: this machine's log records that it ran, never what went in or came out.
+        const audited = <E extends { toolName: string }>(e: E) => auditedToolEvent(e, Boolean(this.toolRegistry.getTool(e.toolName)?.remote));
+        this.on('tool:call', (e) => this.encryptedAuditLogger!.logEvent('tool_call', e.tierId || 'unknown', audited(e)));
+        this.on('tool:result', (e) => this.encryptedAuditLogger!.logEvent('tool_result', e.tierId || 'unknown', audited(e)));
         this.on('tier:status', (e) => this.encryptedAuditLogger!.logEvent('tier_status', e.tierId || 'unknown', e));
       }
 
