@@ -873,6 +873,20 @@ describe('Codex on 9d49e32', () => {
   });
 });
 
+describe('Codex on 27f8481', () => {
+  it('a second read before the worker is told does not hide the change', () => {
+    fs.writeFileSync(path.join(root, 'a.txt'), 'v1');
+    const mem = new RunMemory(root);
+    const abs = path.join(root, 'a.txt');
+    mem.noteRead('T3-a', abs);
+    fs.writeFileSync(path.join(root, 'a.txt'), 'v2, longer');
+    // A search hit on the file, say, before the next model call.
+    mem.noteRead('T3-a', abs);
+    expect(mem.changedFor('T3-a')).toEqual([{ path: 'a.txt', gone: false }]);
+    expect(mem.changedFor('T3-a')).toEqual([]);
+  });
+});
+
 describe('facts checked against the machine', () => {
   let saved: string | undefined;
   beforeEach(() => { saved = process.env['PATH']; });

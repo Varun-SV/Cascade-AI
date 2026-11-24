@@ -840,8 +840,13 @@ export class RunMemory {
     if (!snap) return;
     let reads = this.readsBy.get(worker);
     if (!reads) { reads = new Map(); this.readsBy.set(worker, reads); }
+    // One already held is kept, not replaced: a change since it was taken hasn't
+    // been told yet, and a partial read (a search hit) now doesn't make the rest
+    // of what the worker holds current. changedFor moves it on once told; a full
+    // re-read before then costs one note it didn't need.
+    const held = reads.get(abs);
     reads.delete(abs);
-    reads.set(abs, snap);
+    reads.set(abs, held ?? snap);
     // The most recent MAX_TRACKED_READS: one read long ago is likely gone from its context too.
     if (reads.size > MAX_TRACKED_READS) reads.delete(reads.keys().next().value!);
   }
