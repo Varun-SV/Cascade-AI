@@ -183,7 +183,7 @@ describe('the consent question', () => {
 describe('a served run', () => {
   async function opened(h: ReturnType<typeof harness>, tools = ['file_read', 'file_write', 'shell']) {
     h.ws.enable();
-    const s = h.served[0]!;
+    const s = h.served.at(-1)!;
     const p = s.askUser(run());
     h.ws.answer(h.last('workspace:ask').id, { folder: PROJ, tools });
     const consent = (await p)!;
@@ -323,6 +323,23 @@ describe('a served run', () => {
     b.s.onServing!(null);
     h.checkpoints.list.mockReturnValue([{ n: 3, changed: 2 }, { n: 4, changed: 1, undone: true }]);
     expect(await h.ws.undoLastRun()).toMatchObject({ ok: true });
+  });
+
+  it('a service turned off and on again: the old one finishing late never ends the new run, nor opens one', async () => {
+    const h = harness();
+    const first = await opened(h);
+    first.s.onServing!({ runId: 'run-1', userId: 'u', expiresAt: 1, label: 'l' });
+    // Turned off while a call drains, and on again; the new service opens a run.
+    h.ws.disable();
+    const second = await opened(h);
+    expect(second.s).not.toBe(first.s);
+    second.s.onServing!({ runId: 'run-1', userId: 'u', expiresAt: 1, label: 'l' });
+    expect(h.ws.status().serving).not.toBeNull();
+    // The old service finishes now: the new run is untouched, and Stop still reaches it.
+    first.s.onServing!(null);
+    expect(h.ws.status().serving).not.toBeNull();
+    await expect(first.s.open(first.consent, run())).rejects.toThrow(/turned off/);
+    expect(h.ws.stop()).toEqual({ ok: true });
   });
 
   it('keeps open questions for a window that opens later, and drops them once answered or closed', async () => {

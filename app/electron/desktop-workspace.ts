@@ -138,7 +138,7 @@ export function createDesktopWorkspace(deps: DesktopWorkspaceDeps) {
   /** The folder each run's consent chose, until its executor is opened: never sent anywhere. */
   const chosen = new Map<string, { folder: string; label: string }>();
   /** The run being served, and what its checkpoint was. */
-  let current: { runId: string; label: string; folder: string; allowAll: boolean; live: boolean; store: CheckpointStore | null; cp: { n: number } | null } | null = null;
+  let current: { runId: string; label: string; folder: string; allowAll: boolean; live: boolean; store: CheckpointStore | null; cp: { n: number } | null; owner: AbortController | null } | null = null;
   let last: (WorkspaceRunSummary & { folder: string; n: number | null }) | null = null;
 
   const ownerSignedIn = (d: StoredDesktopDevice): boolean => {
@@ -244,7 +244,7 @@ export function createDesktopWorkspace(deps: DesktopWorkspaceDeps) {
 
   // ── Opening the folder ────────────────────────────────────────────────────
 
-  const open = async (consent: { tools: string[]; label: string }, run: { runId: string }): Promise<unknown> => {
+  const open = async (consent: { tools: string[]; label: string }, run: { runId: string }, owner: AbortController | null = null): Promise<unknown> => {
     const c = chosen.get(run.runId);
     chosen.delete(run.runId);
     if (!c) throw new Error('no folder was chosen for this run');
@@ -262,7 +262,7 @@ export function createDesktopWorkspace(deps: DesktopWorkspaceDeps) {
     registry.setIgnoredPaths(mgr.getIgnore().getUserPatterns());
     const privacy = new core.PrivacyPaths(cfg.privacy?.paths ?? [], { workspaceRoot: v.folder });
     const store = new core.Checkpoints(v.folder, core.statePath(v.folder, core.STATE.checkpoints));
-    const run_: NonNullable<typeof current> = { runId: run.runId, label: consent.label, folder: v.folder, allowAll: false, live: false, store, cp: null };
+    const run_: NonNullable<typeof current> = { runId: run.runId, label: consent.label, folder: v.folder, allowAll: false, live: false, store, cp: null, owner };
     current = run_;
     const checkpoints = {
       begin: async (label: string) => { const cp = await store.begin(label); if (cp) run_.cp = { n: cp.n }; return cp; },
@@ -274,7 +274,10 @@ export function createDesktopWorkspace(deps: DesktopWorkspaceDeps) {
     });
   };
 
-  const onServing = (run: { runId: string; label: string } | null): void => {
+  const onServing = (run: { runId: string; label: string } | null, owner: AbortController | null = null): void => {
+    // A service turned off and replaced may still be finishing its run: what it
+    // reports is about its own run, never the one a newer service has open.
+    if (current && current.owner !== owner) return;
     if (run) {
       // Opened for this run: the indicator shows.
       if (current && current.runId === run.runId) { current.live = true; last = null; publish(); }
@@ -315,7 +318,13 @@ export function createDesktopWorkspace(deps: DesktopWorkspaceDeps) {
     void deps.core.serveWorkspaceDevice({
       stored: { deviceId: d.deviceId, privateKeyPem, serverId: d.serverId, serverKey: d.serverKey },
       endpoints: deps.core.relayEndpoints(d.serverUrl, { controlPath: WORKSPACE_CONTROL_PATH, runPath: WORKSPACE_RUN_PATH }),
-      askUser, open, onServing, signal: ctl.signal,
+      askUser, signal: ctl.signal,
+      // Bound to this service: one turned off can't open a run, nor end a newer one's.
+      open: (consent, run) => {
+        if (serving !== ctl) return Promise.reject(new Error('serving was turned off'));
+        return open(consent, run, ctl);
+      },
+      onServing: (run) => onServing(run, ctl),
       onClient: (c) => { if (serving === ctl) client = c; },
       log: (line) => {
         log(line);
