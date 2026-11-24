@@ -751,7 +751,7 @@ describe('Codex on a0cb796', () => {
     expect(files('tail --follow a.txt')).toBeUndefined();
     expect(files('cat - a.txt')).toBeUndefined();
     // Control.
-    expect(files('stat -L a.txt')).toEqual(['a.txt']);
+    expect(files('cat -n a.txt')).toEqual(['a.txt']);
     expect(files('tail --lines=3 a.txt')).toEqual(['a.txt']);
   });
 
@@ -799,7 +799,7 @@ describe('Codex on 6f99570', () => {
     expect(files('file -m names.txt a.txt')).toBeUndefined();
     expect(files('diff -X names.txt a.txt b.txt')).toBeUndefined();
     expect(files('cat -Z a.txt')).toBeUndefined();
-    expect(files('stat -c a.txt')).toBeUndefined();
+    expect(files('cat -c a.txt')).toBeUndefined();
     // Control: options that only change how the named files are shown.
     expect(files('file -b a.txt')).toEqual(['a.txt']);
     expect(files('cat -n a.txt')).toEqual(['a.txt']);
@@ -817,6 +817,30 @@ describe('Codex on 6f99570', () => {
     expect(mem.reuse('shell', { command: 'cat a.txt' })).toBeNull();
     write('a.txt', 'alpha, edited');
     expect(mem.changedFor('T3-private', true)).toEqual([{ path: 'a.txt', gone: false }]);
+  });
+});
+
+describe('Codex on 87abb45', () => {
+  const write = (rel: string, text: string) => fs.writeFileSync(path.join(root, rel), text);
+  const files = (command: string) => readsOf(command, root)?.map((f) => path.relative(root, f));
+
+  it('not stat: it prints the access time, which reading the file changes', () => {
+    write('a.txt', 'a');
+    expect(files('stat a.txt')).toBeUndefined();
+    expect(files('stat -L a.txt')).toBeUndefined();
+  });
+
+  it('not a symbolic link, whose own metadata a snapshot of its target cannot see', () => {
+    write('a.txt', 'a');
+    fs.symlinkSync('a.txt', path.join(root, 'link'));
+    expect(files('file link')).toBeUndefined();
+    expect(files('cat link')).toBeUndefined();
+    expect(files('cat a.txt')).toEqual(['a.txt']);
+  });
+
+  it('type reads a file only on Windows; in a POSIX shell it looks a command up', () => {
+    write('reviewtool', 'x');
+    expect(files('type reviewtool')).toEqual(process.platform === 'win32' ? ['reviewtool'] : undefined);
   });
 });
 

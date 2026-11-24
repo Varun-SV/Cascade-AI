@@ -442,13 +442,17 @@ function onSearchPath(name: string): boolean {
  * Commands whose answer is the content of the files named and nothing else, so it
  * stays right until one of those files changes (see readsOf).
  */
-const FILE_READERS = new Set(['cat', 'type', 'head', 'tail', 'wc', 'stat', 'file', 'cmp', 'diff', 'get-content', 'gc']);
+const FILE_READERS = new Set(['cat', 'head', 'tail', 'wc', 'file', 'cmp', 'diff', 'get-content', 'gc',
+  // `type` reads a file in cmd; in a POSIX shell it looks a command up on PATH.
+  ...(process.platform === 'win32' ? ['type'] : [])]);
+// Not `stat`: it prints the access time, which any read changes, and a link's own
+// metadata; neither is in a snapshot (Codex on 87abb45).
 /** Options of head/tail that take a value as the next word. */
 const VALUE_OPTIONS = /^(-n|-c|--lines|--bytes)$/;
 /**
  * The short options taken, per command: only ones that change how the named
  * files are shown, not which files are read or what else is reported. Left out
- * on purpose, among others: `stat -f` (the whole filesystem's free blocks),
+ * on purpose, among others: (stat is not taken at all, see FILE_READERS)
  * `tail -f` (follows), `file -f`/`-m` and `diff -X` (read other files named
  * inside), and anything that takes a value. Any other option, and every long
  * one but the value options above, means the command isn't taken.
@@ -458,7 +462,6 @@ const SHORT_OPTIONS: Record<string, RegExp> = {
   head: /^-(\d+|[qv]+)$/,
   tail: /^-(\d+|[qv]+)$/,
   wc: /^-[clmwL]+$/,
-  stat: /^-[Lt]+$/,
   file: /^-[bhiLkNz]+$/,
   cmp: /^-[bls]+$/,
   diff: /^-[abBdEiNpqstTuwy]+$/,
@@ -498,6 +501,8 @@ export function readsOf(command: string, cwd: string): string[] | null {
     }
     const abs = path.resolve(cwd, w);
     if (!snapshot(abs)) return null;
+    // A link: `file link` describes the link, which a snapshot (of its target) can't see change.
+    try { if (fs.lstatSync(abs).isSymbolicLink()) return null; } catch { return null; }
     files.push(abs);
   }
   return files.length ? files : null;

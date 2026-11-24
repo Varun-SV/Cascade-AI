@@ -17,11 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   model. Only paths are given, never contents.
 - **A read of named files is reused until one of them changes.** Any change
   in the project used to clear every stored answer. Now `cat`, `head`,
-  `tail`, `wc`, `stat`, `file`, `cmp`, `diff` and `Get-Content` on files
-  named outright (one command, no globs) keep their answer until one of
-  those files changes, however long ago the command ran and whatever else
-  has run since. A file edited outside Cascade counts as a change too.
-  Folder listings and searches keep the stricter rule.
+  `tail`, `wc`, `file`, `cmp`, `diff` and `Get-Content` (and `type` on
+  Windows) on files named outright keep their answer until one of those
+  files changes, however long ago the command ran and whatever else has run
+  since. A file edited outside Cascade counts as a change too. This applies
+  to a single command with plain file names and display-only options: no
+  globs, quoting, symbolic links, or options that read other files. Folder
+  listings, searches and `stat` keep the stricter rule.
 - **Facts are checked against the machine.** "Not a git repository" and
   "command not available" are dropped once they stop being true, even when
   no worker ran anything to show it: for example, you ran `git init` or
