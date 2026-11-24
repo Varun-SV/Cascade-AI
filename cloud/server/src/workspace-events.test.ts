@@ -34,5 +34,7 @@ describe('workspaceResultEvent', () => {
   it('marks a failure, and ignores tools it does not serve', () => {
     expect(workspaceResultEvent({ id: 'c', toolName: 'file_write', error: 'no' }, served)?.ok).toBe(false);
     expect(workspaceResultEvent({ id: 'c', toolName: 'web_search', output: 'x' }, new Set(['file_read']))).toBeNull();
+    // The worker as the machine's waiting notice names it, so the web app clears the right one.
+    expect(workspaceResultEvent({ id: 'c', toolName: 'file_write', tierId: 'T3:sub/1' }, served)?.worker).toBe('T3_sub_1');
   });
 });

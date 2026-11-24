@@ -40,20 +40,19 @@ export function useWorkspaceRun(socket: Socket | null, enabled: boolean, convers
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  // A first message starts a conversation with no id, and the id arrives with the run: the
-  // choice made for the blank chat goes with it, and the blank chat goes back to Cloud.
-  const prevKey = useRef(key);
-  useEffect(() => {
-    const was = prevKey.current;
-    prevKey.current = key;
-    if (was === '' && key !== '' && busy) {
-      setChoices((c) => {
-        if (c[''] === undefined || c[key] !== undefined) return c;
-        const { '': carried, ...rest } = c;
-        return { ...rest, [key]: carried };
-      });
-    }
-  }, [key, busy]);
+  /**
+   * A first message starts a conversation with no id, and the server gives the run one:
+   * the desktop that run was sent with goes with it, and the blank chat goes back to Cloud.
+   * Called by the chat session for its own run's id only (`onFirstTurnConversation`), so
+   * opening another chat while the first run starts carries nothing there.
+   */
+  const adoptFirstTurn = useCallback((conversationId: string, deviceId: string | undefined) => {
+    setChoices((c) => {
+      const { '': _blank, ...rest } = c;
+      if (rest[conversationId] !== undefined || !deviceId) return c[''] === undefined ? c : rest;
+      return { ...rest, [conversationId]: deviceId };
+    });
+  }, []);
 
   useEffect(() => {
     if (busy) return;
@@ -110,6 +109,8 @@ export function useWorkspaceRun(socket: Socket | null, enabled: boolean, convers
     select,
     /** What goes in the run payload. */
     workspaceDeviceId: workspaceDeviceForRun(selected),
+    /** For useChatSession's onFirstTurnConversation. */
+    adoptFirstTurn,
     /** This run asked for a workspace and its computer has not answered yet. */
     awaitingConsent: enabled && busy && selected !== undefined && !attachedThisRun,
     awaitingDeviceName: deviceName ?? 'your computer',

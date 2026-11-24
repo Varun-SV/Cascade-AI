@@ -2095,7 +2095,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
     const ws = workspace;
     const where = { conversationId: conversation.id, runId: payload.runId, label: ws.remote.label, device: ws.device };
     cascade.addRemoteTools(ws.remote.tools);
-    ws.remote.onWaiting((call) => socket.emit('workspace:waiting', { conversationId: conversation.id, runId: payload.runId, tool: call.tool, label: ws.remote.label, device: ws.device }));
+    ws.remote.onWaiting((call) => socket.emit('workspace:waiting', { conversationId: conversation.id, runId: payload.runId, tool: call.tool, ...(call.worker ? { worker: call.worker } : {}), label: ws.remote.label, device: ws.device }));
     socket.emit('workspace:attached', { ...where, tools: ws.remote.tools.map((t) => t.name) });
     // Gone mid-run: the calls in flight and every later one fail with that reason, which
     // the model reads, and the web app is told. The run never waits on a connection that is over.

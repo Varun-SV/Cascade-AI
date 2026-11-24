@@ -64,6 +64,11 @@ describe('useWorkspaceRun', () => {
     act(() => result.current.select('d1'));
     rerender({ c: undefined, busy: true });
     expect(result.current.awaitingConsent).toBe(true);
+    // Opening another chat while that run starts carries nothing there.
+    rerender({ c: 'existing', busy: true });
+    expect(result.current.selected).toBeUndefined();
+    // The run's own conversation, as the chat session reports it, gets its desktop.
+    act(() => result.current.adoptFirstTurn('new-convo', 'd1'));
     rerender({ c: 'new-convo', busy: true });
     expect(result.current.selected).toBe('d1');
     rerender({ c: undefined, busy: false });
@@ -82,13 +87,13 @@ describe('useWorkspaceRun', () => {
     expect(result.current.awaitingConsent).toBe(false);
     act(() => {
       fake.fire('workspace:call', { conversationId: 'c1', runId: 'r1', id: 'k1', tool: 'file_write', change: { kind: 'write', path: 'a.txt', content: 'x' } });
-      fake.fire('workspace:waiting', { conversationId: 'c1', runId: 'r1', tool: 'shell', label: 'proj', device: { id: 'd1', name: 'Work PC' } });
+      fake.fire('workspace:waiting', { conversationId: 'c1', runId: 'r1', tool: 'file_write', worker: 'T3-1', label: 'proj', device: { id: 'd1', name: 'Work PC' } });
       // Another conversation's event does not land here.
       fake.fire('workspace:waiting', { conversationId: 'other', runId: 'r9', tool: 'shell' });
     });
     expect(result.current.view?.changes.map((f) => f.path)).toEqual(['a.txt']);
-    expect(result.current.view?.waitingTool).toBe('shell');
-    act(() => fake.fire('workspace:result', { conversationId: 'c1', runId: 'r1', id: 'k1', tool: 'file_write', ok: true }));
+    expect(result.current.view?.waitingTool).toBe('file_write');
+    act(() => fake.fire('workspace:result', { conversationId: 'c1', runId: 'r1', id: 'k1', tool: 'file_write', ok: true, worker: 'T3-1' }));
     expect(result.current.view?.waitingTool).toBeUndefined();
     // The run ending clears a wait the server never answered.
     act(() => fake.fire('workspace:waiting', { conversationId: 'c1', runId: 'r1', tool: 'file_delete' }));

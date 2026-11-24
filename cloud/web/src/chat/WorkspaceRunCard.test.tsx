@@ -38,6 +38,9 @@ describe('WorkspaceRunCard', () => {
       { type: 'call', runId: 'r1', id: '1', tool: 'file_edit', change: { kind: 'edit', path: 'src/a.ts', oldString: 'const a = 1;', newString: 'const a = 2;' } },
       { type: 'call', runId: 'r1', id: '2', tool: 'file_write', change: { kind: 'write', path: 'notes.md', content: 'brand new text' } },
       { type: 'call', runId: 'r1', id: '3', tool: 'file_delete', change: { kind: 'delete', path: 'old.txt' } },
+      { type: 'result', runId: 'r1', id: '1', tool: 'file_edit', ok: true },
+      { type: 'result', runId: 'r1', id: '2', tool: 'file_write', ok: true },
+      { type: 'result', runId: 'r1', id: '3', tool: 'file_delete', ok: true },
     );
     const { container } = render(<WorkspaceRunCard view={view} awaitingConsent={false} awaitingDeviceName="x" />);
     expect(screen.getByRole('region', { name: 'Files changed in your workspace' })).toBeInTheDocument();

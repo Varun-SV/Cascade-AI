@@ -36,7 +36,7 @@ export interface RemoteWorkspace {
   /** Resolves with why, once the workspace is gone. It is never resumed. */
   readonly closed: Promise<string>;
   /** Told when a call waits for the person's answer on the machine. */
-  onWaiting(fn: (call: { id: string; tool: string }) => void): void;
+  onWaiting(fn: (call: { id: string; tool: string; worker?: string }) => void): void;
   close(reason?: string): void;
 }
 
@@ -50,7 +50,7 @@ export class WorkspaceUnavailable extends Error {}
 export function openRemoteWorkspace(socket: WorkspaceSocket, opts: { readyTimeoutMs?: number; callTimeoutMs?: number } = {}): Promise<RemoteWorkspace> {
   const callTimeoutMs = opts.callTimeoutMs ?? CALL_TIMEOUT_MS;
   return new Promise((resolveOpen, rejectOpen) => {
-    const pending = new Map<string, { tool: string; resolve(out: CallResult): void; reject(e: Error): void }>();
+    const pending = new Map<string, { tool: string; worker?: string; resolve(out: CallResult): void; reject(e: Error): void }>();
     const waiters: ((call: { id: string; tool: string }) => void)[] = [];
     let over = false;
     let opened = false;
@@ -81,7 +81,7 @@ export function openRemoteWorkspace(socket: WorkspaceSocket, opts: { readyTimeou
       const onAbort = (): void => { done(); send({ v: WORKSPACE_PROTOCOL, t: 'cancel', id }); reject(new Error(`${tool} was cancelled.`)); };
       const timer = setTimeout(() => { done(); send({ v: WORKSPACE_PROTOCOL, t: 'cancel', id }); reject(new Error(`${tool} took too long on the workspace and was cancelled.`)); }, callTimeoutMs);
       signal?.addEventListener('abort', onAbort, { once: true });
-      pending.set(id, { tool, resolve: (out) => { done(); resolve(out); }, reject: (e) => { done(); reject(e); } });
+      pending.set(id, { tool, ...(worker ? { worker } : {}), resolve: (out) => { done(); resolve(out); }, reject: (e) => { done(); reject(e); } });
       socket.send(body);
     });
 
@@ -105,7 +105,7 @@ export function openRemoteWorkspace(socket: WorkspaceSocket, opts: { readyTimeou
       if (!opened) { end('the machine answered before opening the workspace'); return; }
       const p = pending.get(f.id);
       if (!p) return; // cancelled, or timed out, before it answered
-      if (f.t === 'status') { for (const w of waiters) w({ id: f.id, tool: p.tool }); return; }
+      if (f.t === 'status') { for (const w of waiters) w({ id: f.id, tool: p.tool, ...(p.worker ? { worker: p.worker } : {}) }); return; }
       if (f.ok) p.resolve({ output: f.output, ...(f.changed ? { changed: f.changed } : {}) }); else p.reject(new Error(f.error));
     });
     socket.on('close', () => end('the workspace connection closed'));
@@ -116,7 +116,7 @@ export function openRemoteWorkspace(socket: WorkspaceSocket, opts: { readyTimeou
 interface CallResult { output: string; changed?: string[] }
 
 /** A worker's id as the protocol carries it: the id's own characters, at most 64. Absent when nothing is left. */
-const workerId = (tierId: unknown): string | undefined => {
+export const workerId = (tierId: unknown): string | undefined => {
   const id = typeof tierId === 'string' ? tierId.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64) : '';
   return id || undefined;
 };

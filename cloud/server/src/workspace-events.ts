@@ -7,6 +7,8 @@
 // for every tool the workspace serves. Outputs are never forwarded, except the one line
 // the machine adds when files changed since the run read them. Nothing here is logged.
 
+import { workspaceWorkerId } from '#cascade-ai';
+
 export const CHANGE_TOOLS = ['file_write', 'file_edit', 'file_delete'] as const;
 type ChangeTool = (typeof CHANGE_TOOLS)[number];
 
@@ -52,8 +54,10 @@ export function workspaceCallEvent(e: { id?: unknown; toolName?: unknown; input?
 }
 
 /** The `workspace:result` payload for a finished call to a tool the workspace serves. */
-export function workspaceResultEvent(e: { id?: unknown; toolName?: unknown; output?: unknown; error?: unknown }, served: ReadonlySet<string>): { id: string; tool: string; ok: boolean; note?: string } | null {
+export function workspaceResultEvent(e: { id?: unknown; toolName?: unknown; output?: unknown; error?: unknown; tierId?: unknown }, served: ReadonlySet<string>): { id: string; tool: string; ok: boolean; note?: string; worker?: string } | null {
   if (typeof e.toolName !== 'string' || typeof e.id !== 'string' || !served.has(e.toolName)) return null;
   const note = typeof e.output === 'string' ? NOTE.exec(e.output)?.[0] : undefined;
-  return { id: e.id, tool: e.toolName, ok: e.error === undefined || e.error === null, ...(note ? { note } : {}) };
+  // The worker as `workspace:waiting` names it, so the web app clears the right notice.
+  const worker = workspaceWorkerId(e.tierId);
+  return { id: e.id, tool: e.toolName, ok: e.error === undefined || e.error === null, ...(note ? { note } : {}), ...(worker ? { worker } : {}) };
 }

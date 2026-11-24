@@ -60,6 +60,8 @@ export interface ChangeOp {
   truncated?: boolean;
   /** The computer refused or the tool failed, so nothing changed. */
   failed?: boolean;
+  /** The call finished and changed the file. Until then it is pending (waiting, or running). */
+  done?: boolean;
 }
 
 export interface ChangedFile { path: string; ops: ChangeOp[] }
@@ -70,8 +72,10 @@ export interface WorkspaceRunView {
   device: { id: string; name: string };
   status: 'attached' | 'ended';
   endedReason?: string;
-  /** A tool call is waiting for the user's answer on their computer. */
+  /** A tool call is waiting for the user's answer on their computer: the first of `waiting`. */
   waitingTool?: string;
+  /** Every call waiting there, by the worker that made it (a worker runs one call at a time). */
+  waiting?: Array<{ tool: string; worker?: string }>;
   changes: ChangedFile[];
   /** "[Files in the workspace changed since you read them: …]" lines, newest last. */
   notes: string[];
@@ -79,10 +83,10 @@ export interface WorkspaceRunView {
 
 export type WorkspaceEvent =
   | { type: 'attached'; runId: string; label: string; device: { id: string; name: string } }
-  | { type: 'waiting'; runId: string; tool: string }
+  | { type: 'waiting'; runId: string; tool: string; worker?: string }
   | { type: 'detached'; runId: string; reason?: string }
   | { type: 'call'; runId: string; id: string; tool: string; change: { kind: ChangeKind; path: string; content?: string; oldString?: string; newString?: string; truncated?: boolean } }
-  | { type: 'result'; runId: string; id: string; tool: string; ok: boolean; note?: string };
+  | { type: 'result'; runId: string; id: string; tool: string; ok: boolean; note?: string; worker?: string };
 
 const MAX_FILES = 200;
 const MAX_OPS_PER_FILE = 20;
@@ -111,7 +115,8 @@ export function parseWorkspaceEvent(type: WorkspaceEvent['type'], raw: unknown):
   }
   if (type === 'waiting') {
     const tool = str(raw['tool'], 60);
-    return tool ? { ...base, event: { type, runId, tool } } : null;
+    const worker = str(raw['worker'], 64);
+    return tool ? { ...base, event: { type, runId, tool, ...(worker ? { worker } : {}) } } : null;
   }
   if (type === 'detached') {
     const reason = str(raw['reason'], 300);
@@ -146,7 +151,8 @@ export function parseWorkspaceEvent(type: WorkspaceEvent['type'], raw: unknown):
   const tool = str(raw['tool'], 60);
   if (!id || !tool) return null;
   const note = str(raw['note'], 1600);
-  return { ...base, event: { type: 'result', runId, id, tool, ok: raw['ok'] !== false, ...(note ? { note } : {}) } };
+  const worker = str(raw['worker'], 64);
+  return { ...base, event: { type: 'result', runId, id, tool, ok: raw['ok'] !== false, ...(note ? { note } : {}), ...(worker ? { worker } : {}) } };
 }
 
 /**
@@ -160,9 +166,12 @@ export function applyWorkspaceEvent(view: WorkspaceRunView | undefined, e: Works
   }
   if (!view || view.runId !== e.runId) return view;
   switch (e.type) {
-    case 'waiting': return view.status === 'attached' ? { ...view, waitingTool: e.tool } : view;
+    case 'waiting': {
+      if (view.status !== 'attached') return view;
+      return withWaiting(view, [...(view.waiting ?? []), { tool: e.tool, ...(e.worker ? { worker: e.worker } : {}) }]);
+    }
     case 'detached': {
-      const { waitingTool: _w, ...rest } = view;
+      const { waitingTool: _w, waiting: _ws, ...rest } = view;
       return { ...rest, status: 'ended', ...(e.reason ? { endedReason: e.reason } : {}) };
     }
     case 'call': {
@@ -183,30 +192,42 @@ export function applyWorkspaceEvent(view: WorkspaceRunView | undefined, e: Works
       return { ...view, changes };
     }
     case 'result': {
-      // Any finished call answers the "waiting" notice, whichever call it was.
-      const { waitingTool: _w, ...rest } = view;
-      let next: WorkspaceRunView = rest;
-      if (!e.ok) {
-        next = { ...next, changes: next.changes.map((f) => (f.ops.some((o) => o.id === e.id) ? { ...f, ops: f.ops.map((o) => (o.id === e.id ? { ...o, failed: true } : o)) } : f)) };
-      }
+      // Only the call that finished stops waiting: by its worker, which runs one call at a
+      // time, or (from a server that doesn't say) the first waiting call of the same tool.
+      const waits = view.waiting ?? [];
+      let at = e.worker ? waits.findIndex((w) => w.worker === e.worker) : -1;
+      if (at < 0) at = waits.findIndex((w) => w.tool === e.tool && (!e.worker || !w.worker));
+      let next: WorkspaceRunView = at < 0 ? view : withWaiting(view, waits.filter((_, i) => i !== at));
+      // The call is settled: it changed the file, or it changed nothing.
+      next = { ...next, changes: next.changes.map((f) => (f.ops.some((o) => o.id === e.id) ? { ...f, ops: f.ops.map((o) => (o.id === e.id ? (e.ok ? { ...o, done: true } : { ...o, failed: true }) : o)) } : f)) };
       if (e.note && !next.notes.includes(e.note)) next = { ...next, notes: [...next.notes, e.note].slice(-MAX_NOTES) };
       return next;
     }
   }
 }
 
+/** A view with these calls waiting, and the notice showing the first. */
+function withWaiting(view: WorkspaceRunView, waiting: Array<{ tool: string; worker?: string }>): WorkspaceRunView {
+  const { waitingTool: _w, waiting: _ws, ...rest } = view;
+  return waiting.length ? { ...rest, waiting, waitingTool: waiting[0]!.tool } : rest;
+}
+
 /** The run is over for the web app: nothing is waiting any more, whether or not the server said so. */
 export function clearWaiting(view: WorkspaceRunView | undefined): WorkspaceRunView | undefined {
-  if (!view || view.waitingTool === undefined) return view;
-  const { waitingTool: _w, ...rest } = view;
+  if (!view || (view.waitingTool === undefined && view.waiting === undefined)) return view;
+  const { waitingTool: _w, waiting: _ws, ...rest } = view;
   return rest;
 }
 
-/** What the changed-files panel lists: files with at least one call that did not fail, in the order first touched. */
+/**
+ * What the changed-files panel lists: files with at least one call that finished and
+ * changed them, in the order first touched. A call still waiting for approval, or still
+ * running, changed nothing yet; one refused or failed changed nothing at all.
+ */
 export function collectChangedFiles(view: WorkspaceRunView | undefined): ChangedFile[] {
   if (!view) return [];
   return view.changes
-    .map((f) => ({ path: f.path, ops: f.ops.filter((o) => !o.failed) }))
+    .map((f) => ({ path: f.path, ops: f.ops.filter((o) => o.done && !o.failed) }))
     .filter((f) => f.ops.length > 0);
 }
 

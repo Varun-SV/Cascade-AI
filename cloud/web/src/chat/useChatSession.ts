@@ -464,9 +464,25 @@ export function useChatSession(
    * conversation) can follow it without the two hooks needing each other's output.
    */
   getWorkspaceDeviceId?: () => string | undefined,
+  /**
+   * A first message's run has been given its conversation by the server: the id, and the
+   * desktop that run was sent to work on (captured when it was sent). Called once per such
+   * run, from this pane's own adoption of the id, never from navigation.
+   */
+  onFirstTurnConversation?: (conversationId: string, workspaceDeviceId: string | undefined) => void,
 ) {
   const workspaceDeviceGetterRef = useRef(getWorkspaceDeviceId);
   workspaceDeviceGetterRef.current = getWorkspaceDeviceId;
+  const firstTurnCallbackRef = useRef(onFirstTurnConversation);
+  firstTurnCallbackRef.current = onFirstTurnConversation;
+  /** The first-turn run now in flight, and the desktop it was sent with, until its id is known. */
+  const firstTurnRunRef = useRef<{ runId: string; workspaceDeviceId: string | undefined } | null>(null);
+  const reportFirstTurn = (convo: string, runId?: unknown): void => {
+    const run = firstTurnRunRef.current;
+    if (!run || (typeof runId === 'string' && runId && runId !== run.runId)) return;
+    firstTurnRunRef.current = null;
+    firstTurnCallbackRef.current?.(convo, run.workspaceDeviceId);
+  };
   const [conversationId, setConversationId] = useState<string | undefined>(initialConversationId);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [busy, setBusy] = useState(false);
@@ -704,6 +720,7 @@ export function useChatSession(
       // `runOriginsRef`. This is the only place a first turn ever learns the id
       // the server minted for it.
       addOrigin(runOriginsRef.current, convo);
+      reportFirstTurn(convo, runId);
       // And it is no longer one of the runs this pane cannot name.
       if (unnamedRunsRef.current > 0) unnamedRunsRef.current -= 1;
     }
@@ -2766,6 +2783,10 @@ export function useChatSession(
       // only ever looked up within this connection's own runs, so choosing it
       // here addresses nothing that is not already this pane's.
       const thisRunId = crypto.randomUUID();
+      // Read now, with the prompt: the classifier below can answer a turn later, after
+      // the user has switched to a chat that works somewhere else.
+      const workspaceDeviceId = workspaceDeviceGetterRef.current?.() || undefined;
+      firstTurnRunRef.current = awaitingFirstTurnRef.current ? { runId: thisRunId, workspaceDeviceId } : null;
       // `transcriptBeforeSend` is captured above, before any optimistic change,
       // and is exactly what the frame-size refusal already restores.
       pendingSendRef.current = {
@@ -2845,7 +2866,7 @@ export function useChatSession(
             // Work in a folder on the user's own computer. Sent even with a fast answer, which
             // the server refuses with a message that says why, rather than quietly dropping
             // the choice the composer shows.
-            workspaceDeviceId: workspaceDeviceGetterRef.current?.() || undefined,
+            workspaceDeviceId,
             fastAnswerModel: fast ? (fastAnswerModel() || undefined) : undefined,
             // Advanced per-tier generation params (omitted when none are set,
             // and moot for a fast answer, which is a single direct call).
@@ -2997,6 +3018,8 @@ export function useChatSession(
           // The id is real now, so the adopted one has done its job.
           pendingConversationIdRef.current = undefined;
           awaitingFirstTurnRef.current = false;
+          // A server that stamped no event with the id: the ack is the first to say it.
+          if (ack.conversationId) reportFirstTurn(ack.conversationId, thisRunId);
           setConversationId(ack.conversationId);
           // The run is finished; the server has already denied anything still
           // parked on it.

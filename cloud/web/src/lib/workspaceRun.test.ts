@@ -70,6 +70,9 @@ describe('the changed-files list', () => {
     v = applyWorkspaceEvent(v, call('2', { kind: 'edit', path: 'src/b.ts', oldString: 'x', newString: 'y' }))!;
     v = applyWorkspaceEvent(v, call('3', { kind: 'edit', path: 'a.md', oldString: 'hello', newString: 'hi' }))!;
     v = applyWorkspaceEvent(v, call('4', { kind: 'delete', path: 'old.txt' }))!;
+    // Nothing is listed until its call has finished: a delete awaiting approval deleted nothing yet.
+    expect(collectChangedFiles(v)).toEqual([]);
+    for (const id of ['1', '2', '3', '4']) v = applyWorkspaceEvent(v, { type: 'result', runId: 'r1', id, tool: 'file_edit', ok: true })!;
     const files = collectChangedFiles(v);
     expect(files.map((f) => f.path)).toEqual(['a.md', 'src/b.ts', 'old.txt']);
     expect(files[0]!.ops.map((o) => o.kind)).toEqual(['write', 'edit']);
@@ -84,6 +87,7 @@ describe('the changed-files list', () => {
     let v = start();
     v = applyWorkspaceEvent(v, call('1', { kind: 'write', path: 'a', content: 'x' }))!;
     v = applyWorkspaceEvent(v, call('1', { kind: 'write', path: 'a', content: 'x' }))!;
+    v = applyWorkspaceEvent(v, { type: 'result', runId: 'r1', id: '1', tool: 'file_write', ok: true })!;
     expect(collectChangedFiles(v)[0]!.ops).toHaveLength(1);
   });
   it('keeps the changed-since-read note, once, and reads the file names out of it', () => {
@@ -94,6 +98,20 @@ describe('the changed-files list', () => {
     expect(changedSinceReadFiles(note)).toEqual(['a.txt', 'b/c.ts']);
   });
   it('returns nothing for no view', () => { expect(collectChangedFiles(undefined)).toEqual([]); });
+  it("clears only the wait of the call that finished: another worker's result leaves it showing", () => {
+    let v = start();
+    v = applyWorkspaceEvent(v, { type: 'waiting', runId: 'r1', tool: 'shell', worker: 'T3-a' })!;
+    v = applyWorkspaceEvent(v, { type: 'waiting', runId: 'r1', tool: 'file_delete', worker: 'T3-b' })!;
+    expect(v.waitingTool).toBe('shell');
+    // Worker c's read finishing answers no one's question.
+    v = applyWorkspaceEvent(v, { type: 'result', runId: 'r1', id: 'x', tool: 'file_read', ok: true, worker: 'T3-c' })!;
+    expect(v.waitingTool).toBe('shell');
+    v = applyWorkspaceEvent(v, { type: 'result', runId: 'r1', id: 'y', tool: 'shell', ok: true, worker: 'T3-a' })!;
+    expect(v.waitingTool).toBe('file_delete');
+    v = applyWorkspaceEvent(v, { type: 'result', runId: 'r1', id: 'z', tool: 'file_delete', ok: false, worker: 'T3-b' })!;
+    expect(v.waitingTool).toBeUndefined();
+    expect(v.waiting).toBeUndefined();
+  });
 });
 
 describe('parseWorkspaceEvent', () => {

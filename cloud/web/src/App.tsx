@@ -155,9 +155,15 @@ export default function App() {
   // one is chosen. The chat reads the choice when it sends; the choice follows the chat's
   // conversation, so the two hooks meet through this ref.
   const workspaceDeviceRef = useRef<string | undefined>(undefined);
-  const chat = useChatSession(socket, providers, skillId, webSearchPayload(webSearch), undefined, true, () => workspaceDeviceRef.current);
+  const adoptFirstTurnRef = useRef<((conversationId: string, deviceId: string | undefined) => void) | undefined>(undefined);
+  const chat = useChatSession(
+    socket, providers, skillId, webSearchPayload(webSearch), undefined, true,
+    () => workspaceDeviceRef.current,
+    (conversationId, deviceId) => adoptFirstTurnRef.current?.(conversationId, deviceId),
+  );
   const workspace = useWorkspaceRun(socket, config?.workspaceRelay === true, chat.activeConversation, chat.busy);
   workspaceDeviceRef.current = workspace.workspaceDeviceId;
+  adoptFirstTurnRef.current = workspace.adoptFirstTurn;
   // Re-read as each run starts and ends, which is when a session can be spent.
   // Two ways a run can have a browser: the deployment's hosted one, and the
   // user's own Chrome through the extension. Only the hosted one is rationed, so
