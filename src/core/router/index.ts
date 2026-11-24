@@ -1622,6 +1622,13 @@ export class CascadeRouter extends EventEmitter {
       for (const sc of this.scopesFor(model)) this.failover.recordSuccess(sc, admittedAt);
       return result;
     } catch (err) {
+      // Which model this failure came from, for a caller that acts on it (the
+      // T3 worker records a text-tool verdict against it). A failover recursion
+      // fails inside this catch, so its inner call stamps the model that really
+      // failed first, and that stamp is kept.
+      if (err && typeof err === 'object' && !('servedBy' in err)) {
+        try { (err as { servedBy?: { provider: ProviderType; id: string } }).servedBy = { provider: model.provider, id: model.id }; } catch { /* frozen error: nothing to stamp */ }
+      }
       // A budget abort also cancels the in-flight request, but it is NOT a
       // user cancellation: it must keep saying it ran out of budget, or the
       // reason the run stopped is lost on the way up. Checked first, because

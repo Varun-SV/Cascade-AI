@@ -577,6 +577,15 @@ describe('a model whose chat template cannot render the tool list', () => {
     expect(seen[1]!.system).toContain('TOOL USE INSTRUCTIONS');
   });
 
+  it('switches the model the router says failed, after a failover', async () => {
+    const failed = Object.assign(new Error(TEMPLATE_ERR), { servedBy: { provider: 'openai-compatible', id: 'local-fallback' } });
+    const { router, useTextTools } = harness(failed);
+    const worker = new T3Worker(router, makeToolRegistry(), 't2-parent');
+    await worker.execute(makeAssignment(), 'task-template-failover');
+    expect(useTextTools).toHaveBeenCalledWith({ provider: 'openai-compatible', id: 'local-fallback' });
+    expect(useTextTools).not.toHaveBeenCalledWith({ provider: 'ollama', id: 'gpt-oss:20b' });
+  });
+
   it('rethrows any other error unchanged, with no retry', async () => {
     const boom = new Error('500 Internal Server Error');
     const { router, seen, useTextTools } = harness(boom);
