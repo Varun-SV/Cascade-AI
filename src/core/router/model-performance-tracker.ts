@@ -152,16 +152,18 @@ const ageOf = (st: { mtimeMs: number }): number => Date.now() - st.mtimeMs;
  * same file (inode) and still stale. The takeover lock is held for two system
  * calls; one left by a writer that died holding it is cleared after a while.
  */
-async function removeIfStale(lock: string, seen: { ino: number }, token: string): Promise<void> {
+async function removeIfStale(lock: string, seen: { ino: number }, token: string): Promise<boolean> {
   const takeover = `${lock}.takeover`;
   if (!(await create(takeover, token))) {
+    // Another writer is taking it over (or died doing so): wait like for any lock.
     const st = await fs.stat(takeover).catch(() => null);
     if (st && ageOf(st) > LOCK_STALE_MS) await fs.rm(takeover, { force: true });
-    return;
+    return false;
   }
   try {
     const now = await fs.stat(lock).catch(() => null);
-    if (now && now.ino === seen.ino && ageOf(now) > LOCK_STALE_MS) await fs.rm(lock, { force: true });
+    if (now && now.ino === seen.ino && ageOf(now) > LOCK_STALE_MS) { await fs.rm(lock, { force: true }); return true; }
+    return false;
   } finally {
     await fs.rm(takeover, { force: true }).catch(() => {});
   }
@@ -177,7 +179,8 @@ export async function withFileLock<T>(file: string, fn: () => Promise<T>, opts: 
   const deadline = Date.now() + (opts.waitMs ?? LOCK_WAIT_MS);
   while (!(await create(lock, token))) {
     const st = await fs.stat(lock).catch(() => null);
-    if (st && ageOf(st) > LOCK_STALE_MS) { await removeIfStale(lock, st, token); continue; }
+    // Removed: try again at once. Otherwise it is waited for, within the deadline, like a live lock.
+    if (st && ageOf(st) > LOCK_STALE_MS && await removeIfStale(lock, st, token)) continue;
     if (Date.now() > deadline) throw new Error('model-perf pool is locked');
     await new Promise((r) => setTimeout(r, 25 + Math.random() * 50));
   }

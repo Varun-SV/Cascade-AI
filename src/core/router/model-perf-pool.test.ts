@@ -177,6 +177,16 @@ describe('model-perf pool lock', () => {
     await expect(fs.stat(`${file}.lock`)).rejects.toThrow();
   });
 
+  it('keeps to its deadline, and backs off, while another writer holds the takeover', async () => {
+    await staleLock();
+    await fs.writeFile(`${file}.lock.takeover`, 'a-writer-mid-takeover'); // fresh: not itself stale
+    const open = vi.spyOn(fs, 'open');
+    const started = Date.now();
+    await expect(withFileLock(file, async () => {}, { waitMs: 200 })).rejects.toThrow(/locked/);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(open.mock.calls.length).toBeLessThan(40); // a pause between tries, not a spin
+  });
+
   it('does not remove a lock that is no longer its own', async () => {
     await withFileLock(file, async () => {
       await fs.writeFile(`${file}.lock`, 'someone-else'); // taken over meanwhile
