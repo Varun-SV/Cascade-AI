@@ -4,11 +4,14 @@ import { type OnMount } from '@monaco-editor/react';
 import { Code2, FileCode, FolderOpen, Search, X, MessageSquare } from 'lucide-react';
 import { FileTree } from '../components/FileTree.js';
 import { MonacoEditor } from '../components/MonacoEditor.js';
+import { FilePreview } from '../components/FilePreview.js';
+import { fileKind, type FileKind } from '../lib/file-kind.js';
 import { ChatPanel } from '../components/ChatPanel.js';
 import { HelpButton } from '../help/HelpButton.js';
 import { useAppSelector, useAppDispatch, setWorkspacePath, toggleCodeChat } from '../store/index.js';
 
-interface OpenFile { path: string; content: string; saved: string; language: string }
+// Non-text files (kind !== 'text') keep content === saved === '': never dirty, never saved.
+interface OpenFile { path: string; content: string; saved: string; language: string; kind: FileKind; mime: string | null; size: number }
 interface SearchHit { file: string; line: number; text: string }
 
 function detectLanguage(filename: string): string {
@@ -36,6 +39,11 @@ export function CodeView({ socket }: { socket: Socket | null }) {
   const [results, setResults] = useState<SearchHit[]>([]);
   const [searching, setSearching] = useState(false);
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
+  const monacoRef = useRef<Parameters<OnMount>[1] | null>(null);
+  // Paths whose editor model is kept alive (keepCurrentModel) so undo history
+  // survives a preview tab. A model is released once its tab is closed, so a
+  // reopened file shows what is on disk, not the old buffer.
+  const keptModels = useRef(new Set<string>());
   const splitRef = useRef<HTMLDivElement>(null);
   const [chatWidth, setChatWidth] = useState(320);
   const [resizingChat, setResizingChat] = useState(false);
@@ -61,13 +69,40 @@ export function CodeView({ socket }: { socket: Socket | null }) {
 
   const active = activeIdx >= 0 ? openFiles[activeIdx] : null;
 
+  useEffect(() => {
+    if (active?.kind === 'text') keptModels.current.add(active.path);
+  }, [active?.path, active?.kind]);
+  useEffect(() => {
+    // After the editor has moved off it: dispose the model of every closed tab.
+    const monaco = monacoRef.current;
+    if (!monaco) return;
+    const open = new Set(openFiles.map((f) => f.path));
+    for (const path of [...keptModels.current]) {
+      if (open.has(path)) continue;
+      monaco.editor.getModel(monaco.Uri.parse(path))?.dispose();
+      keptModels.current.delete(path);
+    }
+  }, [openFiles]);
+  useEffect(() => () => {
+    // Leaving the Code view (for Chat or Cockpit) drops its tabs: release every
+    // model it kept, after the editor itself has gone (next tick).
+    const monaco = monacoRef.current;
+    const paths = [...keptModels.current];
+    keptModels.current.clear();
+    if (!monaco || paths.length === 0) return;
+    setTimeout(() => { for (const path of paths) monaco.editor.getModel(monaco.Uri.parse(path))?.dispose(); }, 0);
+  }, []);
+
   const openFile = async (filePath: string): Promise<void> => {
     if (!window.cascade) return;
     const existing = openFiles.findIndex((f) => f.path === filePath);
     if (existing >= 0) { setActiveIdx(existing); return; }
     try {
-      const content = await window.cascade.fs.readFile(filePath);
-      const file: OpenFile = { path: filePath, content, saved: content, language: detectLanguage(baseName(filePath)) };
+      const info = await window.cascade.fs.fileInfo(filePath);
+      const { kind, mime } = fileKind(baseName(filePath), info.head);
+      // Only text ever reaches the editor; everything else is previewed or shown as a placeholder.
+      const content = kind === 'text' ? await window.cascade.fs.readFile(filePath) : '';
+      const file: OpenFile = { path: filePath, content, saved: content, language: detectLanguage(baseName(filePath)), kind, mime, size: info.size };
       setOpenFiles((prev) => { setActiveIdx(prev.length); return [...prev, file]; });
     } catch { /* unreadable — ignore */ }
   };
@@ -87,7 +122,7 @@ export function CodeView({ socket }: { socket: Socket | null }) {
 
   const saveActive = async () => {
     const f = openFiles[activeIdx];
-    if (!f || !window.cascade || f.content === f.saved) return;
+    if (!f || f.kind !== 'text' || !window.cascade || f.content === f.saved) return;
     await window.cascade.fs.writeFile(f.path, f.content);
     setOpenFiles((prev) => prev.map((x, i) => (i === activeIdx ? { ...x, saved: x.content } : x)));
   };
@@ -236,12 +271,14 @@ export function CodeView({ socket }: { socket: Socket | null }) {
             </div>
           )}
           <div style={{ flex: 1, overflow: 'hidden' }}>
-            {active ? (
+            {active && active.kind !== 'text' ? (
+              <FilePreview key={active.path} path={active.path} kind={active.kind} mime={active.mime} size={active.size} />
+            ) : active ? (
               <MonacoEditor
                 path={active.path}
                 value={active.content}
                 language={active.language}
-                onMount={(editor) => { editorRef.current = editor; }}
+                onMount={(editor, monaco) => { editorRef.current = editor; monacoRef.current = monaco; }}
                 onChange={onChange}
               />
             ) : !workspacePath ? (

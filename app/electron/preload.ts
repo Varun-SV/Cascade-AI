@@ -317,5 +317,9 @@ contextBridge.exposeInMainWorld('cascade', {
     rename: (oldPath: string, newPath: string) => ipcRenderer.invoke('fs:rename', oldPath, newPath) as Promise<{ ok: boolean }>,
     delete: (targetPath: string) => ipcRenderer.invoke('fs:delete', targetPath) as Promise<{ ok: boolean }>,
     search: (root: string, query: string) => ipcRenderer.invoke('fs:search', root, query) as Promise<Array<{ file: string; line: number; text: string }>>,
+    fileInfo: (filePath: string) => ipcRenderer.invoke('fs:fileInfo', filePath) as Promise<{ size: number; head: Uint8Array }>,
+    readFileDataUrl: (filePath: string, mime: string) => ipcRenderer.invoke('fs:readFileDataUrl', filePath, mime) as Promise<{ ok: true; url: string } | { ok: false; error: string; limit?: number }>,
+    openPath: (filePath: string) => ipcRenderer.invoke('fs:openPath', filePath) as Promise<{ ok: boolean; error?: string }>,
+    showInFolder: (filePath: string) => ipcRenderer.invoke('fs:showInFolder', filePath) as Promise<{ ok: boolean; error?: string }>,
   },
 });

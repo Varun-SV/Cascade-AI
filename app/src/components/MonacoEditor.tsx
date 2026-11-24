@@ -46,6 +46,9 @@ export function MonacoEditor({ path, value, language, onChange, onMount, readOnl
   return (
     <Editor
       path={path}
+      // Keep this file's model (and its undo history) when the editor unmounts,
+      // as it does while an image or other preview tab is shown.
+      keepCurrentModel
       value={value}
       language={language}
       theme={dark ? 'cascade-dark' : 'cascade-light'}
