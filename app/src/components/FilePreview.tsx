@@ -85,6 +85,7 @@ export function FilePreview({ path, kind, mime, size }: Props) {
         <div style={{ flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16, overflow: 'hidden' }}>
           <img src={src} alt={name}
             onLoad={(e) => setDims({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
+            onError={() => setError("This image can't be displayed: it may be damaged, or in a format the viewer doesn't support.")}
             style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', background: checker, border: '1px solid var(--border)' }} />
         </div>
         <div style={{ padding: '6px 12px', borderTop: '1px solid var(--border)', fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
