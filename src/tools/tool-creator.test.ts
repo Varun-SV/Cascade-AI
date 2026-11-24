@@ -704,11 +704,16 @@ describe('the WebAssembly sandbox and a cancelled run', () => {
   it('ends the run at once, and ends what it started', async () => {
     const run = new AbortController();
     let ended: AbortSignal | undefined;
-    const started = Date.now();
-    setTimeout(() => run.abort(), 300);
+    let started = 0;
+    // Stopped once the tool is waiting on its fetch, not on a fixed timer: a busy machine can
+    // take longer than any fixed delay just to start the sandbox, and the stop then lands first.
     const outcome = await runInWasmSandbox('await fetch("https://example.com"); return "done";', {}, {
       callTool: async () => '',
-      fetch: (_url, _init, signal) => { ended = signal; return new Promise(() => {}); },
+      fetch: (_url, _init, signal) => {
+        ended = signal;
+        setTimeout(() => { started = Date.now(); run.abort(); }, 50);
+        return new Promise(() => {});
+      },
     }, { timeoutMs: 10_000, signal: run.signal });
     expect(outcome).toEqual({ kind: 'cancelled' });
     expect(Date.now() - started).toBeLessThan(5_000);

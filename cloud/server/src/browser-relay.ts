@@ -38,6 +38,8 @@ import {
   type RelayIdentity,
   type RelayNonceStore,
 } from '#cascade-ai';
+/** What a hub serves: its grants' signing domains and what an approval scopes. */
+type RelayFamily = NonNullable<Parameters<typeof createRelayHub>[0]['family']>;
 import { type AuthedRequest, sessionMiddleware } from './auth/session.js';
 import type { CloudStore, RelayDevice, RelayDeviceKind } from './db.js';
 
@@ -118,16 +120,37 @@ export interface BrowserRelay {
 /** What a client may see of a device. The public key is not secret, but nothing needs it. */
 const publicDevice = (d: RelayDevice, online: boolean) => ({ id: d.id, name: d.name, kind: d.kind, createdAt: d.createdAt, lastSeenAt: d.lastSeenAt, online });
 
-export function createBrowserRelay(opts: { dataDir: string; store: CloudStore; now?: () => number }): BrowserRelay {
+export interface BrowserRelayOptions {
+  dataDir: string;
+  store: CloudStore;
+  now?: () => number;
+  /**
+   * What this relay's runs are served, and where a device dials for it: a browser unless
+   * said. The workspace relay (workspace-relay.ts) is this with its own family, paths and
+   * the one kind of device that serves a folder. The server's key and the device table
+   * are the same: a desktop's registered key serves both.
+   */
+  family?: RelayFamily;
+  controlPath?: string;
+  runPath?: string;
+  /** Only these kinds of device may connect. All three, unless said. */
+  kinds?: readonly RelayDeviceKind[];
+}
+
+export function createBrowserRelay(opts: BrowserRelayOptions): BrowserRelay {
   const { store } = opts;
+  const controlPath = opts.controlPath ?? RELAY_CONTROL_PATH;
+  const runPath = opts.runPath ?? RELAY_RUN_PATH;
+  const kinds = opts.kinds ?? DEVICE_KINDS;
   const now = opts.now ?? Date.now;
   const identity = loadRelayIdentity(opts.dataDir);
   const hub = createRelayHub({
     server: identity,
     store: sqliteNonceStore(store, now),
     // Read at the moment of use: a device revoked a second ago has no key.
-    deviceKey: (id) => { const d = store.getRelayDevice(id); return d ? relayPublicKeyFromText(d.publicKey) : null; },
+    deviceKey: (id) => { const d = store.getRelayDevice(id); return d && kinds.includes(d.kind) ? relayPublicKeyFromText(d.publicKey) : null; },
     now,
+    ...(opts.family ? { family: opts.family } : {}),
   });
 
   // The run's own CDP client reaches its browser here. Bound to loopback on a
@@ -146,14 +169,14 @@ export function createBrowserRelay(opts: { dataDir: string; store: CloudStore; n
   const publicWss = new WebSocketServer({ noServer: true, maxPayload: MAX_PUBLIC_FRAME_BYTES, perMessageDeflate: false });
   const onUpgrade = (req: http.IncomingMessage, socket: Duplex, head: Buffer): void => {
     const pathname = (req.url ?? '').split('?')[0];
-    if (pathname !== RELAY_CONTROL_PATH && pathname !== RELAY_RUN_PATH) return; // someone else's
+    if (pathname !== controlPath && pathname !== runPath) return; // someone else's
     publicWss.handleUpgrade(req, socket, head, (ws) => {
-      if (pathname === RELAY_RUN_PATH) { hub.attachRun(ws); return; }
+      if (pathname === runPath) { hub.attachRun(ws); return; }
       void authenticateControl(ws, {
         serverId: identity.id,
         device: (id) => {
           const d = store.getRelayDevice(id);
-          const key = d ? relayPublicKeyFromText(d.publicKey) : null;
+          const key = d && kinds.includes(d.kind) ? relayPublicKeyFromText(d.publicKey) : null;
           return d && key ? { userId: d.userId, key } : null;
         },
       }).then((who) => {

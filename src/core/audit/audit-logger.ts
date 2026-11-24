@@ -173,3 +173,19 @@ export class AuditLogger {
     this.db.close();
   }
 }
+
+/**
+ * A tool event as the audit log keeps it. A tool that ran on another machine (the
+ * user's own workspace: src/workspace/) read or wrote their files: the log records
+ * that it ran, by which tier and for how long, never its input, output or error.
+ */
+export function auditedToolEvent<E extends { toolName: string }>(e: E, remote: boolean): E | Record<string, unknown> {
+  if (!remote) return e;
+  const r = e as E & { id?: unknown; tierId?: unknown; durationMs?: unknown };
+  return {
+    toolName: r.toolName, remote: true,
+    ...(r.id !== undefined ? { id: r.id } : {}),
+    ...(r.tierId !== undefined ? { tierId: r.tierId } : {}),
+    ...(typeof r.durationMs === 'number' ? { durationMs: r.durationMs } : {}),
+  };
+}

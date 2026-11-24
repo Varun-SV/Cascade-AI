@@ -189,6 +189,7 @@ export function connectWorkspaceDevice(opts: WorkspaceDeviceOptions): WorkspaceD
         const call = executor.run(f.tool, f.input, {
           signal: ac.signal,
           waiting: () => send({ v: WORKSPACE_PROTOCOL, t: 'status', id: f.id, waiting: 'approval' }),
+          ...(f.worker ? { worker: f.worker } : {}),
         });
         running.add(call);
         void call.finally(() => running.delete(call));
@@ -196,7 +197,7 @@ export function connectWorkspaceDevice(opts: WorkspaceDeviceOptions): WorkspaceD
           if (inFlight.get(f.id) !== ac) return;
           inFlight.delete(f.id);
           send(outcome.ok
-            ? { v: WORKSPACE_PROTOCOL, t: 'result', id: f.id, ok: true, output: outcome.output }
+            ? { v: WORKSPACE_PROTOCOL, t: 'result', id: f.id, ok: true, output: outcome.output, ...(outcome.changed ? { changed: outcome.changed } : {}) }
             : { v: WORKSPACE_PROTOCOL, t: 'result', id: f.id, ok: false, error: outcome.error });
         });
       };

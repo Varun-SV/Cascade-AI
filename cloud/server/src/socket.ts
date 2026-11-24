@@ -13,6 +13,7 @@ import type { CloudEnv } from './env.js';
 import type { CloudStore } from './db.js';
 import { formatZodError, parseChatRunPayload, runChatTurn, type ChatRunResult, type RunSocket } from './runs.js';
 import type { BrowserRelay } from './browser-relay.js';
+import type { WorkspaceRelay } from './workspace-relay.js';
 
 interface CloudSocketData {
   userId: string;
@@ -617,6 +618,8 @@ export interface SocketOptions {
   ownerProbeMs?: number;
   /** The browser relay, when the server has it on: runs can use the user's own browser. */
   browserRelay?: BrowserRelay;
+  /** The workspace relay, when the server has it on: runs can work in a folder on the user's computer. */
+  workspaceRelay?: WorkspaceRelay;
 }
 
 export function attachSocket(
@@ -940,6 +943,7 @@ export function attachSocket(
         const result: ChatRunResult = await runChatTurn(parsed, {
           env, store, userId, socket: run.transport, signal: run.controller.signal,
           ...(options.browserRelay ? { browserRelay: options.browserRelay } : {}),
+          ...(options.workspaceRelay ? { workspaceRelay: options.workspaceRelay } : {}),
         });
         run.conversationId = result.conversationId;
         ack?.(result);

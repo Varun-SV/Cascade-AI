@@ -2496,6 +2496,96 @@ describe('workers share what they find (run-memory.ts)', () => {
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  // Codex on 8795367: acceptance criteria are graded where the files are, too.
+  it('acceptance criteria on another machine are graded there: a file it has passes, a refused one is deferred, a missing one fails', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-share-'));
+    try {
+      const reads: Array<[unknown, unknown]> = [];
+      const execute = vi.fn(async (name: string, input: Record<string, unknown>, options: { tierId: string }) => {
+        if (name !== 'file_read') return 'Wrote report.md';
+        reads.push([input['path'], options.tierId]);
+        if (input['path'] === 'report.md') return '1\t# Report\n2\tFindings: all good';
+        if (input['path'] === 'secret.md') throw new Error('Access denied: secret.md is local-only (privacy.paths), and nothing private is available to read it with.');
+        throw new Error("ENOENT: no such file or directory, open 'gone.md'");
+      });
+      const registry = makeToolRegistry({
+        getToolDefinitions: () => [
+          { name: 'file_write', description: 'Write a file', inputSchema: {} },
+          { name: 'file_read', description: 'Read a file', inputSchema: {} },
+        ],
+        getTool: () => ({ remote: true }),
+        getWorkspaceRoot: () => root,
+        execute,
+      } as unknown as Partial<ToolRegistry>);
+      const worker = (acceptance: string[]) => new T3Worker(
+        scripted([makeResult('', [{ id: 'w', name: 'file_write', input: { path: 'report.md', content: '# Report' } }], 'tool_use'), makeResult('Report written.')]),
+        registry, 't2-acc',
+      );
+      const pass = await worker(['report.md exists', 'report.md contains "Findings"', 'secret.md exists'])
+        .execute(makeAssignment({ subtaskId: 's-acc', acceptance: ['report.md exists', 'report.md contains "Findings"', 'secret.md exists'] }), 'task-acc');
+      expect(pass.issues ?? []).not.toContainEqual(expect.stringMatching(/does not exist|does not contain/));
+      expect(reads).toContainEqual(['report.md', '']);
+      // Nothing was ever looked for here.
+      expect(fs.existsSync(path.join(root, 'report.md'))).toBe(false);
+      const missing = await worker(['gone.md exists'])
+        .execute(makeAssignment({ subtaskId: 's-gone', acceptance: ['gone.md exists'] }), 'task-gone').catch(() => null);
+      expect(missing?.status).toBe('ESCALATED');
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  // Codex on cdd1481: a result has a size cap, so a long file may come back cut.
+  it('a remote file sent cut is not graded on what it contains', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-share-'));
+    try {
+      const big = Array.from({ length: 10 }, (_, i) => `${i + 1}\tfiller line`).join('\n');
+      const registry = makeToolRegistry({
+        getToolDefinitions: () => [
+          { name: 'file_write', description: 'Write a file', inputSchema: {} },
+          { name: 'file_read', description: 'Read a file', inputSchema: {} },
+        ],
+        getTool: () => ({ remote: true }),
+        getWorkspaceRoot: () => root,
+        execute: vi.fn(async (name: string) => (name === 'file_read'
+          ? `${big}\n\n[output cut: 900000 more characters were not sent from the workspace]`
+          : 'Wrote report.md')),
+      } as unknown as Partial<ToolRegistry>);
+      const router = scripted([makeResult('', [{ id: 'w', name: 'file_write', input: { path: 'report.md', content: 'x' } }], 'tool_use'), makeResult('Report written.')]);
+      const result = await new T3Worker(router, registry, 't2-cut')
+        .execute(makeAssignment({ subtaskId: 's-cut', acceptance: ['report.md contains "Findings"', 'report.md is not empty'] }), 'task-cut');
+      expect(result.issues ?? []).not.toContainEqual(expect.stringMatching(/does not contain|is empty/));
+      expect(result.status).not.toBe('ESCALATED');
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  // Codex on 5bce363: the change note must survive the context limit.
+  it("a workspace's change note reaches the model whole, however long the tool's result", async () => {
+    const { changedNote } = await import('../../workspace/remote.js');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-share-'));
+    try {
+      const paths = Array.from({ length: 50 }, (_, i) => `src/module-${i}/${'deep/'.repeat(14)}file-${i}.ts`);
+      const note = changedNote(paths);
+      const seen: string[] = [];
+      const queue = [makeResult('', [{ id: 'g', name: 'grep', input: { pattern: 'x' } }], 'tool_use'), makeResult('done')];
+      const router = {
+        generate: vi.fn(async (_tier: string, options: { messages: Array<{ role: string; content: unknown }> }) => {
+          for (const m of options.messages) if (m.role === 'tool' && typeof m.content === 'string') seen.push(m.content);
+          return queue.shift() ?? makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }),
+        getModelForTier: () => undefined,
+      } as unknown as CascadeRouter;
+      const registry = makeToolRegistry({
+        getToolDefinitions: () => [{ name: 'grep', description: 'Search', inputSchema: {} }],
+        getTool: () => ({ remote: true }),
+        getWorkspaceRoot: () => root,
+        execute: vi.fn(async () => `${'match line\n'.repeat(3000)}\n\n${note}`),
+      } as unknown as Partial<ToolRegistry>);
+      await new T3Worker(router, registry, 't2-n').execute(makeAssignment({ subtaskId: 's-n' }), 'task-n').catch(() => undefined);
+      const shown = seen.find((c) => c.includes('characters elided'));
+      expect(shown).toBeDefined();
+      expect(shown).toContain(note);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   // Codex on 3e1e80c: file_edit shows only the lines it replaced.
   it('its partial edit of a file someone else changed since it read it still brings the note', async () => {
     const { RunMemory } = await import('../knowledge/run-memory.js');

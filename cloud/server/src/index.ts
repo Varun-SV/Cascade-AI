@@ -12,6 +12,7 @@ import { createApp } from './app.js';
 import { attachSocket } from './socket.js';
 import { startPendingMediaSweeper } from './pending-media.js';
 import { createBrowserRelay } from './browser-relay.js';
+import { createWorkspaceRelay } from './workspace-relay.js';
 import { logOpenWebSearches } from './open-web-log.js';
 
 export function bootstrap() {
@@ -34,6 +35,7 @@ export function bootstrap() {
   const store = new CloudStore(dbPath);
   // Off unless the operator turns it on: with it off, none of its endpoints exist.
   const browserRelay = env.BROWSER_RELAY ? createBrowserRelay({ dataDir: path.resolve(env.DATA_DIR), store }) : undefined;
+  const workspaceRelay = env.WORKSPACE_RELAY ? createWorkspaceRelay({ dataDir: path.resolve(env.DATA_DIR), store }) : undefined;
   // Said once at start, so an operator who turned the hosted browser off sees that
   // their REMOTE_BROWSER_* settings are no longer read rather than wondering why.
   if (!env.HOSTED_BROWSER && env.REMOTE_BROWSER_PROVIDER) {
@@ -42,10 +44,11 @@ export function bootstrap() {
   if (!env.HOSTED_BROWSER && !env.BROWSER_RELAY) {
     console.warn('[browser] HOSTED_BROWSER=off and BROWSER_RELAY is not on: runs have no browser at all.');
   }
-  const app = createApp(env, store, browserRelay ? { browserRelay } : {});
+  const app = createApp(env, store, { ...(browserRelay ? { browserRelay } : {}), ...(workspaceRelay ? { workspaceRelay } : {}) });
   const httpServer = http.createServer(app);
   browserRelay?.attach(httpServer);
-  const io = attachSocket(httpServer, env, store, browserRelay ? { browserRelay } : {});
+  workspaceRelay?.attach(httpServer);
+  const io = attachSocket(httpServer, env, store, { ...(browserRelay ? { browserRelay } : {}), ...(workspaceRelay ? { workspaceRelay } : {}) });
   // Unsaved generated media expires. Request paths sweep opportunistically,
   // but an asset nobody ever opens again is exactly the one that would
   // otherwise sit on the volume forever — so the process sweeps on a timer too.
@@ -58,8 +61,8 @@ export function bootstrap() {
     console.log(`Cascade Cloud server listening on :${env.PORT}`);
   });
 
-  const shutdown = gracefulShutdown({ httpServer, io, store, stopMediaSweeper, browserRelay });
-  return { httpServer, app, io, store, env, stopMediaSweeper, browserRelay, shutdown };
+  const shutdown = gracefulShutdown({ httpServer, io, store, stopMediaSweeper, browserRelay, workspaceRelay });
+  return { httpServer, app, io, store, env, stopMediaSweeper, browserRelay, workspaceRelay, shutdown };
 }
 
 /** How long a shutdown may take before the process exits anyway. */
@@ -82,6 +85,7 @@ export function gracefulShutdown(parts: {
   store: { close(): void };
   stopMediaSweeper: () => void;
   browserRelay?: { close(): Promise<void> };
+  workspaceRelay?: { close(): Promise<void> };
 }): (signal: string) => Promise<void> {
   let started: Promise<void> | null = null;
   return (signal) => {
@@ -90,6 +94,7 @@ export function gracefulShutdown(parts: {
       console.log(`[shutdown] ${signal}: closing connections`);
       parts.stopMediaSweeper();
       await parts.browserRelay?.close().catch(() => {});
+      await parts.workspaceRelay?.close().catch(() => {});
       // Socket.IO's close also closes the HTTP server and waits for every request
       // on it: a slow upload would hold the shutdown past its timeout, and the
       // database would never be closed. Open requests are cut before waiting.

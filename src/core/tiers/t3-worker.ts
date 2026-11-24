@@ -2,6 +2,8 @@
 //  Cascade AI — T3 Worker
 // ─────────────────────────────────────────────
 
+import { CUT_NOTE } from '../../workspace/protocol.js';
+import { splitChangedNote } from '../../workspace/remote.js';
 import { formatChangedFiles, formatRunFacts } from '../knowledge/run-memory.js';
 import { resolveInWorkspace } from '../../tools/utils/workspace-path.js';
 import { assessRisk } from '../permissions/risk.js';
@@ -222,6 +224,8 @@ ${rules.filter((r): r is string => r !== false).join('\n')}`;
  * willing to stat `report.pdf` — which is the drift this whole set exists to
  * prevent.
  */
+/** A remote file_read's answer for a file that isn't there. */
+const MISSING: unique symbol = Symbol('missing');
 const ARTIFACT_TOOLS = new Set(['file_write', 'file_edit', 'shell', 'generate_document', 'pdf_create']);
 
 /**
@@ -1282,9 +1286,12 @@ export class T3Worker extends BaseTier {
         // Bound what enters the context: the WHOLE history is re-sent on every
         // remaining iteration, so an unbounded tool result (big file read,
         // chatty command) multiplies into a token bomb across the loop.
+        // A workspace's change note is kept whole however long the result: the
+        // machine counts those files as reported and won't name them again.
+        const { rest, note } = splitChangedNote(toolResult);
         await this.context.addMessage({
           role: 'tool',
-          content: truncateForContext(toolResult),
+          content: note ? `${truncateForContext(rest)}\n\n${note}` : truncateForContext(toolResult),
           toolCallId: tc.id,
         });
       }
@@ -1944,9 +1951,7 @@ ${assignment.expectedOutput}`;
   private async verifyArtifacts(assignment: T2ToT3Assignment): Promise<{ ok: boolean; issues: string[] }> {
     // Files written on another machine (a workspace the user serves: src/workspace/)
     // are checked there, not in this machine's folder, where they never are.
-    if (this.tools.some((t) => ARTIFACT_TOOLS.has(t.name) && this.toolRegistry.getTool?.(t.name)?.remote)) {
-      return this.checkRemoteArtifacts(assignment);
-    }
+    if (this.filesAreRemote()) return this.checkRemoteArtifacts(assignment);
     const check = () => this.checkArtifacts(assignment);
     return this.toolRegistry.whileShared ? this.toolRegistry.whileShared(check) : check();
   }
@@ -1959,18 +1964,40 @@ ${assignment.expectedOutput}`;
     if (!this.toolRegistry.getTool?.('file_read')?.remote) return { ok: true, issues: [] };
     const issues: string[] = [];
     for (const artifactPath of this.extractArtifactPaths(assignment)) {
-      try {
-        const out = await this.toolRegistry.execute('file_read', { path: artifactPath }, {
-          tierId: this.id, sessionId: this.taskId, requireApproval: false, ...(this.signal ? { signal: this.signal } : {}),
-        });
-        // file_read numbers every line (`1\t…`): an empty file still comes back as "1\t".
-        const text = out.split('\n').map((line) => line.replace(/^\d+\t/, '')).join('\n');
-        if (!text.trim()) issues.push(`Artifact is empty: ${artifactPath}`);
-      } catch {
-        issues.push(`Expected artifact not found in the workspace: ${artifactPath}`);
-      }
+      const got = await this.readRemote(artifactPath);
+      // Refused on the machine (protected, or local-only): not this check's to judge.
+      if (got === null) continue;
+      if (got === MISSING) issues.push(`Expected artifact not found in the workspace: ${artifactPath}`);
+      else if (!got.cut && !got.text.trim()) issues.push(`Artifact is empty: ${artifactPath}`);
     }
     return { ok: issues.length === 0, issues };
+  }
+
+  /** True when this worker's files are written on another machine (a workspace the user serves: src/workspace/). */
+  private filesAreRemote(): boolean {
+    return this.tools.some((t) => ARTIFACT_TOOLS.has(t.name) && this.toolRegistry.getTool?.(t.name)?.remote);
+  }
+
+  /**
+   * A file in the remote workspace, read through its own file_read, which applies
+   * that machine's rules (protected and local-only files are refused there).
+   * MISSING when it isn't there; null when it can't be read for another reason.
+   * `cut` when the machine sent only the start of it (a result has a size cap).
+   */
+  private async readRemote(target: string): Promise<{ text: string; cut: boolean } | typeof MISSING | null> {
+    try {
+      const out = await this.toolRegistry.execute('file_read', { path: target }, {
+        // No tier id: a check is no worker, so the machine keeps no reads for it and
+        // reports no changes to it (they're the worker's to hear about).
+        tierId: '', sessionId: this.taskId, requireApproval: false, ...(this.signal ? { signal: this.signal } : {}),
+      });
+      const cut = CUT_NOTE.test(out);
+      // file_read numbers every line (`1\t…`): an empty file still comes back as "1\t".
+      const text = out.replace(CUT_NOTE, '').split('\n').map((line) => line.replace(/^\d+\t/, '')).join('\n');
+      return { text, cut };
+    } catch (e) {
+      return /ENOENT|no such file/i.test(e instanceof Error ? e.message : String(e)) ? MISSING : null;
+    }
   }
 
   private async checkArtifacts(assignment: T2ToT3Assignment): Promise<{ ok: boolean; issues: string[] }> {
@@ -2186,6 +2213,32 @@ ${current}`,
     // a hosted worker on a filesystem it had no way to touch — see
     // canProduceFiles() above for why that ends as a failed node.
     const workerCanWriteFiles = canProduceFiles(this.tools.map((t) => t.name));
+    if (this.filesAreRemote()) {
+      // Graded where the files are: on the user's machine, never this one's folder.
+      // Without a remote file_read the run can't look, so nothing is settled here.
+      if (!this.toolRegistry.getTool?.('file_read')?.remote) return [];
+      const seen = new Map<string, ReturnType<T3Worker['readRemote']>>();
+      const readOnce = (target: string) => {
+        let p = seen.get(target);
+        if (!p) { p = this.readRemote(target); seen.set(target, p); }
+        return p;
+      };
+      return evaluateAcceptance(criteria, assignment.files ?? [], {
+        // Refused on the machine: deferred to output review, never "does not exist".
+        allowed: async (target) => (await readOnce(target)) !== null,
+        stat: async (target) => {
+          const got = await readOnce(target);
+          // A cut file is at least the cap long, so never empty.
+          return got === null || got === MISSING ? null : { size: Math.max(got.cut ? 1 : 0, Buffer.byteLength(got.text, 'utf-8')) };
+        },
+        read: async (target) => {
+          const got = await readOnce(target);
+          if (got === null || got === MISSING || got.text.includes('\uFFFD')) return null;
+          // Only the start of it came: what it contains is not this rung's to judge.
+          return got.cut ? null : got.text;
+        },
+      }, { workerCanWriteFiles });
+    }
     // Under the workspace gate, like verifyArtifacts: a local-only command
     // may be writing one of these files, not yet marked.
     const grade = () => evaluateAcceptance(criteria, assignment.files ?? [], {

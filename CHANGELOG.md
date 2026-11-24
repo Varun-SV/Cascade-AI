@@ -5,6 +5,12 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.99.9 - 2026-11-24
+
+### Added
+- **Cascade Cloud can serve a run's coding tools from a folder on your own computer.** A run started with one of your desktop devices now runs its shell, file, search and git tools in the folder you chose in the Cascade desktop app, on your machine. The run itself still happens on the server; only the tool calls cross, and each is checked and, if risky, asked about on your computer first. Nothing is hosted by Cascade, and the server logs none of the files, paths or command output. This is the server side: the desktop switch and the web picker come next. It is off unless the server sets `WORKSPACE_RELAY`.
+- **The machine tells the run when files it read have changed.** Your computer keeps, for each worker, the files that worker read in the folder, and tells it before its next step if any changed since (by the run, by you, or by anything else), so it reads them again instead of relying on an old copy. Only paths inside the folder are named, never contents, and never a file you marked local-only.
+
 ## 0.99.8 - 2026-11-24
 
 ### Fixed

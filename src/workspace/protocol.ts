@@ -12,9 +12,10 @@
 //  per id:
 //
 //    device → server  ready    the tools the user allowed, with their schemas
-//    server → device  call     run this tool with this input
+//    server → device  call     run this tool with this input (and which worker asks)
 //    device → server  status   the call waits for the user's answer on the machine
-//    device → server  result   what the call returned, or why it failed
+//    device → server  result   what the call returned, or why it failed, and which
+//                              files the worker read before have changed since
 //    server → device  cancel   the run no longer wants that call's answer
 //
 //  The folder's path never crosses: only a label the user is shown.
@@ -59,15 +60,18 @@ export const MAX_FRAME_BYTES = MAX_INPUT_BYTES + 64 * 1024;
 /** The most tools a ready frame may list. */
 const MAX_TOOLS = WORKSPACE_TOOLS.length;
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
+/** The most paths one result may name as changed, and the longest each may be. */
+export const MAX_CHANGED = 50;
+export const MAX_CHANGED_PATH_CHARS = 512;
 
 export type ServerRunFrame =
-  | { v: 1; t: 'call'; id: string; tool: string; input: Record<string, unknown> }
+  | { v: 1; t: 'call'; id: string; tool: string; input: Record<string, unknown>; worker?: string }
   | { v: 1; t: 'cancel'; id: string };
 
 export type DeviceRunFrame =
   | { v: 1; t: 'ready'; tools: ToolDefinition[]; label: string }
   | { v: 1; t: 'status'; id: string; waiting: 'approval' }
-  | { v: 1; t: 'result'; id: string; ok: true; output: string }
+  | { v: 1; t: 'result'; id: string; ok: true; output: string; changed?: string[] }
   | { v: 1; t: 'result'; id: string; ok: false; error: string };
 
 const parse = (raw: string): Record<string, unknown> | null => {
@@ -86,7 +90,8 @@ export function readServerFrame(raw: string): ServerRunFrame | null {
   if (!f || typeof f.id !== 'string' || !ID.test(f.id)) return null;
   if (f.t === 'cancel') return { v: 1, t: 'cancel', id: f.id };
   if (f.t !== 'call' || typeof f.tool !== 'string' || !isPlainObject(f.input)) return null;
-  return { v: 1, t: 'call', id: f.id, tool: f.tool, input: f.input };
+  if (f.worker !== undefined && (typeof f.worker !== 'string' || !ID.test(f.worker))) return null;
+  return { v: 1, t: 'call', id: f.id, tool: f.tool, input: f.input, ...(typeof f.worker === 'string' ? { worker: f.worker } : {}) };
 }
 
 /** A frame from the device, if it is one of this protocol's, well formed. */
@@ -107,10 +112,33 @@ export function readDeviceFrame(raw: string): DeviceRunFrame | null {
   if (typeof f.id !== 'string' || !ID.test(f.id)) return null;
   if (f.t === 'status') return f.waiting === 'approval' ? { v: 1, t: 'status', id: f.id, waiting: 'approval' } : null;
   if (f.t !== 'result') return null;
-  if (f.ok === true && typeof f.output === 'string') return { v: 1, t: 'result', id: f.id, ok: true, output: capResult(f.output) };
+  if (f.ok === true && typeof f.output === 'string') {
+    const changed = readChanged(f.changed);
+    return { v: 1, t: 'result', id: f.id, ok: true, output: capResult(f.output), ...(changed.length ? { changed } : {}) };
+  }
   if (f.ok === false && typeof f.error === 'string') return { v: 1, t: 'result', id: f.id, ok: false, error: oneLine(f.error, 2000) };
   return null;
 }
+
+/**
+ * The changed-file list a result carries: workspace-relative paths only, capped.
+ * Whatever is not a short relative path is dropped, not trusted: it is shown to the
+ * run's model.
+ */
+export function readChanged(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const p of value) {
+    if (out.length >= MAX_CHANGED) break;
+    if (typeof p !== 'string' || !p || p.length > MAX_CHANGED_PATH_CHARS || /[\u0000-\u001f\u007f]/.test(p)) continue;
+    if (p.startsWith('/') || /^[A-Za-z]:/.test(p) || p.split('/').includes('..')) continue;
+    out.push(p);
+  }
+  return out;
+}
+
+/** The note capResult ends a cut result with: what follows it was never sent. */
+export const CUT_NOTE = /\n\n\[output cut: \d+ more characters were not sent from the workspace\]$/;
 
 /** A result cut to MAX_RESULT_CHARS, saying it was. */
 export function capResult(output: string): string {

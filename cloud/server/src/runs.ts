@@ -17,6 +17,7 @@ import {
 import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ApprovalRequest, ProviderConfig, BrowserAllowance, BrowserInput } from '#cascade-ai';
 import { attachRemoteBrowser, providerRationsSessions, type RelayForRun } from './remote-browser.js';
 import type { BrowserRelay } from './browser-relay.js';
+import { WorkspaceRunError, openWorkspaceForRun, type RunWorkspace, type WorkspaceRelay } from './workspace-relay.js';
 import { decryptAtRest } from './secrets.js';
 import { checkEndpointUrl } from './user-endpoint.js';
 import type { BrowserPrefs } from './db.js';
@@ -264,6 +265,10 @@ const ChatRunPayloadSchema = z.object({
   // Which of the user's own registered devices serves the browser, when they have
   // several online. Checked against their devices; absent picks the one seen last.
   browserDeviceId: z.string().min(1).max(64).optional(),
+  // Run the coding tools (shell, files, git) in a folder on one of the user's own
+  // desktop devices, served by the desktop app (docs/design/workspace-env.md). There is
+  // no fallback: a device that is offline or says no ends the run's start with a reason.
+  workspaceDeviceId: z.string().min(1).max(64).optional(),
   // Optional web-search backend the user configured (browser-held, like keys).
   // Whichever field is set is used — SearXNG → Brave → Tavily priority in the
   // tool. Absent → the tool's keyless Open Web fallback.
@@ -1512,6 +1517,12 @@ export interface ChatRunDeps {
    * the deployment hosts.
    */
   browserRelay?: BrowserRelay;
+  /**
+   * The workspace relay, when this server has it on. A run started with a
+   * `workspaceDeviceId` then works in a folder on that desktop; without it, such a run
+   * is refused with a reason rather than started with no tools.
+   */
+  workspaceRelay?: WorkspaceRelay;
 }
 
 /**
@@ -1887,6 +1898,25 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
   const { env, store, userId, socket, signal } = deps;
   const interactive = deps.interactive !== false;
 
+  // The run's workspace on the user's own computer, asked for first: a refusal ends the
+  // start with its reason, before anything is saved, and never becomes a run with no tools.
+  // The device asks its user, so only for a run someone is watching.
+  let workspace: RunWorkspace | null = null;
+  if (payload.workspaceDeviceId) {
+    if (!deps.workspaceRelay) throw new Error('Working in a folder on your computer is not turned on for this server, so this run was not started.');
+    if (!interactive) throw new Error('A workspace on your computer can only be used in a run you start yourself: you answer on that computer.');
+    if (payload.fastAnswer) throw new Error('A fast answer uses no tools, so it cannot work in a workspace on your computer. Turn one of them off.');
+    try {
+      workspace = await openWorkspaceForRun(deps.workspaceRelay, store, {
+        userId, deviceId: payload.workspaceDeviceId, runId: `ws:${randomUUID()}`, ...(signal ? { signal } : {}),
+      });
+    } catch (e) {
+      throw e instanceof WorkspaceRunError ? e : new Error('The workspace on your computer could not be opened, so this run was not started.');
+    }
+    const opened = workspace;
+    holds.push(() => opened.release('the run is over'));
+  }
+
   // Reached only AFTER runChatTurn's admission guards, so nothing below is
   // persisted for a request the entitlements refused.
   const conversation = payload.conversationId
@@ -1991,10 +2021,14 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
   // file-shaped, steer it to deliver files as `file:`-tagged fenced blocks so
   // the web can turn them into downloads. Injecting this on EVERY turn made
   // small models echo the guidance as phantom files on a bare "hi".
-  const fileGuidance = wantsFileDelivery(payload.prompt, skillSystemPrompt, conversationHistory)
+  // With a workspace, files are written where they belong, on the user's computer.
+  const fileGuidance = !workspace && wantsFileDelivery(payload.prompt, skillSystemPrompt, conversationHistory)
     ? FILE_DELIVERY_GUIDANCE
     : undefined;
-  const systemGuidance = [fileGuidance, skillSystemPrompt].filter(Boolean).join('\n\n');
+  const workspaceGuidance = workspace
+    ? `You are working in a folder on the user's own computer ("${workspace.remote.label}"): ${workspace.remote.tools.map((t) => t.name).join(', ')} run there. Paths are relative to that folder. Some actions ask the user on that computer first, and they may say no.`
+    : undefined;
+  const systemGuidance = [fileGuidance, workspaceGuidance, skillSystemPrompt].filter(Boolean).join('\n\n');
   const runPrompt = buildRunPrompt(payload.prompt, systemGuidance, memories, documents);
 
   const scratchDir = tenantScratchDir(env, userId);
@@ -2052,6 +2086,20 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
   const cascade: Cascade = createCascade(config, scratchDir);
 
   cascade.setMediaSink(buildMediaSink({ env, store, userId, conversationId: conversation.id, socket }));
+
+  // The workspace's tools register outside the `enabledTools` allowlist: that list limits
+  // what THIS machine runs, and these never run here. What the machine allowed is exactly
+  // what is offered. Nothing about the calls or their results is logged here.
+  if (workspace) {
+    const ws = workspace;
+    const where = { conversationId: conversation.id, runId: payload.runId, label: ws.remote.label, device: ws.device };
+    cascade.addRemoteTools(ws.remote.tools);
+    ws.remote.onWaiting((call) => socket.emit('workspace:waiting', { conversationId: conversation.id, runId: payload.runId, tool: call.tool, label: ws.remote.label, device: ws.device }));
+    socket.emit('workspace:attached', { ...where, tools: ws.remote.tools.map((t) => t.name) });
+    // Gone mid-run: the calls in flight and every later one fail with that reason, which
+    // the model reads, and the web app is told. The run never waits on a connection that is over.
+    void ws.remote.closed.then((reason) => socket.emit('workspace:detached', { ...where, reason }));
+  }
 
   // A hosted run has no browser of its own. This attaches one from whatever
   // provider the operator configured, and returns null when they configured

@@ -5,6 +5,7 @@
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import type { BrowserRelay } from './browser-relay.js';
+import type { WorkspaceRelay } from './workspace-relay.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -159,6 +160,8 @@ export interface CreateAppOptions {
    * which the app never sees.
    */
   browserRelay?: BrowserRelay;
+  /** The workspace relay, when this deployment has it on: its desktop-device listing. */
+  workspaceRelay?: WorkspaceRelay;
 }
 
 export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOptions = {}) {
@@ -275,6 +278,8 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
       devLoginEnabled: env.CLOUD_DEV_BYPASS,
       // Whether a user's own device can serve their runs a browser here.
       browserRelay: Boolean(options.browserRelay),
+      // Whether a user's own desktop can serve their runs a coding workspace here.
+      workspaceRelay: Boolean(options.workspaceRelay),
       // Whether a user may give their runs their own CDP endpoint here.
       browserEndpoints: env.BROWSER_ENDPOINTS === true,
       // Whether this deployment can actually produce a hosted browser. The
@@ -322,6 +327,7 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   app.use('/api', apiLimiter);
   // Registered here so it sits behind the limiter and ahead of the SPA fallback.
   options.browserRelay?.routes(app, env.SESSION_SECRET);
+  options.workspaceRelay?.routes(app, env.SESSION_SECRET);
 
   function finishLogin(res: express.Response, profile: OAuthProfile, provider: OAuthProvider) {
     const user = store.upsertUser({
