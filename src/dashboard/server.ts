@@ -2,6 +2,7 @@
 //  Cascade AI — Dashboard Express Server
 // ─────────────────────────────────────────────
 
+import { peerEventForSession } from './socket-protocol.js';
 import { createServer } from 'node:http';
 import { RUN_FILE_LIMITS, attachmentIdsFrom, filesForRun, parseNewAttachment, withDocuments } from './run-files.js';
 import { fileURLToPath } from 'node:url';
@@ -376,7 +377,7 @@ export class DashboardServer {
         this.emitToSessionClients(socketId, sessionId, 'permission:user-required', { sessionId, ...(e as object) });
       });
       cascade.on('peer:message', (e: unknown) => {
-        this.socket.emitPeerMessage(e as import('../types.js').PeerMessageEvent);
+        this.emitToSessionClients(socketId, sessionId, 'peer:message', peerEventForSession(sessionId, e));
       });
       // Boardroom gate: with planApproval configured, the run pauses inside
       // requestPlanApproval until a client answers over `plan:decision`.
@@ -410,6 +411,7 @@ export class DashboardServer {
       try {
         const result = await cascade.run({
           prompt: runPrompt,
+          sessionId,
           ...(files.images.length ? { images: files.images } : {}),
           signal: abortController.signal,
           approvalCallback: this.makeApprovalCallback(sessionId),
@@ -986,7 +988,7 @@ export class DashboardServer {
       this.socket.broadcast('tier:thinking', { sessionId, ...(e as object) });
     });
     cascade.on('peer:message', (e: unknown) => {
-      this.socket.emitPeerMessage(e as import('../types.js').PeerMessageEvent);
+      this.socket.emitPeerMessage(peerEventForSession(sessionId, e));
     });
     // See the socket run handler: recorded at start so a failed run is still
     // nameable by the cleanup that runs after it.
@@ -998,6 +1000,7 @@ export class DashboardServer {
     try {
       const result = await cascade.run({
         prompt,
+        sessionId,
         identityId: task.identityId,
         approvalCallback: async () => ({ approved: true, always: false }),
       });
@@ -1796,7 +1799,7 @@ export class DashboardServer {
           this.socket.broadcastToRoom(`session:${sessionId}`, 'permission:user-required', { sessionId, ...(e as object) });
         });
         cascade.on('peer:message', (e: unknown) => {
-          this.socket.emitPeerMessage(e as import('../types.js').PeerMessageEvent);
+          this.socket.emitPeerMessage(peerEventForSession(sessionId, e));
         });
         cascade.on('plan:approval-required', (e: unknown) => {
           this.socket.broadcastToRoom(`session:${sessionId}`, 'plan:approval-required', { sessionId, ...(e as object) });
@@ -1834,6 +1837,7 @@ export class DashboardServer {
         try {
           const result = await cascade.run({
             prompt: runPrompt,
+            sessionId,
             ...(files.images.length ? { images: files.images } : {}),
             identityId: body.identityId,
             approvalCallback: this.makeApprovalCallback(sessionId),
