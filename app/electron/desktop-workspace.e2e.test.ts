@@ -18,6 +18,7 @@ import { PrivacyPaths } from '../../src/core/privacy/paths.js';
 import { ConfigManager } from '../../src/config/index.js';
 import { STATE, statePath } from '../../src/config/project-state.js';
 import { ToolRegistry } from '../../src/tools/registry.js';
+import { secretValuesIn } from '../../src/core/cascade.js';
 import { WORKSPACE_FAMILY } from '../../src/workspace/protocol.js';
 import { createWorkspaceExecutor } from '../../src/workspace/executor.js';
 import { serveWorkspaceDevice } from '../../src/workspace/device.js';
@@ -70,7 +71,7 @@ describe('the desktop service with the real SDK', () => {
     const core = {
       // The real thing, pointed at the in-process hub's two paths.
       relayEndpoints: (url: string) => relayEndpoints(url, { controlPath: '/control', runPath: '/run' }),
-      serveWorkspaceDevice, createWorkspaceExecutor, ToolRegistry, ConfigManager, PrivacyPaths, Checkpoints, statePath, STATE,
+      serveWorkspaceDevice, createWorkspaceExecutor, ToolRegistry, ConfigManager, PrivacyPaths, Checkpoints, statePath, STATE, secretValuesIn,
     } as unknown as DesktopWorkspaceCore;
 
     let settings = { enabled: false } as { enabled: boolean };

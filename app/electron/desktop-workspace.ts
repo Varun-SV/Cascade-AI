@@ -36,7 +36,7 @@ interface CheckpointStore {
   end(cp: { n: number }): Promise<unknown>;
   covers?(paths: string[]): Promise<boolean>;
   list(): CheckpointRecord[];
-  undo(count?: number, force?: boolean): Promise<{ restored: string[]; removed: string[]; skipped: string[] }>;
+  undo(count?: number, force?: boolean): Promise<{ restored: string[]; removed: string[]; skipped: string[]; incomplete?: unknown[] }>;
 }
 
 type AskFn = (q: { tool: string; input: Record<string, unknown>; risk: { level: string; reason: string }; signal: AbortSignal }) => Promise<boolean>;
@@ -57,7 +57,9 @@ export interface DesktopWorkspaceCore {
   createWorkspaceExecutor(opts: {
     registry: unknown; tools: readonly string[]; ask: AskFn; checkpoints?: unknown; privacy?: () => unknown; label?: string; log?(line: string): void;
   }): unknown;
-  ToolRegistry: new (config: Record<string, unknown>, root: string) => { setIgnoredPaths(patterns: string[]): void };
+  ToolRegistry: new (config: Record<string, unknown>, root: string) => { setIgnoredPaths(patterns: string[]): void; setSecretValues(read: () => string[]): void };
+  /** Every credential in a config, by field name (src/core/cascade.ts). */
+  secretValuesIn(config: unknown): string[];
   ConfigManager: new (root: string) => { load(): Promise<void>; getConfig(): { tools?: Record<string, unknown>; privacy?: { paths?: Array<{ pattern: string; policy: 'local-only' }> } }; getIgnore(): { getUserPatterns(): string[] }; getStore?(): { close?(): void } | undefined };
   PrivacyPaths: new (policies: Array<{ pattern: string; policy: 'local-only' }>, opts: { workspaceRoot: string }) => unknown;
   Checkpoints: new (root: string, dir: string) => CheckpointStore;
@@ -255,11 +257,17 @@ export function createDesktopWorkspace(deps: DesktopWorkspaceDeps) {
     const mgr = new core.ConfigManager(v.folder);
     // Its own config, local-only rules included: unreadable means no workspace, not one without them.
     await mgr.load();
+    // Turned off (and maybe on again) while the folder's config loaded: this
+    // service no longer serves, and must not replace a newer run's state.
+    if (owner && serving !== owner) { try { mgr.getStore?.()?.close?.(); } catch { /* nothing to release */ } throw new Error('serving was turned off'); }
     const cfg = mgr.getConfig();
     try { mgr.getStore?.()?.close?.(); } catch { /* nothing to release */ }
     const registry = new core.ToolRegistry({ ...(cfg.tools ?? {}), enabledTools: consent.tools, browserEnabled: false }, v.folder);
     // The folder's .cascadeignore, as a local run applies it: what it protects, no run reads or changes.
     registry.setIgnoredPaths(mgr.getIgnore().getUserPatterns());
+    // The credentials this computer has configured are scrubbed from commands'
+    // environment wherever they sit (a proxy URL holding a key, say), as in a local run.
+    registry.setSecretValues(() => core.secretValuesIn(cfg));
     const privacy = new core.PrivacyPaths(cfg.privacy?.paths ?? [], { workspaceRoot: v.folder });
     const store = new core.Checkpoints(v.folder, core.statePath(v.folder, core.STATE.checkpoints));
     const run_: NonNullable<typeof current> = { runId: run.runId, label: consent.label, folder: v.folder, allowAll: false, live: false, store, cp: null, owner };
@@ -297,6 +305,7 @@ export function createDesktopWorkspace(deps: DesktopWorkspaceDeps) {
         canUndo = !!ended.cp && (rec?.changed ?? 1) > 0;
         if (!ended.cp) note = 'Nothing was changed, so there is nothing to undo.';
         else if (rec?.changed === 0) note = 'The run changed nothing.';
+        else if (rec && !rec.after) { canUndo = false; note = 'This run\'s checkpoint is incomplete, so its changes can\'t be undone from here. Use /undo --force in Cascade for that folder if you are sure.'; }
       } catch { note = 'The run\'s checkpoint could not be read.'; }
       last = { label: ended.label, changed, canUndo, undone: false, note, folder: ended.folder, n: ended.cp?.n ?? null };
     }
@@ -438,6 +447,12 @@ export function createDesktopWorkspace(deps: DesktopWorkspaceDeps) {
       if (mine.undone) { last = { ...last, undone: true, canUndo: false, note: 'Already undone (from Cascade).' }; publish(); return { error: 'That run\'s changes were already undone.' }; }
       if (all.filter((c) => !c.undone).at(-1)?.n !== last.n) return { error: 'A newer checkpoint exists for this folder, so undoing the run from here could put back more than it changed. Use /undo in Cascade for that folder.' };
       const r = await store.undo(1);
+      // The run's last snapshot was never written: nothing was put back.
+      if (r.incomplete?.length) {
+        last = { ...last, note: 'This run\'s checkpoint is incomplete, so its changes could not be undone from here. Use /undo --force in Cascade for that folder if you are sure.' };
+        publish();
+        return { error: 'The run\'s checkpoint is incomplete, so nothing was undone.' };
+      }
       last = { ...last, undone: true, canUndo: false, note: r.skipped.length ? `${r.skipped.length} file(s) changed since the run were left as they are.` : null };
       publish();
       return { ok: true, restored: r.restored.length, removed: r.removed.length, skipped: r.skipped.length };

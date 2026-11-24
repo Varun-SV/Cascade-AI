@@ -23,6 +23,8 @@ function harness(over: { device?: StoredDesktopDevice | null; account?: string |
   let dev: StoredDesktopDevice | null = over.device === undefined ? device() : over.device;
   let settings: WorkspaceSettings = over.settings ?? { enabled: false };
   const served: ServeOpts[] = [];
+  // Held open by a test to keep a folder's config loading.
+  const loadGate: { wait: Promise<void> } = { wait: Promise.resolve() };
   const notes: Array<[string, any]> = [];
   const client = { stop: vi.fn() };
   const executors: any[] = [];
@@ -35,8 +37,9 @@ function harness(over: { device?: StoredDesktopDevice | null; account?: string |
       return new Promise<'stopped' | 'refused'>((r) => o.signal.addEventListener('abort', () => r('stopped')));
     },
     createWorkspaceExecutor: (o: unknown) => { executors.push(o); return { finish: async () => {} }; },
-    ToolRegistry: class { ignored: string[] | null = null; constructor(public config: unknown, public root: string) {} setIgnoredPaths(p: string[]) { this.ignored = p; } },
-    ConfigManager: class { async load() {} getConfig() { return { tools: { x: 1 }, privacy: { paths: [{ pattern: 'secret/**', policy: 'local-only' }] } }; } getIgnore() { return { getUserPatterns: () => ['private/**', '*.csv'] }; } },
+    ToolRegistry: class { ignored: string[] | null = null; secrets: (() => string[]) | null = null; constructor(public config: unknown, public root: string) {} setIgnoredPaths(p: string[]) { this.ignored = p; } setSecretValues(r: () => string[]) { this.secrets = r; } },
+    secretValuesIn: (c: unknown) => [JSON.stringify(c).includes('apiKey') ? 'sk-from-config' : 'none'],
+    ConfigManager: class { async load() { await loadGate.wait; } getConfig() { return { providers: [{ type: 'openai', apiKey: 'sk-from-config' }], tools: { x: 1 }, privacy: { paths: [{ pattern: 'secret/**', policy: 'local-only' }] } }; } getIgnore() { return { getUserPatterns: () => ['private/**', '*.csv'] }; } },
     PrivacyPaths: class { constructor(public policies: unknown) {} },
     Checkpoints: class { constructor() { return checkpoints as never; } },
     statePath: (root: string, p: string) => path.join(root, '.state', p),
@@ -55,7 +58,7 @@ function harness(over: { device?: StoredDesktopDevice | null; account?: string |
   };
   const ws = createDesktopWorkspace(deps);
   return {
-    ws, served, notes, client, executors, checkpoints,
+    ws, served, notes, client, executors, checkpoints, loadGate,
     settings: () => settings,
     setDevice: (d: StoredDesktopDevice | null) => { dev = d; },
     setAccount: (a: string | null) => { account = a; },
@@ -201,6 +204,8 @@ describe('a served run', () => {
     expect(exec.privacy().policies).toEqual([{ pattern: 'secret/**', policy: 'local-only' }]);
     // The folder's .cascadeignore protects what it lists from the run, as in a local run.
     expect(exec.registry.ignored).toEqual(['private/**', '*.csv']);
+    // Its configured credentials are scrubbed from commands' environment.
+    expect(exec.registry.secrets()).toEqual(['sk-from-config']);
     expect(await exec.checkpoints.begin('x')).toEqual({ n: 3 });
   });
 
@@ -277,7 +282,7 @@ describe('a served run', () => {
     const { exec, s } = await opened(h);
     s.onServing!({ runId: 'run-1', userId: 'u', expiresAt: 1, label: 'proj' });
     await exec.checkpoints.begin('run');
-    h.checkpoints.list.mockReturnValue([{ n: 3, changed: 2 }]);
+    h.checkpoints.list.mockReturnValue([{ n: 3, changed: 2, after: 's' }]);
     s.onServing!(null);
     expect(h.ws.status().lastRun).toMatchObject({ label: 'Workspace on Ana PC (desktop app)', changed: 2, canUndo: true, undone: false });
     expect(await h.ws.undoLastRun()).toEqual({ ok: true, restored: 1, removed: 1, skipped: 0 });
@@ -291,7 +296,7 @@ describe('a served run', () => {
     const a = await opened(h);
     a.s.onServing!({ runId: 'run-1', userId: 'u', expiresAt: 1, label: 'proj' });
     await a.exec.checkpoints.begin('run');
-    h.checkpoints.list.mockReturnValue([{ n: 3, changed: 2 }, { n: 4, changed: 1 }]);
+    h.checkpoints.list.mockReturnValue([{ n: 3, changed: 2, after: 's' }, { n: 4, changed: 1, after: 's' }]);
     a.s.onServing!(null);
     expect(await h.ws.undoLastRun()).toMatchObject({ error: expect.stringMatching(/newer checkpoint/) });
     expect(h.checkpoints.undo).not.toHaveBeenCalled();
@@ -308,9 +313,9 @@ describe('a served run', () => {
     a.s.onServing!({ runId: 'run-1', userId: 'u', expiresAt: 1, label: 'proj' });
     await a.exec.checkpoints.begin('run');
     // Undone with /undo elsewhere: the newest is still n 3, and undo(1) would pick n 2.
-    h.checkpoints.list.mockReturnValue([{ n: 2, changed: 5 }, { n: 3, changed: 2 }]);
+    h.checkpoints.list.mockReturnValue([{ n: 2, changed: 5, after: 's' }, { n: 3, changed: 2, after: 's' }]);
     a.s.onServing!(null);
-    h.checkpoints.list.mockReturnValue([{ n: 2, changed: 5 }, { n: 3, changed: 2, undone: true }]);
+    h.checkpoints.list.mockReturnValue([{ n: 2, changed: 5, after: 's' }, { n: 3, changed: 2, after: 's', undone: true }]);
     expect(await h.ws.undoLastRun()).toMatchObject({ error: expect.stringMatching(/already undone/) });
     expect(h.checkpoints.undo).not.toHaveBeenCalled();
     expect(h.ws.status().lastRun).toMatchObject({ undone: true, canUndo: false });
@@ -319,9 +324,9 @@ describe('a served run', () => {
     const b = await opened(h);
     b.s.onServing!({ runId: 'run-1', userId: 'u', expiresAt: 1, label: 'proj' });
     await b.exec.checkpoints.begin('run');
-    h.checkpoints.list.mockReturnValue([{ n: 3, changed: 2 }]);
+    h.checkpoints.list.mockReturnValue([{ n: 3, changed: 2, after: 's' }]);
     b.s.onServing!(null);
-    h.checkpoints.list.mockReturnValue([{ n: 3, changed: 2 }, { n: 4, changed: 1, undone: true }]);
+    h.checkpoints.list.mockReturnValue([{ n: 3, changed: 2, after: 's' }, { n: 4, changed: 1, after: 's', undone: true }]);
     expect(await h.ws.undoLastRun()).toMatchObject({ ok: true });
   });
 
@@ -340,6 +345,50 @@ describe('a served run', () => {
     expect(h.ws.status().serving).not.toBeNull();
     await expect(first.s.open(first.consent, run())).rejects.toThrow(/turned off/);
     expect(h.ws.stop()).toEqual({ ok: true });
+  });
+
+  it("a service turned off while the folder's config loads never replaces the new service's run", async () => {
+    const h = harness();
+    h.ws.enable();
+    const old = h.served.at(-1)!;
+    const p = old.askUser(run());
+    h.ws.answer(h.last('workspace:ask').id, { folder: PROJ, tools: ['file_read'] });
+    const consent = (await p)!;
+    let release!: () => void;
+    h.loadGate.wait = new Promise<void>((r) => { release = r; });
+    const late = old.open(consent, run());
+    // Off and on again while that load waits; the new service opens its run.
+    h.ws.disable();
+    h.loadGate.wait = Promise.resolve();
+    const fresh = await opened(h);
+    fresh.s.onServing!({ runId: 'run-1', userId: 'u', expiresAt: 1, label: 'l' });
+    release();
+    await expect(late).rejects.toThrow(/turned off/);
+    old.onServing!(null);
+    expect(h.ws.status().serving).not.toBeNull();
+    expect(h.ws.stop()).toEqual({ ok: true });
+  });
+
+  it('an incomplete checkpoint is never reported as undone', async () => {
+    const h = harness();
+    const a = await opened(h);
+    a.s.onServing!({ runId: 'run-1', userId: 'u', expiresAt: 1, label: 'proj' });
+    await a.exec.checkpoints.begin('run');
+    h.checkpoints.list.mockReturnValue([{ n: 3, changed: 2, after: 'snap' }]);
+    a.s.onServing!(null);
+    expect(h.ws.status().lastRun).toMatchObject({ canUndo: true });
+    // Its last snapshot failed after the banner showed: undo puts nothing back.
+    h.checkpoints.undo.mockResolvedValueOnce({ restored: [], removed: [], skipped: [], incomplete: [{ n: 3 }] } as never);
+    expect(await h.ws.undoLastRun()).toMatchObject({ error: expect.stringMatching(/incomplete/) });
+    expect(h.ws.status().lastRun).toMatchObject({ undone: false });
+
+    // Seen as incomplete when the run ends: no Undo is offered.
+    const b = await opened(h);
+    b.s.onServing!({ runId: 'run-1', userId: 'u', expiresAt: 1, label: 'proj' });
+    await b.exec.checkpoints.begin('run');
+    h.checkpoints.list.mockReturnValue([{ n: 3, changed: 2 }]);
+    b.s.onServing!(null);
+    expect(h.ws.status().lastRun).toMatchObject({ canUndo: false, note: expect.stringMatching(/incomplete/) });
   });
 
   it('keeps open questions for a window that opens later, and drops them once answered or closed', async () => {
