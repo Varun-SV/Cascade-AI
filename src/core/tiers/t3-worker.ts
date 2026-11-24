@@ -2,7 +2,8 @@
 //  Cascade AI — T3 Worker
 // ─────────────────────────────────────────────
 
-import { formatRunFacts } from '../knowledge/run-memory.js';
+import { formatChangedFiles, formatRunFacts } from '../knowledge/run-memory.js';
+import { resolveInWorkspace } from '../../tools/utils/workspace-path.js';
 import { assessRisk } from '../permissions/risk.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -415,6 +416,9 @@ export class T3Worker extends BaseTier {
   private assignment?: T2ToT3Assignment;
   /** True when this subtask matched a privacy.paths local-only pattern. */
   private localOnlyMatch = false;
+  /** Tool calls running now, and when the earliest of them began (see noteRead). */
+  private callsOpen = 0;
+  private callsSince = 0;
   private peerSyncBuffer: Array<{ fromId: string; content: unknown; timestamp: string }> = [];
   /**
    * Whether the model this worker runs on can be shown a browser screenshot.
@@ -1107,10 +1111,15 @@ export class T3Worker extends BaseTier {
 
       // What other workers (or earlier runs) found, before this worker pays to
       // find it too. Not for a local-only subtask: it shares nothing either way.
+      const board = this.router.getRunMemory?.(this.artifactRoot());
       if (!this.localOnlyMatch) {
-        const found = this.router.getRunMemory?.(this.artifactRoot())?.unseenBy(this.id) ?? [];
+        const found = board?.unseenBy(this.id) ?? [];
         if (found.length) await this.context.addMessage({ role: 'user', content: formatRunFacts(found) });
       }
+      // Files it read that someone has changed since: what it holds of them is out
+      // of date. A local-only subtask is told of private files too (its model is private).
+      const changed = board?.changedFor(this.id, this.localOnlyMatch) ?? [];
+      if (changed.length) await this.context.addMessage({ role: 'user', content: formatChangedFiles(changed) });
 
       let textToolSuffix = '';
       if (useTextTools) {
@@ -1433,7 +1442,7 @@ export class T3Worker extends BaseTier {
     // local-only subtask reads nothing from it and adds nothing to it, but what
     // it changes still has to make the others' stored answers stale.
     const board = this.router.getRunMemory?.(this.artifactRoot());
-    const reused = this.localOnlyMatch ? null : board?.reuse(tc.name, tc.input);
+    const reused = this.localOnlyMatch ? null : board?.reuse(tc.name, tc.input, this.id);
     if (reused) {
       // Read as surely as if it had run: what this worker learns from it has the same
       // unknown sources a command's output gives it (extractAndStoreFacts).
@@ -1444,6 +1453,15 @@ export class T3Worker extends BaseTier {
       return `${note}${reused.output}`;
     }
     const boardAt = board?.begin(tc.name, tc.input) ?? 0;
+    // From when files this call reads may have been read (see noteRead's `since`):
+    // the start of the earliest call still open.
+    if (this.callsOpen++ === 0) this.callsSince = Date.now();
+    // A partial edit: whether what this worker held of the file was current before it.
+    let editPath: string | null = null;
+    if (tc.name === 'file_edit' && typeof tc.input['path'] === 'string') {
+      try { editPath = resolveInWorkspace(this.artifactRoot(), tc.input['path']); } catch { /* outside the workspace */ }
+    }
+    const heldWasCurrent = editPath ? board?.heldCurrent(this.id, editPath) ?? true : true;
 
     this.emit('tool:call', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), input: this.localOnlyMatch ? {} : tc.input });
     const toolStartMs = Date.now();
@@ -1498,15 +1516,21 @@ export class T3Worker extends BaseTier {
       }
       const durationMs = Date.now() - toolStartMs;
       const text = typeof result === 'string' ? result : JSON.stringify(result);
+      // Its own write is no news to it (the next model call doesn't say the file changed).
+      if (this.isFileOperation(tc.name) && typeof tc.input['path'] === 'string') {
+        try { board?.noteWritten(this.id, resolveInWorkspace(this.artifactRoot(), tc.input['path']), heldWasCurrent); } catch { /* outside the workspace: not tracked */ }
+      }
       // Judged now, not before the call: a read during it can make this subtask
       // local-only, and then what it got stays here.
       board?.observe(tc.name, tc.input, text, this.id, boardAt, { failed: /^Exit [1-9]\d*:/.test(text), publish: !this.localOnlyMatch });
+      this.callsOpen = Math.max(0, this.callsOpen - 1);
       this.emit('tool:result', { id: tc.id, tierId: this.id, toolName: this.shownToolName(tc.name), output: this.shareable(text, 'tool result'), durationMs });
       return text;
     } catch (err) {
       const durationMs = Date.now() - toolStartMs;
       const errMsg = err instanceof Error ? err.message : String(err);
       board?.observe(tc.name, tc.input, errMsg, this.id, boardAt, { failed: true, publish: !this.localOnlyMatch });
+      this.callsOpen = Math.max(0, this.callsOpen - 1);
       // The fallback below runs other tools in this one's place, which the board
       // sees no call for: held open until it is over (taken in the same tick as
       // the observe above, so nothing is stored in between).
@@ -1817,6 +1841,8 @@ export class T3Worker extends BaseTier {
 
   /** Keep a file as a source of what this subtask learns (extractAndStoreFacts): one read into a prompt. */
   private readonly noteRead = (absPath: string): void => {
+    // Told before a later model call if someone changes it (changedFor).
+    this.router.getRunMemory?.(this.artifactRoot())?.noteRead(this.id, absPath, undefined, this.callsOpen > 0 ? this.callsSince : undefined);
     const rel = path.relative(this.artifactRoot(), absPath);
     if (rel && !leavesBase(rel)) this.readForModel.add(rel.split(path.sep).join('/'));
   };

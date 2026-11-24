@@ -78,6 +78,20 @@ describe('WorkspaceIndex', () => {
     expect(hits[0]!.text).toContain('validateToken');
   });
 
+  // What code_search checks a hit against: the content as it was indexed.
+  it('gives the hash a file had when indexed, until the next refresh', async () => {
+    const { hashContent } = await import('./manifest.js');
+    await fs.writeFile(path.join(root, 'auth.ts'), 'export const a = 1;');
+    const idx = make();
+    await idx.refresh();
+    expect(idx.indexedHash('auth.ts')).toBe(hashContent('export const a = 1;'));
+    expect(idx.indexedHash('missing.ts')).toBeUndefined();
+    await fs.writeFile(path.join(root, 'auth.ts'), 'export const a = 2;');
+    expect(idx.indexedHash('auth.ts')).toBe(hashContent('export const a = 1;'));
+    await idx.refresh();
+    expect(idx.indexedHash('auth.ts')).toBe(hashContent('export const a = 2;'));
+  });
+
   it('re-indexes only changed files on refresh (incremental)', async () => {
     const a = path.join(root, 'a.ts');
     const b = path.join(root, 'b.ts');

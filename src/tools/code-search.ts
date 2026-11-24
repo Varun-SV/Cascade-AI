@@ -2,12 +2,19 @@
 //  Cascade AI — Code Search Tool (Phase 3)
 // ─────────────────────────────────────────────
 
+import fs from 'node:fs';
 import path from 'node:path';
 import type { ToolExecuteOptions } from '../types.js';
 import { BaseTool } from './base.js';
 import type { WorkspaceIndex } from '../retrieval/workspace-index.js';
+import { hashContent } from '../retrieval/manifest.js';
 
 const MAX_CHARS = 12_000;
+
+/** The file's content hash now, as the index computes it; null if it can't be read. */
+function currentHash(abs: string): string | null {
+  try { return hashContent(fs.readFileSync(abs)); } catch { return null; }
+}
 
 /**
  * Lets a worker search the indexed workspace codebase by meaning + keywords and
@@ -59,9 +66,17 @@ export class CodeSearchTool extends BaseTool {
 
     let out = '';
     for (const h of shown) {
-      const block = `# ${h.sourceId}\n${h.text}\n`;
+      const abs = path.resolve(root, h.sourceId);
+      // The index returns text as it was when indexed. Still what the file holds?
+      const indexed = this.index.indexedHash(h.sourceId);
+      const fresh = indexed !== undefined && currentHash(abs) === indexed;
+      const block = `# ${h.sourceId}${fresh ? '' : ' (indexed earlier: the file may have changed since, read it for its current content)'}\n${h.text}\n`;
       if (out.length + block.length > MAX_CHARS) break;
       out += (out ? '\n---\n\n' : '') + block;
+      // A file whose lines the result carries as they are now: the caller holds a
+      // copy of part of it, and is told if it changes (as grep does). Not one the
+      // index is behind on: that copy is already out of date, and says so above.
+      if (fresh) options.noteRead?.(abs);
     }
     return out;
   }

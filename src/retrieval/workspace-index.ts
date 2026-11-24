@@ -186,6 +186,18 @@ export class WorkspaceIndex {
   }
 
   /** The directory indexed; every hit's `sourceId` is relative to it. */
+  /**
+   * The content hash a file had when it was last indexed (relative path, as in
+   * a hit's `sourceId`), or undefined if it isn't in the index. A search returns
+   * text as indexed: this says whether that is still what the file holds.
+   */
+  indexedHash(rel: string): string | undefined {
+    const row = this.db
+      .prepare('SELECT hash FROM code_manifest WHERE namespace = ? AND path = ?')
+      .get(this.namespace, rel) as { hash: string } | undefined;
+    return row?.hash;
+  }
+
   getRoot(): string {
     return this.root;
   }

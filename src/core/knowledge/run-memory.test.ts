@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MAX_ANSWER_AGE_MS, RunMemory, callReadsOnly, commandReadsOnly, factsFrom, formatRunFacts, noteWorkspaceChange, workspaceChangeMarker, type ChangeMarker } from './run-memory.js';
+import { MAX_ANSWER_AGE_MS, RunMemory, callReadsOnly, commandReadsOnly, factsFrom, formatChangedFiles, formatPlannerFacts, formatRunFacts, noteWorkspaceChange, readsOf, workspaceChangeMarker, type ChangeMarker } from './run-memory.js';
 import { statePath, STATE } from '../../config/project-state.js';
 import { ownerToken } from '../../utils/file-lock.js';
 import { WorldStateDB } from './world-state.js';
@@ -198,9 +198,9 @@ describe('Codex on b2b0aba', () => {
     try {
       db.upsertFact('environment', 'command jq', 'available', 'T3-old', undefined, []);
       db.upsertFact('environment', 'git repository at docs', 'present', 'T3-old', undefined, []);
-      db.upsertFact('environment', 'command wc', 'not available', 'run:T3-old', undefined, []);
+      db.upsertFact('environment', 'command mdcount', 'not available', 'run:T3-old', undefined, []);
       db.upsertFact('environment', 'git repository at legacy', 'none', 'run:T3-old', undefined, []);
-      expect(new RunMemory(root, db).all().map((f) => f.key).sort()).toEqual(['git-repo:legacy', 'missing:wc']);
+      expect(new RunMemory(root, db).all().map((f) => f.key).sort()).toEqual(['git-repo:legacy', 'missing:mdcount']);
     } finally { db.close(); }
   });
 });
@@ -447,8 +447,8 @@ describe('Codex on e3c4fe2: what stops being true, and command names as spelt', 
       // …and the next run is told of `JQ`, spelt as it is, not of `jq`.
       expect(new RunMemory(root, db).all().map((f) => f.text.split(' ')[0])).toEqual(['`JQ`']);
       // A plain lowercase fact, as kept before, still loads.
-      db.upsertFact('environment', 'command wc', 'not available', 'run:T3-old', undefined, []);
-      expect(new RunMemory(root, db).all().map((f) => f.key).sort()).toEqual(['missing:JQ', 'missing:wc']);
+      db.upsertFact('environment', 'command mdcount', 'not available', 'run:T3-old', undefined, []);
+      expect(new RunMemory(root, db).all().map((f) => f.key).sort()).toEqual(['missing:JQ', 'missing:mdcount']);
     } finally { db.close(); }
   });
 });
@@ -513,17 +513,17 @@ describe('Codex on 784fe73', () => {
     const { PrivacyPaths } = await import('../privacy/paths.js');
     const db = new WorldStateDB(root);
     try {
-      db.upsertFact('environment', 'command wc', 'not available', 'T3-old', undefined, ['setup.md']);
+      db.upsertFact('environment', 'command mdcount', 'not available', 'T3-old', undefined, ['setup.md']);
       db.upsertFact('environment', 'git repository at docs', 'none', 'run:T3-old', undefined, []);
       let rules = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]);
       const mem = new RunMemory(root, db, () => true, () => rules);
-      expect(mem.all().map((f) => f.key).sort()).toEqual(['git-repo:docs', 'missing:wc']);
+      expect(mem.all().map((f) => f.key).sort()).toEqual(['git-repo:docs', 'missing:mdcount']);
       // Since then, setup.md and docs/ have become local-only.
       rules = new PrivacyPaths([{ pattern: 'setup.md', policy: 'local-only' }, { pattern: 'docs/**', policy: 'local-only' }, { pattern: 'docs', policy: 'local-only' }]);
       expect(mem.unseenBy('T3-cloud')).toEqual([]);
       // Loosened again, they are shown: holding back didn't count as shown.
       rules = new PrivacyPaths([]);
-      expect(mem.unseenBy('T3-cloud').map((f) => f.key).sort()).toEqual(['git-repo:docs', 'missing:wc']);
+      expect(mem.unseenBy('T3-cloud').map((f) => f.key).sort()).toEqual(['git-repo:docs', 'missing:mdcount']);
     } finally { db.close(); }
   });
 });
@@ -554,16 +554,16 @@ describe('kept in the project, so the next run starts knowing', () => {
       db.upsertFact('environment', 'git repository at secret/acquisition', 'none', 'run:T3-old', undefined, []);
       // Saved before sources were recorded.
       db.upsertFact('environment', 'git repository at legacy', 'none', 'T3-old');
-      db.upsertFact('environment', 'command wc', 'not available', 'run:T3-old', undefined, []);
+      db.upsertFact('environment', 'command mdcount', 'not available', 'run:T3-old', undefined, []);
       const rules = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]);
       const mem = new RunMemory(root, db, () => true, () => rules);
-      expect(mem.all().map((f) => f.key)).toEqual(['missing:wc']);
+      expect(mem.all().map((f) => f.key)).toEqual(['missing:mdcount']);
       // Control: with no rules, all of them.
-      expect(new RunMemory(root, db).all().map((f) => f.key).sort()).toEqual(['git-repo:docs', 'git-repo:legacy', 'git-repo:secret/acquisition', 'missing:wc']);
+      expect(new RunMemory(root, db).all().map((f) => f.key).sort()).toEqual(['git-repo:docs', 'git-repo:legacy', 'git-repo:secret/acquisition', 'missing:mdcount']);
       // Nor is one learnt about a local-only folder now.
       fs.mkdirSync(path.join(root, 'secret', 'acq'), { recursive: true });
       run(mem, 'shell', { command: 'git status', cwd: 'secret/acq' }, NOT_A_REPO, 'T3-a', bad);
-      expect(mem.all().map((f) => f.key)).toEqual(['missing:wc']);
+      expect(mem.all().map((f) => f.key)).toEqual(['missing:mdcount']);
       expect(db.getFactsForEntities(['environment']).map((f) => f.relation)).not.toContain('git repository at secret/acq');
     } finally { db.close(); }
   });
@@ -580,12 +580,12 @@ describe('kept in the project, so the next run starts knowing', () => {
       expect(db.getFactsForEntities(['environment'])).toEqual([]);
       // Turned on mid-run: kept from then on.
       keep = true;
-      run(mem, 'shell', { command: 'wc -w a.md' }, 'Exit 127:\nbash: wc: command not found', 'T3-a', bad);
-      expect(db.getFactsForEntities(['environment']).map((f) => f.relation)).toEqual(['command wc']);
+      run(mem, 'shell', { command: 'mdcount -w a.md' }, 'Exit 127:\nbash: mdcount: command not found', 'T3-a', bad);
+      expect(db.getFactsForEntities(['environment']).map((f) => f.relation)).toEqual(['command mdcount']);
       // Off again: what is kept stays as it is.
       keep = false;
-      run(mem, 'shell', { command: 'wc -w a.md' }, '12 a.md', 'T3-a');
-      expect(db.getFactsForEntities(['environment']).map((f) => f.relation)).toEqual(['command wc']);
+      run(mem, 'shell', { command: 'mdcount -w a.md' }, '12 a.md', 'T3-a');
+      expect(db.getFactsForEntities(['environment']).map((f) => f.relation)).toEqual(['command mdcount']);
     } finally { db.close(); }
   });
 
@@ -595,21 +595,402 @@ describe('kept in the project, so the next run starts knowing', () => {
     try {
       const first = new RunMemory(root, db);
       run(first, 'shell', { command: 'git log' }, NOT_A_REPO, 'T3-a', bad);
-      run(first, 'shell', { command: 'wc -w a.md' }, 'Exit 127:\nbash: wc: command not found', 'T3-a', bad);
+      run(first, 'shell', { command: 'mdcount -w a.md' }, 'Exit 127:\nbash: mdcount: command not found', 'T3-a', bad);
       expect(db.getFactsForEntities(['environment']).map((f) => [f.relation, f.value]).sort()).toEqual([
-        ['command wc', 'not available'],
+        ['command mdcount', 'not available'],
         ['git repository at the project folder', 'none'],
       ]);
       // Names only: nothing the tools printed is kept.
       expect(JSON.stringify(db.getFactsForEntities(['environment']))).not.toContain('fatal');
 
       const next = new RunMemory(root, db);
-      expect(next.unseenBy('T3-x').map((f) => f.key).sort()).toEqual(['git-repo:the project folder', 'missing:wc']);
+      expect(next.unseenBy('T3-x').map((f) => f.key).sort()).toEqual(['git-repo:the project folder', 'missing:mdcount']);
 
       // The user made a repository between runs: git simply working there says so (Codex on 9789d5b).
       run(next, 'shell', { command: 'git status' }, 'On branch main\nnothing to commit', 'T3-x');
-      run(next, 'shell', { command: 'wc -w a.md' }, '12 a.md', 'T3-x');
+      run(next, 'shell', { command: 'mdcount -w a.md' }, '12 a.md', 'T3-x');
       expect(db.getFactsForEntities(['environment'])).toEqual([]);
     } finally { db.close(); }
+  });
+});
+
+// The user's question: a worker read a file, then something else changed it.
+describe('files a worker read, changed since by someone else', () => {
+  const write = (rel: string, text: string) => { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), text); };
+
+  it('it is told once, before its next model call, and a deletion is told as one', () => {
+    write('notes.md', 'one');
+    write('plan.md', 'plan');
+    const mem = new RunMemory(root);
+    mem.noteRead('T3-a', path.join(root, 'notes.md'));
+    mem.noteRead('T3-a', path.join(root, 'plan.md'));
+    expect(mem.changedFor('T3-a')).toEqual([]);
+    write('notes.md', 'one, then more');
+    fs.rmSync(path.join(root, 'plan.md'));
+    expect(mem.changedFor('T3-a')).toEqual([{ path: 'notes.md', gone: false }, { path: 'plan.md', gone: true }]);
+    // Told once.
+    expect(mem.changedFor('T3-a')).toEqual([]);
+    // Another worker that never read it hears nothing.
+    expect(mem.changedFor('T3-b')).toEqual([]);
+    const note = formatChangedFiles([{ path: 'notes.md', gone: false }, { path: 'plan.md', gone: true }]);
+    expect(note).toMatch(/^FILES CHANGED SINCE YOU READ THEM/);
+    expect(note).toContain('- notes.md\n- plan.md (deleted)');
+  });
+
+  it("its own write is no news to it, but is to another worker that read the file", () => {
+    write('notes.md', 'one');
+    const mem = new RunMemory(root);
+    const abs = path.join(root, 'notes.md');
+    mem.noteRead('T3-a', abs);
+    mem.noteRead('T3-b', abs);
+    write('notes.md', 'one, edited by a');
+    mem.noteWritten('T3-a', abs);
+    expect(mem.changedFor('T3-a')).toEqual([]);
+    expect(mem.changedFor('T3-b')).toEqual([{ path: 'notes.md', gone: false }]);
+  });
+
+  it('a file read by a command counts as read', () => {
+    write('a.txt', 'alpha');
+    const mem = new RunMemory(root);
+    run(mem, 'shell', { command: 'cat a.txt' }, 'alpha', 'T3-a');
+    write('a.txt', 'alpha beta');
+    expect(mem.changedFor('T3-a')).toEqual([{ path: 'a.txt', gone: false }]);
+  });
+
+  it('a local-only file is named only to a worker on a private model', async () => {
+    const { PrivacyPaths } = await import('../privacy/paths.js');
+    write('secret/keys.md', 'k');
+    write('open.md', 'o');
+    const rules = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]);
+    const mem = new RunMemory(root, undefined, () => true, () => rules);
+    for (const w of ['T3-cloud', 'T3-local']) {
+      mem.noteRead(w, path.join(root, 'secret/keys.md'));
+      mem.noteRead(w, path.join(root, 'open.md'));
+    }
+    write('secret/keys.md', 'k2');
+    write('open.md', 'o2');
+    expect(mem.changedFor('T3-cloud')).toEqual([{ path: 'open.md', gone: false }]);
+    expect(mem.changedFor('T3-local', true)).toEqual([{ path: 'secret/keys.md', gone: false }, { path: 'open.md', gone: false }]);
+  });
+});
+
+// Throwing a result away is how it gets updated: the next asker runs it once,
+// and that answer is stored. A read of named files is thrown away only when one
+// of them changes, not whenever anything does.
+describe('a read of named files is kept until one of them changes', () => {
+  const write = (rel: string, text: string) => fs.writeFileSync(path.join(root, rel), text);
+
+  it('which commands read only the files they name', () => {
+    write('a.txt', 'a');
+    write('b.txt', 'b');
+    fs.mkdirSync(path.join(root, 'dir'));
+    const files = (command: string) => readsOf(command, root)?.map((f) => path.relative(root, f));
+    expect(files('cat a.txt')).toEqual(['a.txt']);
+    expect(files('head -n 5 a.txt')).toEqual(['a.txt']);
+    expect(files('wc -l a.txt b.txt')).toEqual(['a.txt', 'b.txt']);
+    expect(files('diff a.txt b.txt')).toEqual(['a.txt', 'b.txt']);
+    expect(files('Get-Content a.txt')).toEqual(['a.txt']);
+    // What is in a folder, or more than one command, or a file not there: not this rule.
+    expect(files('ls')).toBeUndefined();
+    expect(files('cat dir')).toBeUndefined();
+    expect(files('cat *.txt')).toBeUndefined();
+    expect(files('cat a.txt | wc -l')).toBeUndefined();
+    expect(files('cat a.txt && cat b.txt')).toBeUndefined();
+    expect(files('cat missing.txt')).toBeUndefined();
+    expect(files('rg foo a.txt')).toBeUndefined();
+    expect(files('Get-Content -Tail 5 a.txt')).toBeUndefined();
+  });
+
+  it('still answered after other changes and past the minute; not once the file changes', () => {
+    write('a.txt', 'alpha');
+    const mem = new RunMemory(root);
+    run(mem, 'shell', { command: 'cat a.txt' }, 'alpha', 'T3-a');
+    // Another worker writes something else; a minute and more goes by.
+    run(mem, 'file_write', { path: 'other.txt' }, 'written', 'T3-b');
+    noteWorkspaceChange(root, path.join(root, 'other.txt'));
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + MAX_ANSWER_AGE_MS + 5_000);
+    try {
+      expect(mem.reuse('shell', { command: 'cat a.txt' })).toEqual({ output: 'alpha', by: 'T3-a' });
+      // A folder listing is still thrown away by the same changes.
+      run(mem, 'shell', { command: 'ls' }, 'a.txt', 'T3-a');
+      run(mem, 'file_write', { path: 'third.txt' }, 'written', 'T3-b');
+      expect(mem.reuse('shell', { command: 'ls' })).toBeNull();
+    } finally { clock.mockRestore(); }
+    // The file itself changes (by anyone, inside Cascade or out): run again.
+    write('a.txt', 'alpha, edited');
+    expect(mem.reuse('shell', { command: 'cat a.txt' })).toBeNull();
+  });
+
+  it('not stored if the file changed while it ran, nor answered while a change is under way', () => {
+    write('a.txt', 'alpha');
+    const mem = new RunMemory(root);
+    const ticket = mem.begin('shell', { command: 'cat a.txt' });
+    write('a.txt', 'alpha, edited meanwhile');
+    mem.observe('shell', { command: 'cat a.txt' }, 'alpha', 'T3-a', ticket, ok);
+    expect(mem.reuse('shell', { command: 'cat a.txt' })).toBeNull();
+
+    run(mem, 'shell', { command: 'cat a.txt' }, 'alpha, edited meanwhile', 'T3-a');
+    const writing = mem.begin('file_write', { path: 'other.txt' });
+    expect(mem.reuse('shell', { command: 'cat a.txt' })).toBeNull();
+    mem.observe('file_write', { path: 'other.txt' }, 'written', 'T3-b', writing, ok);
+    expect(mem.reuse('shell', { command: 'cat a.txt' })).not.toBeNull();
+  });
+});
+
+describe('Codex on a0cb796', () => {
+  const write = (rel: string, text: string) => fs.writeFileSync(path.join(root, rel), text);
+
+  it('not an option that makes the answer about more than the file (stat -f, tail -f)', () => {
+    write('a.txt', 'a');
+    const files = (command: string) => readsOf(command, root)?.map((f) => path.relative(root, f));
+    expect(files('stat -f a.txt')).toBeUndefined();
+    expect(files('stat -Lf a.txt')).toBeUndefined();
+    expect(files('stat --file-system a.txt')).toBeUndefined();
+    expect(files('tail -f a.txt')).toBeUndefined();
+    expect(files('tail --follow a.txt')).toBeUndefined();
+    expect(files('cat - a.txt')).toBeUndefined();
+    // Control.
+    expect(files('cat -n a.txt')).toEqual(['a.txt']);
+    expect(files('tail --lines=3 a.txt')).toEqual(['a.txt']);
+  });
+
+  it('not quoting or escapes, which change which file the shell reads', () => {
+    write('a', '1');
+    write('b', '2');
+    write('a b', '3');
+    const files = (command: string) => readsOf(command, root)?.map((f) => path.relative(root, f));
+    expect(files('cat "a b"')).toBeUndefined();
+    expect(files("cat 'a b'")).toBeUndefined();
+    if (process.platform !== 'win32') expect(files('cat a\\ b')).toBeUndefined();
+    expect(files('cat $HOME/a')).toBeUndefined();
+    expect(files('cat < a')).toBeUndefined();
+    expect(files('cat a b')).toEqual(['a', 'b']);
+  });
+
+  it('a file changed while the command read it: the worker is told, as it holds the old copy', () => {
+    write('a.txt', 'alpha');
+    const mem = new RunMemory(root);
+    const ticket = mem.begin('shell', { command: 'cat a.txt' });
+    write('a.txt', 'alpha, edited meanwhile');
+    mem.observe('shell', { command: 'cat a.txt' }, 'alpha', 'T3-a', ticket, ok);
+    expect(mem.changedFor('T3-a')).toEqual([{ path: 'a.txt', gone: false }]);
+  });
+
+  it('a worker given a stored read is told when that file changes', () => {
+    write('a.txt', 'alpha');
+    const mem = new RunMemory(root);
+    run(mem, 'shell', { command: 'cat a.txt' }, 'alpha', 'T3-a');
+    expect(mem.reuse('shell', { command: 'cat a.txt' }, 'T3-b')).toEqual({ output: 'alpha', by: 'T3-a' });
+    write('a.txt', 'alpha, edited');
+    expect(mem.changedFor('T3-b')).toEqual([{ path: 'a.txt', gone: false }]);
+  });
+});
+
+describe('Codex on 6f99570', () => {
+  const write = (rel: string, text: string) => fs.writeFileSync(path.join(root, rel), text);
+
+  it('not an option that reads other files named inside one (file -f, file -m, diff -X), nor one not known to be safe', () => {
+    write('names.txt', 'a.txt\n');
+    write('a.txt', 'a');
+    write('b.txt', 'b');
+    const files = (command: string) => readsOf(command, root)?.map((f) => path.relative(root, f));
+    expect(files('file -f names.txt')).toBeUndefined();
+    expect(files('file -m names.txt a.txt')).toBeUndefined();
+    expect(files('diff -X names.txt a.txt b.txt')).toBeUndefined();
+    expect(files('cat -Z a.txt')).toBeUndefined();
+    expect(files('cat -c a.txt')).toBeUndefined();
+    // Control: options that only change how the named files are shown.
+    expect(files('file -b a.txt')).toEqual(['a.txt']);
+    expect(files('cat -n a.txt')).toEqual(['a.txt']);
+    expect(files('diff -u a.txt b.txt')).toEqual(['a.txt', 'b.txt']);
+    expect(files('head -20 a.txt')).toEqual(['a.txt']);
+    // A count is the next word for head and tail only: wc reads both files here.
+    expect(files('wc -c a.txt b.txt')).toEqual(['a.txt', 'b.txt']);
+    expect(files('head -n 1 a.txt')).toEqual(['a.txt']);
+  });
+
+  it("a local-only worker's shell read is tracked for it, though nothing goes on the board", () => {
+    write('a.txt', 'alpha');
+    const mem = new RunMemory(root);
+    run(mem, 'shell', { command: 'cat a.txt' }, 'alpha', 'T3-private', { failed: false, publish: false });
+    expect(mem.reuse('shell', { command: 'cat a.txt' })).toBeNull();
+    write('a.txt', 'alpha, edited');
+    expect(mem.changedFor('T3-private', true)).toEqual([{ path: 'a.txt', gone: false }]);
+  });
+});
+
+describe('Codex on 87abb45', () => {
+  const write = (rel: string, text: string) => fs.writeFileSync(path.join(root, rel), text);
+  const files = (command: string) => readsOf(command, root)?.map((f) => path.relative(root, f));
+
+  it('not stat: it prints the access time, which reading the file changes', () => {
+    write('a.txt', 'a');
+    expect(files('stat a.txt')).toBeUndefined();
+    expect(files('stat -L a.txt')).toBeUndefined();
+  });
+
+  it('not a symbolic link, whose own metadata a snapshot of its target cannot see', () => {
+    write('a.txt', 'a');
+    fs.symlinkSync('a.txt', path.join(root, 'link'));
+    expect(files('file link')).toBeUndefined();
+    expect(files('cat link')).toBeUndefined();
+    expect(files('cat a.txt')).toEqual(['a.txt']);
+  });
+
+  it('type reads a file only on Windows; in a POSIX shell it looks a command up', () => {
+    write('reviewtool', 'x');
+    expect(files('type reviewtool')).toEqual(process.platform === 'win32' ? ['reviewtool'] : undefined);
+  });
+});
+
+describe('Codex on 9d49e32', () => {
+  const write = (rel: string, text: string) => { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), text); };
+
+  it('not a relative cwd, which the shell takes against its own folder, not the project', () => {
+    write('src/a.txt', 'a');
+    const mem = new RunMemory(root);
+    run(mem, 'shell', { command: 'cat a.txt', cwd: 'src' }, 'a', 'T3-a');
+    // Kept only by the bounded rule: a change anywhere clears it.
+    run(mem, 'file_write', { path: 'other.txt' }, 'written', 'T3-b');
+    expect(mem.reuse('shell', { command: 'cat a.txt', cwd: 'src' })).toBeNull();
+    // Control: an absolute cwd is where the shell runs too.
+    run(mem, 'shell', { command: 'cat a.txt', cwd: path.join(root, 'src') }, 'a', 'T3-a');
+    run(mem, 'file_write', { path: 'third.txt' }, 'written', 'T3-b');
+    expect(mem.reuse('shell', { command: 'cat a.txt', cwd: path.join(root, 'src') })).not.toBeNull();
+  });
+
+  it('only files in the project: not /proc and the like, whose contents change unseen', () => {
+    write('a.txt', 'a');
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-outside-'));
+    try {
+      fs.writeFileSync(path.join(outside, 'meminfo'), 'x');
+      expect(readsOf(`cat ${path.join(outside, 'meminfo')}`, root, root)).toBeNull();
+      expect(readsOf('cat ../x', root, root)).toBeNull();
+      expect(readsOf('cat a.txt', root, root)).toEqual([path.join(root, 'a.txt')]);
+      if (fs.existsSync('/proc/meminfo')) expect(readsOf('cat /proc/meminfo', root, root)).toBeNull();
+    } finally { fs.rmSync(outside, { recursive: true, force: true }); }
+  });
+});
+
+describe('Codex on 27f8481', () => {
+  it('a second read before the worker is told does not hide the change', () => {
+    fs.writeFileSync(path.join(root, 'a.txt'), 'v1');
+    const mem = new RunMemory(root);
+    const abs = path.join(root, 'a.txt');
+    mem.noteRead('T3-a', abs);
+    fs.writeFileSync(path.join(root, 'a.txt'), 'v2, longer');
+    // A search hit on the file, say, before the next model call.
+    mem.noteRead('T3-a', abs);
+    expect(mem.changedFor('T3-a')).toEqual([{ path: 'a.txt', gone: false }]);
+    expect(mem.changedFor('T3-a')).toEqual([]);
+  });
+});
+
+describe('Codex on 3e1e80c', () => {
+  it('a partial edit of a file changed under the worker leaves that change to be told', () => {
+    const abs = path.join(root, 'a.txt');
+    fs.writeFileSync(abs, 'line one\nline two\n');
+    const mem = new RunMemory(root);
+    mem.noteRead('T3-a', abs);
+    // Another worker changes line two; then T3-a edits line one.
+    fs.writeFileSync(abs, 'line one\nline two, changed by b\n');
+    const wasCurrent = mem.heldCurrent('T3-a', abs);
+    expect(wasCurrent).toBe(false);
+    fs.writeFileSync(abs, 'line ONE\nline two, changed by b\n');
+    mem.noteWritten('T3-a', abs, wasCurrent);
+    expect(mem.changedFor('T3-a')).toEqual([{ path: 'a.txt', gone: false }]);
+    // Control: an edit of a file it held current is no news.
+    expect(mem.heldCurrent('T3-a', abs)).toBe(true);
+    fs.writeFileSync(abs, 'line ONE!\nline two, changed by b\n');
+    mem.noteWritten('T3-a', abs, true);
+    expect(mem.changedFor('T3-a')).toEqual([]);
+  });
+
+  it('a file first noted after a call that began before its last change is held as out of date', () => {
+    const abs = path.join(root, 'a.txt');
+    fs.writeFileSync(abs, 'v2');
+    const mem = new RunMemory(root);
+    // The search began before the file's last change, and noted it once done.
+    mem.noteRead('T3-a', abs, undefined, Date.now() - 60_000);
+    expect(mem.changedFor('T3-a')).toEqual([{ path: 'a.txt', gone: false }]);
+    expect(mem.changedFor('T3-a')).toEqual([]);
+    // Control: a call that began after the file's last change.
+    mem.noteRead('T3-b', abs, undefined, Date.now() + 60_000);
+    expect(mem.changedFor('T3-b')).toEqual([]);
+  });
+});
+
+describe('facts checked against the machine', () => {
+  let saved: string | undefined;
+  beforeEach(() => { saved = process.env['PATH']; });
+  afterEach(() => { process.env['PATH'] = saved; vi.restoreAllMocks(); });
+  /** A program named `name` on the search path, as installing it would put it there. */
+  const install = (name: string) => {
+    const bin = path.join(root, 'bin');
+    fs.mkdirSync(bin, { recursive: true });
+    const file = path.join(bin, process.platform === 'win32' ? `${name}.cmd` : name);
+    fs.writeFileSync(file, process.platform === 'win32' ? '@echo off\r\n' : '#!/bin/sh\n');
+    fs.chmodSync(file, 0o755);
+    process.env['PATH'] = `${bin}${path.delimiter}${saved ?? ''}`;
+  };
+  const later = (ms: number) => { const t = Date.now() + ms; vi.spyOn(Date, 'now').mockReturnValue(t); };
+
+  it('a command installed since, by a way the board never saw, is taken back', () => {
+    const mem = new RunMemory(root);
+    run(mem, 'shell', { command: 'cascadetool --x' }, 'Exit 127:\nbash: cascadetool: command not found', 'T3-a', bad);
+    expect(mem.unseenBy('T3-b').map((f) => f.key)).toEqual(['missing:cascadetool']);
+    install('cascadetool');
+    later(3_000);
+    // Both workers working from it are told, the finder and the one shown it.
+    expect(mem.unseenBy('T3-a').map((f) => f.key)).toEqual(['retracted:missing:cascadetool']);
+    const told = mem.unseenBy('T3-b');
+    expect(told.map((f) => f.key)).toEqual(['retracted:missing:cascadetool']);
+    expect(mem.all()).toEqual([]);
+  });
+
+  it('a repository made since is taken back', () => {
+    const mem = new RunMemory(root);
+    run(mem, 'shell', { command: 'git status' }, NOT_A_REPO, 'T3-a', bad);
+    expect(mem.known().map((f) => f.key)).toEqual(['git-repo:the project folder']);
+    fs.mkdirSync(path.join(root, '.git'));
+    later(3_000);
+    expect(mem.known()).toEqual([]);
+  });
+
+  it("where the check disagreed from the start, it can't tell, and the fact stands", () => {
+    // The shell's search path isn't this process's: `ls` is here, the shell said it wasn't.
+    install('cascadels');
+    const mem = new RunMemory(root);
+    run(mem, 'shell', { command: 'cascadels' }, 'Exit 127:\nbash: cascadels: command not found', 'T3-a', bad);
+    later(3_000);
+    expect(mem.known().map((f) => f.key)).toEqual(['missing:cascadels']);
+  });
+
+  it('one kept by an earlier run and installed since is dropped as the next run starts, from the project too', () => {
+    const db = new WorldStateDB(root);
+    try {
+      db.upsertFact('environment', 'command cascadejq', 'not available', 'run:T3-old', undefined, []);
+      expect(new RunMemory(root, db).all().map((f) => f.key)).toEqual(['missing:cascadejq']);
+      install('cascadejq');
+      expect(new RunMemory(root, db).all()).toEqual([]);
+      expect(db.getFactsForEntities(['environment'])).toEqual([]);
+    } finally { db.close(); }
+  });
+});
+
+describe('the planners (T1, T2) are told what workers found', () => {
+  it('checked and privacy-filtered, without counting as shown to any worker', async () => {
+    const { PrivacyPaths } = await import('../privacy/paths.js');
+    const rules = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }, { pattern: 'secret', policy: 'local-only' }]);
+    const mem = new RunMemory(root, undefined, () => true, () => rules);
+    run(mem, 'shell', { command: 'git status' }, NOT_A_REPO, 'T3-a', bad);
+    run(mem, 'shell', { command: 'cd secret && git status' }, NOT_A_REPO, 'T3-a', bad);
+    run(mem, 'git', { operation: 'status', cwd: 'secret' }, NOT_A_REPO, 'T3-a', bad);
+    const known = mem.known();
+    expect(known.map((f) => f.key)).toEqual(['git-repo:the project folder']);
+    expect(formatPlannerFacts(known)).toMatch(/^KNOWN ABOUT THIS MACHINE[^\n]*\n- The project folder is not a git repository/);
+    // A worker is still told: the planner seeing it marked nothing.
+    expect(mem.unseenBy('T3-b').map((f) => f.key)).toEqual(['git-repo:the project folder']);
   });
 });

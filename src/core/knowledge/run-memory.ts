@@ -53,6 +53,8 @@ const ENTITY = 'environment';
 const MAX_FACTS = 60;
 const MAX_RESULTS = 200;
 const MAX_RESULT_CHARS = 20_000;
+/** Files tracked per worker for "changed since you read it". */
+const MAX_TRACKED_READS = 300;
 /**
  * How long a stored answer is given again. Runs mark their own changes, and the
  * desktop editor marks its saves, but an edit made in another editor or a
@@ -396,6 +398,122 @@ export function noteWorkspaceChange(root: string, changed: string): void {
   workspaceChangeMarker(root).bump();
 }
 
+/** What a file was when last looked at: equal snapshots mean it hasn't been written since. */
+interface Snapshot { mtimeMs: number; ctimeMs: number; size: number; ino: number }
+function snapshot(abs: string): Snapshot | null {
+  try {
+    const st = fs.statSync(abs);
+    return st.isFile() ? { mtimeMs: st.mtimeMs, ctimeMs: st.ctimeMs, size: st.size, ino: st.ino } : null;
+  } catch { return null; }
+}
+const sameSnapshot = (a: Snapshot | null, b: Snapshot | null): boolean =>
+  !!a && !!b && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs && a.size === b.size && a.ino === b.ino;
+
+/** Whether `abs`, or a folder above it, holds a `.git`: git would find a repository there. */
+function insideGitRepo(abs: string): boolean {
+  let dir = path.resolve(abs);
+  for (;;) {
+    if (fs.existsSync(path.join(dir, '.git'))) return true;
+    const up = path.dirname(dir);
+    if (up === dir) return false;
+    dir = up;
+  }
+}
+
+/** Whether a program of this name is on this process's search path (with Windows' extensions). */
+function onSearchPath(name: string): boolean {
+  const dirs = (process.env['PATH'] ?? '').split(path.delimiter).filter(Boolean);
+  const exts = process.platform === 'win32' ? ['', ...(process.env['PATHEXT'] ?? '.EXE;.CMD;.BAT;.COM').split(';')] : [''];
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      const candidate = path.join(dir, name + ext);
+      try {
+        const st = fs.statSync(candidate);
+        if (!st.isFile()) continue;
+        if (process.platform !== 'win32') fs.accessSync(candidate, fs.constants.X_OK);
+        return true;
+      } catch { /* not here */ }
+    }
+  }
+  return false;
+}
+
+/**
+ * Commands whose answer is the content of the files named and nothing else, so it
+ * stays right until one of those files changes (see readsOf).
+ */
+const FILE_READERS = new Set(['cat', 'head', 'tail', 'wc', 'file', 'cmp', 'diff', 'get-content', 'gc',
+  // `type` reads a file in cmd; in a POSIX shell it looks a command up on PATH.
+  ...(process.platform === 'win32' ? ['type'] : [])]);
+// Not `stat`: it prints the access time, which any read changes, and a link's own
+// metadata; neither is in a snapshot (Codex on 87abb45).
+/** Options of head/tail that take a value as the next word. */
+const VALUE_OPTIONS = /^(-n|-c|--lines|--bytes)$/;
+/**
+ * The short options taken, per command: only ones that change how the named
+ * files are shown, not which files are read or what else is reported. Left out
+ * on purpose, among others: (stat is not taken at all, see FILE_READERS)
+ * `tail -f` (follows), `file -f`/`-m` and `diff -X` (read other files named
+ * inside), and anything that takes a value. Any other option, and every long
+ * one but the value options above, means the command isn't taken.
+ */
+const SHORT_OPTIONS: Record<string, RegExp> = {
+  cat: /^-[AbeEnstTuv]+$/,
+  head: /^-(\d+|[qv]+)$/,
+  tail: /^-(\d+|[qv]+)$/,
+  wc: /^-[clmwL]+$/,
+  file: /^-[bhiLkNz]+$/,
+  cmp: /^-[bls]+$/,
+  diff: /^-[abBdEiNpqstTuwy]+$/,
+};
+
+/**
+ * The files a read-only shell command reads, when its answer depends on them
+ * alone: one command (no pipe or `&&`), a FILE_READERS command, and every other
+ * word an option or an existing file (no folders, no globs). Null otherwise:
+ * `ls`, `rg`, `find` and the like depend on what is in a folder, not on files
+ * that can be named, and keep the coarser rule.
+ */
+export function readsOf(command: string, cwd: string, within?: string): string[] | null {
+  if (/&&|\|\||;|\||&|\n|[*?[\]]/.test(command)) return null;
+  // Quoting, escapes, expansions and redirects change which words the shell
+  // sees; rather than track the wrong files, none of these are taken. (A
+  // backslash is Windows' path separator there, not an escape.)
+  if (/['"`$~<>(){}]/.test(command) || (process.platform !== 'win32' && command.includes('\\'))) return null;
+  const words = command.trim().split(/\s+/).filter(Boolean);
+  const cmd = words[0]?.toLowerCase();
+  if (!cmd || !FILE_READERS.has(cmd)) return null;
+  const files: string[] = [];
+  for (let i = 1; i < words.length; i++) {
+    const w = words[i]!;
+    if (w.startsWith('-')) {
+      // PowerShell parameters take values in ways not worth guessing at; `-` alone reads stdin.
+      if (cmd === 'get-content' || cmd === 'gc' || w === '-') return null;
+      const counts = cmd === 'head' || cmd === 'tail';
+      // Only head and tail take a count as the next word: `wc -c a b` reads both.
+      if (counts && VALUE_OPTIONS.test(w)) { i++; continue; }
+      if (w.startsWith('--')) {
+        if (counts && /^--(lines|bytes)=/.test(w)) continue;
+        return null;
+      }
+      if (!SHORT_OPTIONS[cmd]?.test(w)) return null;
+      continue;
+    }
+    const abs = path.resolve(cwd, w);
+    // Only the project's own files: /proc, /sys and the like look like regular
+    // files whose contents change with no change to what a snapshot sees.
+    if (within) {
+      const rel = path.relative(within, abs);
+      if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return null;
+    }
+    if (!snapshot(abs)) return null;
+    // A link: `file link` describes the link, which a snapshot (of its target) can't see change.
+    try { if (fs.lstatSync(abs).isSymbolicLink()) return null; } catch { return null; }
+    files.push(abs);
+  }
+  return files.length ? files : null;
+}
+
 /** What `observe` needs to know about how the call went. */
 export interface Observed {
   /** The call failed: it threw, or the command exited non-zero. */
@@ -413,9 +531,26 @@ export class RunMemory {
   private seen = new Map<string, Set<string>>();
   /** Per worker: facts it was shown that have since stopped being true, to tell it. */
   private retractions = new Map<string, RunFact[]>();
-  private results = new Map<string, { output: string; by: string; epoch: number; mark: string; at: number }>();
-  /** Calls begun and not yet observed: the epoch and workspace mark each started at. */
-  private started = new Map<number, { epoch: number; mark: string; leave?: () => void }>();
+  /**
+   * Stored answers. One with `reads` depends on those files alone and stays right
+   * until one of them changes, whatever else runs; any other is kept only while
+   * nothing at all changes (epoch, mark, MAX_ANSWER_AGE_MS).
+   */
+  private results = new Map<string, { output: string; by: string; epoch: number; mark: string; at: number; reads?: Array<[string, Snapshot]> }>();
+  /** Calls begun and not yet observed: the epoch and workspace mark each started at, and the files a read reads. */
+  private started = new Map<number, { epoch: number; mark: string; leave?: () => void; reads?: Array<[string, Snapshot | null]> }>();
+  /** Per worker: the files it has read into its prompt, as they were when it last read them or was told of a change. */
+  private readsBy = new Map<string, Map<string, Snapshot>>();
+  /**
+   * Per fact: whether the cheap check (stillTrue) is trusted to drop it. One found
+   * in this run is checked only if the check agreed with it then; where it
+   * disagreed from the start (the shell's search path differs from this
+   * process's, git stops at a filesystem boundary) it can't tell, and the fact
+   * stands until a command shows otherwise. One kept by an earlier run is always
+   * checked (see the constructor).
+   */
+  private checkable = new Map<string, boolean>();
+  private checkedAt = 0;
   private nextTicket = 1;
   /** Bumped by every call that may change anything: a stored answer from before it is stale. */
   private epoch = 0;
@@ -455,6 +590,36 @@ export class RunMemory {
       if (key.startsWith('git-repo:') && this.folderPrivate(key.slice('git-repo:'.length), rules)) continue;
       const text = folder !== null ? repoText(folder) : missingText(command!);
       this.facts.set(key, { key, text, from: 'an earlier run', relation: f.relation, sources: f.sources ?? null });
+      // Checked whatever the check says now: what it said when the fact was found
+      // isn't kept, and a fact that tells workers to stop using a command is never
+      // disproved by them. Where the shell sees things differently, the cost is one
+      // failed call in this run to find it again.
+      this.checkable.set(key, true);
+    }
+    // One that no longer holds (you installed it, or ran git init, since) is dropped now.
+    this.checkFacts(true);
+  }
+
+  /** The cheap check of a fact against this machine: still true? */
+  private stillTrue(key: string): boolean {
+    if (key.startsWith('git-repo:')) {
+      const folder = key.slice('git-repo:'.length);
+      return !insideGitRepo(path.resolve(this.root, folder === 'the project folder' ? '.' : folder));
+    }
+    if (key.startsWith('missing:')) return !onSearchPath(key.slice('missing:'.length));
+    return true;
+  }
+
+  /**
+   * Drop the facts this machine no longer bears out: a repository made since, a
+   * command installed since (by you, another run, or a worker by a way the board
+   * didn't see). Workers already told get the correction. At most every 2s.
+   */
+  private checkFacts(now = false): void {
+    if (!now && Date.now() - this.checkedAt < 2_000) return;
+    this.checkedAt = Date.now();
+    for (const key of [...this.facts.keys()]) {
+      if (this.checkable.get(key) && !this.stillTrue(key)) this.forget(key);
     }
   }
 
@@ -491,11 +656,20 @@ export class RunMemory {
    * The answer this read-only call gave earlier in the run, when nothing has
    * changed since: the call needn't run again. Null otherwise.
    */
-  reuse(tool: string, input: Record<string, unknown>): { output: string; by: string } | null {
+  reuse(tool: string, input: Record<string, unknown>, to?: string): { output: string; by: string } | null {
     const key = this.reusable(tool, input);
     const hit = key ? this.results.get(key) : undefined;
-    return hit && hit.epoch === this.epoch && this.changing === 0 && Date.now() - hit.at <= MAX_ANSWER_AGE_MS
-      && hit.mark === this.changes.current() && !this.changes.busy() ? { output: hit.output, by: hit.by } : null;
+    if (!hit || this.changing !== 0 || this.changes.busy()) return null;
+    // Depends on named files: right as long as they are as they were, however long
+    // ago and whatever else has run (an edit outside Cascade changes them too).
+    if (hit.reads) {
+      if (!hit.reads.every(([abs, was]) => sameSnapshot(was, snapshot(abs)))) return null;
+      // The worker given it now holds those files as they were: told if they change.
+      if (to) for (const [abs, was] of hit.reads) this.noteRead(to, abs, was);
+      return { output: hit.output, by: hit.by };
+    }
+    return hit.epoch === this.epoch && Date.now() - hit.at <= MAX_ANSWER_AGE_MS && hit.mark === this.changes.current()
+      ? { output: hit.output, by: hit.by } : null;
   }
 
   /**
@@ -507,7 +681,13 @@ export class RunMemory {
     let leave: (() => void) | undefined;
     if (!callReadsOnly(tool, input)) { this.changing += 1; leave = this.changes.enter(); this.changes.bump(); }
     const ticket = this.nextTicket++;
-    this.started.set(ticket, { epoch: this.epoch, mark: this.changes.current(), leave });
+    // Only where the shell runs in the folder the board thinks it does: with no
+    // cwd (the project) or an absolute one. A relative cwd is taken by the shell
+    // as given, against the process's own folder, not the project's.
+    const rawCwd = input['cwd'];
+    const sameDir = rawCwd === undefined || (typeof rawCwd === 'string' && path.isAbsolute(rawCwd));
+    const files = tool === 'shell' && sameDir && this.reusable(tool, input) ? readsOf(String(input['command'] ?? ''), this.cwd(input), this.root) : null;
+    this.started.set(ticket, { epoch: this.epoch, mark: this.changes.current(), leave, ...(files ? { reads: files.map((f) => [f, snapshot(f)] as [string, Snapshot | null]) } : {}) });
     return ticket;
   }
 
@@ -521,6 +701,11 @@ export class RunMemory {
     // Something that may change things, and finished (or failed part way): anything
     // stored before it is stale, here and in every other run in this workspace.
     if (!callReadsOnly(tool, input)) { this.epoch += 1; this.changing = Math.max(0, this.changing - 1); this.changes.bump(); started?.leave?.(); }
+    // The files a read read are files this worker now has in its prompt, as they
+    // were when it started (a change while it ran is one it didn't see). Before
+    // the gate below: a local-only worker is told of changes too, though what it
+    // found and got stays off the board.
+    for (const [abs, was] of started?.reads ?? []) this.noteRead(by, abs, was ?? undefined);
     if (!how.publish) return;
     const where = this.cwd(input);
     const { learnt, unlearnt } = factsFrom(tool, input, output, this.label(where), how.failed);
@@ -533,15 +718,27 @@ export class RunMemory {
       if (this.facts.size >= MAX_FACTS && !this.facts.has(f.key)) break;
       const isNew = !this.facts.has(f.key);
       this.facts.set(f.key, { key: f.key, text: f.text, from: by, relation: f.relation });
+      this.checkable.set(f.key, this.stillTrue(f.key));
       // Who found it has seen it.
       this.seenBy(by).add(f.key);
       if (isNew && this.keep()) this.persist(() => this.db?.upsertFact(ENTITY, f.relation, f.value, `run:${by}`, undefined, []));
     }
     const key = this.reusable(tool, input);
-    // Kept only if nothing changed while it ran, by this run or any other.
-    if (key && !how.failed && started && started.epoch === this.epoch && started.mark === this.changes.current() && !this.changes.busy() && output.length <= MAX_RESULT_CHARS) {
+    if (!key || how.failed || !started || this.changes.busy() || output.length > MAX_RESULT_CHARS) return;
+    let stored: { output: string; by: string; epoch: number; mark: string; at: number; reads?: Array<[string, Snapshot]> } | null = null;
+    if (started.reads) {
+      // Kept only if its files didn't change while it ran.
+      const now = started.reads.map(([abs, was]) => [abs, snapshot(abs), was] as const);
+      if (now.every(([, cur, was]) => sameSnapshot(was, cur))) {
+        stored = { output, by, epoch: this.epoch, mark: started.mark, at: Date.now(), reads: now.map(([abs, cur]) => [abs, cur!]) };
+      }
+    } else if (started.epoch === this.epoch && started.mark === this.changes.current()) {
+      // Kept only if nothing changed while it ran, by this run or any other.
+      stored = { output, by, epoch: this.epoch, mark: started.mark, at: Date.now() };
+    }
+    if (stored) {
       if (this.results.size >= MAX_RESULTS) this.results.delete(this.results.keys().next().value!);
-      this.results.set(key, { output, by, epoch: this.epoch, mark: started.mark, at: Date.now() });
+      this.results.set(key, stored);
     }
   }
 
@@ -581,6 +778,7 @@ export class RunMemory {
     const fact = this.facts.get(key);
     if (!fact) return;
     this.facts.delete(key);
+    this.checkable.delete(key);
     // A worker that was shown it is working from it: told it no longer holds,
     // before its next model call, and shown it afresh should it come back.
     for (const [worker, seen] of this.seen) {
@@ -603,6 +801,7 @@ export class RunMemory {
    * facts it was shown that have stopped being true.
    */
   unseenBy(worker: string): RunFact[] {
+    this.checkFacts();
     const seen = this.seenBy(worker);
     // The privacy rules as they are now, not as they were when the board began: a
     // file a local-only subtask has written since is local-only now, and so is a
@@ -622,10 +821,98 @@ export class RunMemory {
     return !(f.key.startsWith('git-repo:') && this.folderPrivate(f.key.slice('git-repo:'.length), rules));
   }
 
+  /**
+   * The facts as they stand, for the planners (T1, T2): checked against this
+   * machine and the privacy rules now, marking nothing shown.
+   */
+  known(): RunFact[] {
+    this.checkFacts();
+    const rules = this.privacy();
+    return [...this.facts.values()].filter((f) => this.mayShow(f, rules)).map(({ key, text, from }) => ({ key, text, from }));
+  }
+
+  /**
+   * `worker` has read this file into its prompt: it is told if the file changes.
+   * `as` is the file as it was read, when that was earlier than now.
+   */
+  noteRead(worker: string, abs: string, as?: Snapshot, since?: number): void {
+    let snap = as ?? snapshot(abs);
+    if (!snap) return;
+    // Noted after the tool read it (grep notes its hits once the search is done):
+    // one changed since the call began may have been read before that change.
+    // Held as already out of date, so the worker is told; at worst once needlessly.
+    if (!as && since !== undefined && Math.max(snap.mtimeMs, snap.ctimeMs) >= since) snap = { ...snap, mtimeMs: -1 };
+    let reads = this.readsBy.get(worker);
+    if (!reads) { reads = new Map(); this.readsBy.set(worker, reads); }
+    // One already held is kept, not replaced: a change since it was taken hasn't
+    // been told yet, and a partial read (a search hit) now doesn't make the rest
+    // of what the worker holds current. changedFor moves it on once told; a full
+    // re-read before then costs one note it didn't need.
+    const held = reads.get(abs);
+    reads.delete(abs);
+    reads.set(abs, held ?? snap);
+    // The most recent MAX_TRACKED_READS: one read long ago is likely gone from its context too.
+    if (reads.size > MAX_TRACKED_READS) reads.delete(reads.keys().next().value!);
+  }
+
+  /** Whether what `worker` holds of this file is what it holds now (true if it holds nothing of it). */
+  heldCurrent(worker: string, abs: string): boolean {
+    const held = this.readsBy.get(worker)?.get(abs);
+    return !held || sameSnapshot(held, snapshot(abs));
+  }
+
+  /**
+   * `worker` wrote this file itself (file_write, file_edit): no news to it.
+   * `wasCurrent`: what it held of the file was current just before (heldCurrent);
+   * a partial edit of a file changed under it leaves that change to be told.
+   */
+  noteWritten(worker: string, abs: string, wasCurrent = true): void {
+    const reads = this.readsBy.get(worker);
+    if (!reads?.has(abs)) return;
+    // A partial edit of a file someone else had changed since the worker read it:
+    // the edit shows it only the lines it replaced, so that change is still news.
+    if (!wasCurrent) return;
+    const snap = snapshot(abs);
+    if (snap) reads.set(abs, snap);
+    else reads.delete(abs);
+  }
+
+  /**
+   * The files `worker` read that have changed since (or are gone), by anyone: another
+   * worker, another run, the desktop editor, or an edit outside Cascade. Each change
+   * is told once. Paths are relative to the project; a file under privacy.paths is
+   * left out unless `privately` (a local-only worker, on a private model).
+   */
+  changedFor(worker: string, privately = false): Array<{ path: string; gone: boolean }> {
+    const reads = this.readsBy.get(worker);
+    if (!reads?.size) return [];
+    const rules = privately ? undefined : this.privacy();
+    const out: Array<{ path: string; gone: boolean }> = [];
+    for (const [abs, was] of [...reads]) {
+      const now = snapshot(abs);
+      if (sameSnapshot(was, now)) continue;
+      if (now) reads.set(abs, now); else reads.delete(abs);
+      const rel = path.relative(this.root, abs).split(path.sep).join('/');
+      if (rules?.hasPolicies() && rules.coversFile(abs, this.root)) continue;
+      out.push({ path: rel || abs, gone: !now });
+    }
+    return out;
+  }
+
   /** Every fact on the board (for tests and readouts). */
   all(): RunFact[] {
     return [...this.facts.values()].map(({ key, text, from }) => ({ key, text, from }));
   }
+}
+
+/** How a worker is told that files it read have changed, before its next model call. */
+export function formatChangedFiles(files: Array<{ path: string; gone: boolean }>): string {
+  return `FILES CHANGED SINCE YOU READ THEM (by another worker, a command, or an edit outside Cascade). What you read of these is out of date: read them again before relying on them or editing them:\n${files.map((f) => `- ${f.path}${f.gone ? ' (deleted)' : ''}`).join('\n')}`;
+}
+
+/** How a planner (T1, T2) is told what workers found, so it doesn't plan around it. */
+export function formatPlannerFacts(facts: RunFact[]): string {
+  return `KNOWN ABOUT THIS MACHINE (found by workers in this or earlier runs of this project): plan with these in mind, and pass any that matter on to the workers:\n${facts.map((f) => `- ${f.text}`).join('\n')}`;
 }
 
 /** How a worker is told what the others found, before its next model call. */

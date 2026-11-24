@@ -5,6 +5,36 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.99.1 - 2026-11-24
+
+### Fixed
+- **A worker is told when a file it read has changed.** A worker that read
+  a file kept working from that copy after another worker, a command, or an
+  edit outside Cascade changed it. Now, before its next model call, it is
+  given the list of files it read that have changed or been deleted since,
+  and told to read them again. Its own edits don't count. A file under a
+  `privacy.paths` local-only rule is named only to a worker on a private
+  model. Only paths are given, never contents.
+- **A read of named files is reused until one of them changes.** Any change
+  in the project used to clear every stored answer. Now `cat`, `head`,
+  `tail`, `wc`, `file`, `cmp`, `diff` and `Get-Content` (and `type` on
+  Windows) on files named outright keep their answer until one of those
+  files changes, however long ago the command ran and whatever else has run
+  since. A file edited outside Cascade counts as a change too. This applies
+  to a single command with plain file names inside the project and
+  display-only options: no globs, quoting, symbolic links, or options that
+  read other files. Folder
+  listings, searches and `stat` keep the stricter rule.
+- **Facts are checked against the machine.** "Not a git repository" and
+  "command not available" are dropped once they stop being true, even when
+  no worker ran anything to show it: for example, you ran `git init` or
+  installed the tool. Workers that were told the fact are told it no longer
+  holds. A fact kept by an earlier run is checked as the next run starts.
+- **The planners are told what workers found.** T1's plan and T2's subtasks
+  now take facts about this machine into account, so the plan and the
+  workers' briefs don't ask for what can't be done here. The facts are
+  filtered by the privacy rules first.
+
 ## 0.99.0 - 2026-11-20
 
 ### Added
