@@ -579,6 +579,22 @@ describe('the machine tells each worker which files it read have changed', () =>
     expect(await a('file_list', { path: '.' })).not.toMatch(NOTE);
   });
 
+  it("its partial edit of a file someone else changed since it read it still brings the note", async () => {
+    const w = await world();
+    const dir = folder();
+    fs.writeFileSync(path.join(dir, 'notes.md'), 'one\ntwo\n');
+    await machine(w, dir, { answer: { tools: ['file_read', 'file_edit', 'file_list'], label: 'p' }, ask: async () => true, checkpoints: { begin: async () => ({ n: 1 }), end: async () => undefined } });
+    const { ws } = await runWorkspace(w);
+    const a = as(ws, 'worker-a');
+    await a('file_read', { path: 'notes.md' });
+    fs.writeFileSync(path.join(dir, 'notes.md'), 'one\ntwo, changed by the user\n');
+    expect((await a('file_edit', { path: 'notes.md', old_string: 'one', new_string: 'ONE' })).match(NOTE)?.[1]).toBe('notes.md');
+    // Reported once; its own edit of a current copy brings nothing.
+    expect(await a('file_list', { path: '.' })).not.toMatch(NOTE);
+    await a('file_read', { path: 'notes.md' });
+    expect(await a('file_edit', { path: 'notes.md', old_string: 'ONE', new_string: 'One' })).not.toMatch(NOTE);
+  });
+
   it('a listing or a search naming a file it read is no change of its own: a later edit still reaches it', async () => {
     const w = await world();
     const dir = folder();
