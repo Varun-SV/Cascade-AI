@@ -4,11 +4,14 @@ import { type OnMount } from '@monaco-editor/react';
 import { Code2, FileCode, FolderOpen, Search, X, MessageSquare } from 'lucide-react';
 import { FileTree } from '../components/FileTree.js';
 import { MonacoEditor } from '../components/MonacoEditor.js';
+import { FilePreview } from '../components/FilePreview.js';
+import { fileKind, type FileKind } from '../lib/file-kind.js';
 import { ChatPanel } from '../components/ChatPanel.js';
 import { HelpButton } from '../help/HelpButton.js';
 import { useAppSelector, useAppDispatch, setWorkspacePath, toggleCodeChat } from '../store/index.js';
 
-interface OpenFile { path: string; content: string; saved: string; language: string }
+// Non-text files (kind !== 'text') keep content === saved === '': never dirty, never saved.
+interface OpenFile { path: string; content: string; saved: string; language: string; kind: FileKind; mime: string | null; size: number }
 interface SearchHit { file: string; line: number; text: string }
 
 function detectLanguage(filename: string): string {
@@ -66,8 +69,11 @@ export function CodeView({ socket }: { socket: Socket | null }) {
     const existing = openFiles.findIndex((f) => f.path === filePath);
     if (existing >= 0) { setActiveIdx(existing); return; }
     try {
-      const content = await window.cascade.fs.readFile(filePath);
-      const file: OpenFile = { path: filePath, content, saved: content, language: detectLanguage(baseName(filePath)) };
+      const info = await window.cascade.fs.fileInfo(filePath);
+      const { kind, mime } = fileKind(baseName(filePath), info.head);
+      // Only text ever reaches the editor; everything else is previewed or shown as a placeholder.
+      const content = kind === 'text' ? await window.cascade.fs.readFile(filePath) : '';
+      const file: OpenFile = { path: filePath, content, saved: content, language: detectLanguage(baseName(filePath)), kind, mime, size: info.size };
       setOpenFiles((prev) => { setActiveIdx(prev.length); return [...prev, file]; });
     } catch { /* unreadable — ignore */ }
   };
@@ -87,7 +93,7 @@ export function CodeView({ socket }: { socket: Socket | null }) {
 
   const saveActive = async () => {
     const f = openFiles[activeIdx];
-    if (!f || !window.cascade || f.content === f.saved) return;
+    if (!f || f.kind !== 'text' || !window.cascade || f.content === f.saved) return;
     await window.cascade.fs.writeFile(f.path, f.content);
     setOpenFiles((prev) => prev.map((x, i) => (i === activeIdx ? { ...x, saved: x.content } : x)));
   };
@@ -236,7 +242,9 @@ export function CodeView({ socket }: { socket: Socket | null }) {
             </div>
           )}
           <div style={{ flex: 1, overflow: 'hidden' }}>
-            {active ? (
+            {active && active.kind !== 'text' ? (
+              <FilePreview key={active.path} path={active.path} kind={active.kind} mime={active.mime} size={active.size} />
+            ) : active ? (
               <MonacoEditor
                 path={active.path}
                 value={active.content}

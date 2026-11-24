@@ -400,6 +400,40 @@ function registerIPC(): void {
     const { readFile } = require('node:fs/promises');
     return readFile(filePath, 'utf8');
   });
+  // File previews. Same access as fs:readFile (any path the renderer names).
+  // The classifier lives in the renderer (app/src/lib/file-kind.ts; the main
+  // process build cannot import from app/src), so fileInfo returns the first
+  // bytes for it to sniff.
+  ipcMain.handle('fs:fileInfo', async (_e, filePath: string) => {
+    const { open, stat } = require('node:fs/promises');
+    const size: number = (await stat(filePath)).size;
+    const fh = await open(filePath, 'r');
+    try {
+      const buf = Buffer.alloc(Math.min(size, 8192));
+      const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+      return { size, head: new Uint8Array(buf.subarray(0, bytesRead)) };
+    } finally { await fh.close(); }
+  });
+  // Per-kind size caps for in-app previews (data URLs are held in memory twice).
+  ipcMain.handle('fs:readFileDataUrl', async (_e, filePath: string, mime: string) => {
+    const { readFile, stat } = require('node:fs/promises');
+    if (!/^(image|audio|video)\/[\w.+-]+$|^application\/pdf$/.test(mime)) return { ok: false, error: 'unsupported type' };
+    const limit = (mime.startsWith('video/') ? 100 : 50) * 1024 * 1024;
+    const size: number = (await stat(filePath)).size;
+    if (size > limit) return { ok: false, error: 'too-large', limit };
+    const data: Buffer = await readFile(filePath);
+    return { ok: true, url: `data:${mime};base64,${data.toString('base64')}` };
+  });
+  ipcMain.handle('fs:openPath', async (_e, filePath: string) => {
+    const { shell } = require('electron');
+    const error: string = await shell.openPath(filePath);
+    return error ? { ok: false, error } : { ok: true };
+  });
+  ipcMain.handle('fs:showInFolder', (_e, filePath: string) => {
+    const { shell } = require('electron');
+    shell.showItemInFolder(filePath);
+    return { ok: true };
+  });
   // The editor's own changes to the workspace: a run in progress must not answer
   // from what it read before them (knowledge/run-memory.ts).
   const noteChanged = (...paths: string[]): void => {
@@ -869,6 +903,7 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false, // node-pty in preload needs this off
+      plugins: true, // Chromium's built-in PDF viewer (file previews in the Code view)
     },
   });
 
