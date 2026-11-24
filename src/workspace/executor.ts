@@ -145,7 +145,10 @@ export function createWorkspaceExecutor(opts: WorkspaceExecutorOptions): Workspa
         reads.set(worker, mine);
       }
       const now = stat(given);
-      if (now) {
+      // A read of part of a file (offset, limit) shows only that part: a file already
+      // held keeps what it was held at, so a change elsewhere in it is still reported.
+      const partial = (typeof input['offset'] === 'number' && input['offset'] > 1) || typeof input['limit'] === 'number';
+      if (now && !(partial && mine.has(given))) {
         mine.delete(given);
         mine.set(given, now);
         if (mine.size > MAX_TRACKED_FILES) mine.delete(mine.keys().next().value as string);
