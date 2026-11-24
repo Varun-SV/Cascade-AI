@@ -1946,7 +1946,9 @@ ${assignment.expectedOutput}`;
         const out = await this.toolRegistry.execute('file_read', { path: artifactPath }, {
           tierId: this.id, sessionId: this.taskId, requireApproval: false, ...(this.signal ? { signal: this.signal } : {}),
         });
-        if (!out.trim()) issues.push(`Artifact is empty: ${artifactPath}`);
+        // file_read numbers every line (`1\t…`): an empty file still comes back as "1\t".
+        const text = out.split('\n').map((line) => line.replace(/^\d+\t/, '')).join('\n');
+        if (!text.trim()) issues.push(`Artifact is empty: ${artifactPath}`);
       } catch {
         issues.push(`Expected artifact not found in the workspace: ${artifactPath}`);
       }

@@ -88,6 +88,8 @@ interface Session {
   /** Ends the session: the run connection closes and every call in flight is cancelled. */
   end(reason: string): void;
   stopped: boolean;
+  /** Resolves once the session is fully over: calls drained, checkpoint closed. */
+  done: Promise<void>;
 }
 
 export function connectWorkspaceDevice(opts: WorkspaceDeviceOptions): WorkspaceDeviceClient {
@@ -216,7 +218,12 @@ export function connectWorkspaceDevice(opts: WorkspaceDeviceOptions): WorkspaceD
     if (session) { decline(nonce, 'the workspace is already serving a run'); return; }
     if (stoppedRuns.has(grant.payload.runId)) { decline(nonce, 'the run was stopped on this machine'); return; }
     const run: WorkspaceRunInfo = { userId: grant.payload.userId, runId: grant.payload.runId, expiresAt: grant.payload.exp };
-    const s: Session = { nonce, run, withdrawn: new AbortController(), stopped: false, end: (reason) => { s.withdrawn.abort(new Error(reason)); } };
+    let over!: () => void;
+    const s: Session = {
+      nonce, run, withdrawn: new AbortController(), stopped: false,
+      end: (reason) => { s.withdrawn.abort(new Error(reason)); },
+      done: new Promise<void>((r) => { over = r; }),
+    };
     session = s;
     let executor: WorkspaceExecutor | null = null;
     try {
@@ -253,6 +260,7 @@ export function connectWorkspaceDevice(opts: WorkspaceDeviceOptions): WorkspaceD
     } finally {
       await executor?.finish().catch(() => undefined);
       if (session === s) { session = null; opts.onServing?.(null); }
+      over();
     }
   };
 
@@ -279,8 +287,11 @@ export function connectWorkspaceDevice(opts: WorkspaceDeviceOptions): WorkspaceD
     const why = closing ? 'closed' : rejectedByServer ? 'the server does not accept this device'
       : serverRestarting ? 'the server is restarting' : 'the connection to the server dropped';
     notWelcomed(new Error(why));
-    session?.end(why);
-    finished(why);
+    // Closed only once the session is over (calls drained, checkpoint closed): a
+    // reconnect must not serve another run in the same folder before then.
+    const s = session;
+    s?.end(why);
+    void (s ? s.done : Promise.resolve()).then(() => finished(why));
   });
   control.on('error', () => { /* 'close' follows */ });
 

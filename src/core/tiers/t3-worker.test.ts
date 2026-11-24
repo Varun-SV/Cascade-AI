@@ -2412,6 +2412,33 @@ describe('workers share what they find (run-memory.ts)', () => {
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  // Codex on b12fe3d: file_read numbers every line, so an empty file reads as "1\t".
+  it('an empty file written on another machine is caught as empty', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-share-'));
+    try {
+      const prompts: string[] = [];
+      const queue = [makeResult('', [{ id: 'w', name: 'file_write', input: { path: 'report.md', content: '' } }], 'tool_use'), makeResult('Report written.')];
+      const router = {
+        generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }> }) => {
+          for (const m of options.messages) if (typeof m.content === 'string') prompts.push(m.content);
+          return queue.shift() ?? makeResult('Report written.');
+        }),
+        getModelForTier: () => undefined,
+      } as unknown as CascadeRouter;
+      const registry = makeToolRegistry({
+        getToolDefinitions: () => [
+          { name: 'file_write', description: 'Write a file', inputSchema: {} },
+          { name: 'file_read', description: 'Read a file', inputSchema: {} },
+        ],
+        getTool: () => ({ remote: true }),
+        getWorkspaceRoot: () => root,
+        execute: vi.fn(async (name: string) => (name === 'file_read' ? '1\t' : 'Wrote report.md')),
+      } as unknown as Partial<ToolRegistry>);
+      await new T3Worker(router, registry, 't2-e').execute(makeAssignment({ subtaskId: 's-e', files: ['report.md'] }), 'task-art').catch(() => undefined);
+      expect(prompts.some((p) => p.includes('Artifact is empty: report.md'))).toBe(true);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   // Codex on 3e1e80c: file_edit shows only the lines it replaced.
   it('its partial edit of a file someone else changed since it read it still brings the note', async () => {
     const { RunMemory } = await import('../knowledge/run-memory.js');

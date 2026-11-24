@@ -417,6 +417,37 @@ describe('Codex on 9225441', () => {
   });
 });
 
+describe('Codex on b12fe3d', () => {
+  it('a dropped connection reports closed only once the session is over, so a reconnect can\'t start another run first', async () => {
+    const w = await world();
+    const id = w.register('user-1', 'dev-1');
+    const events: string[] = [];
+    let release!: () => void;
+    const client = connectWorkspaceDevice({
+      controlUrl: `${w.base}/control`, runUrl: `${w.base}/run`, device: id, serverId: w.server.id, serverKey: w.server.publicKey,
+      askUser: async () => ({ tools: ['file_write'], label: 'p' }),
+      open: async () => ({
+        definitions: () => [{ name: 'file_write', description: 'Write a file', inputSchema: {} }],
+        run: () => new Promise((resolve) => { release = () => { events.push('write landed'); resolve({ ok: true, output: 'ok' }); }; }),
+        finish: async () => { events.push('checkpoint closed'); },
+      }),
+    });
+    closers.push(() => client.close());
+    await client.ready;
+    await vi.waitFor(() => expect(w.hub.deviceOnline('user-1', 'dev-1')).toBe(true));
+    const { tool } = await runWorkspace(w);
+    void tool('file_write')({ path: 'a', content: 'b' }).catch(() => undefined);
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    let closed = false;
+    void client.closed.then(() => { closed = true; events.push('client closed'); });
+    w.hub.dropDevice('dev-1', 'the connection dropped');
+    await new Promise((r) => setTimeout(r, 100));
+    expect(closed).toBe(false);
+    release();
+    await vi.waitFor(() => expect(events).toEqual(['write landed', 'checkpoint closed', 'client closed']));
+  });
+});
+
 describe('a workspace approval is its own: never a browser one, nor the reverse', () => {
   it('signs under its own domains', () => {
     const server = createIdentity('server');
