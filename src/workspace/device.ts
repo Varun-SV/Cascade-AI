@@ -145,16 +145,19 @@ export function connectWorkspaceDevice(opts: WorkspaceDeviceOptions): WorkspaceD
     });
 
   /** Serves the run's calls on its connection until it ends. */
-  const serve = (s: Session, socket: WebSocket, held: string[], executor: WorkspaceExecutor, label: string): Promise<void> =>
+  const serve = (s: Session, socket: WebSocket, held: string[], executor: WorkspaceExecutor, label: string, exp: number): Promise<void> =>
     new Promise((resolve) => {
       const inFlight = new Map<string, AbortController>();
       /** Every call still running, cancelled or not: the checkpoint closes after them. */
       const running = new Set<Promise<unknown>>();
       const send = (frame: DeviceRunFrame): void => { if (socket.readyState === OPEN) socket.send(JSON.stringify(frame)); };
       let over = false;
+      let sessionClosed!: () => void;
+      const closedSession = new Promise<void>((r) => { sessionClosed = r; });
       const end = (reason: string): void => {
         if (over) return;
         over = true;
+        sessionClosed();
         for (const c of inFlight.values()) c.abort(new Error(reason));
         inFlight.clear();
         try { socket.close(1000, reason.slice(0, 100)); } catch { /* already closing */ }
@@ -168,6 +171,10 @@ export function connectWorkspaceDevice(opts: WorkspaceDeviceOptions): WorkspaceD
         ]).then(() => { clearTimeout(timer); return executor.finish(); }).finally(() => resolve());
       };
       s.end = end;
+      // The approval this machine signed ends the session when it does, whatever the
+      // server's grant says: the machine enforces its own record of what was agreed.
+      const expiry = setTimeout(() => end('the approval for this run expired'), Math.max(0, exp - now()));
+      void closedSession.then(() => clearTimeout(expiry));
       const onFrame = (raw: string): void => {
         if (over) return;
         const f = readServerFrame(raw);
@@ -232,8 +239,10 @@ export function connectWorkspaceDevice(opts: WorkspaceDeviceOptions): WorkspaceD
       const claimed = await claimOverRun(grant, approval);
       if ('refused' in claimed) { log(`no workspace session: ${claimed.refused}`); return; }
       if (s.withdrawn.signal.aborted) { claimed.socket.close(); return; }
+      // Expired while the claim was being decided: nothing is served under it.
+      if (now() >= admitted.exp) { claimed.socket.close(); log('no workspace session: the approval expired before it was claimed'); return; }
       opts.onServing?.({ ...run, label: consent.label });
-      const served = serve(s, claimed.socket, claimed.held, executor, consent.label);
+      const served = serve(s, claimed.socket, claimed.held, executor, consent.label, admitted.exp);
       executor = null; // serve finishes it
       // Withdrawn while serving: the session ends.
       s.withdrawn.signal.addEventListener('abort', () => s.end('the request was withdrawn'), { once: true });

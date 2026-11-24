@@ -122,67 +122,81 @@ export function createWorkspaceExecutor(opts: WorkspaceExecutorOptions): Workspa
     return !(privacy?.hasPolicies() && privacy.coversFile(absPath, root));
   };
 
-  return {
+  const api: Pick<WorkspaceExecutor, 'definitions' | 'run'> = {
     definitions: () => opts.registry.getToolDefinitions().filter((t) => allowed.has(t.name as never)),
 
-    async run(tool, input, { signal, waiting }) {
-      if (finished) return { ok: false, error: 'The workspace session is over.' };
-      if (!allowed.has(tool as never)) return { ok: false, error: `${tool} is not allowed on this machine for this run.` };
-      if (signal.aborted) return { ok: false, error: `${tool} was not run: the run withdrew it.` };
-      const privacy = opts.privacy?.();
-      // Commands see the folder through the jail: it hides local-only paths only when
-      // told them, and only when there is a jail. With none, nothing would keep a
-      // local-only file from a command whose output goes to a cloud model.
-      opts.registry.setPrivacyPaths?.(privacy);
-      if (PROCESS_TOOLS.has(tool) && privacy?.hasPolicies() && (opts.registry.processJailMode?.() ?? 'off') === 'off') {
-        return { ok: false, error: `${tool} is not run for a cloud run here: this folder has local-only files (privacy.paths), and with the process jail off nothing keeps them from a command.` };
-      }
-      let risk: Risk;
-      try { risk = assessRisk(tool, input, root); } catch { risk = { level: 'risky', category: 'unclassified', reason: `${tool} could not be checked` }; }
-      if (risk.level !== 'safe') {
-        const cp = await firstChange();
-        // Undoable only with a checkpoint: without one, a change asks as a risky one does.
-        let undoable = !!cp;
-        if (risk.level === 'recoverable' && !cp) {
-          risk = { ...risk, reason: `${risk.reason.replace(/ \(checkpointed\)$/, '')}, and no checkpoint of the folder could be taken to undo it` };
-        } else if (risk.level === 'recoverable' && risk.writes?.length && opts.checkpoints?.covers) {
-          // A file the checkpoint leaves out (one the project's .gitignore excludes,
-          // say) can't be put back by /undo, checkpoint or no.
-          const covered = await opts.checkpoints.covers(risk.writes).catch(() => false);
-          if (!covered) {
-            undoable = false;
-            risk = { ...risk, reason: `${risk.reason.replace(/ \(checkpointed\)$/, '')}, a file the checkpoint doesn't record, so undo couldn't put it back` };
-          }
-        }
-        if (risk.level === 'risky' || !undoable) {
-          waiting?.();
-          // Withdrawn while the question is open: the call ends now, whatever the question does.
-          const withdrawn = new Promise<false>((resolve) => {
-            if (signal.aborted) resolve(false); else signal.addEventListener('abort', () => resolve(false), { once: true });
-          });
-          let yes = false;
-          try { yes = await Promise.race([opts.ask({ tool, input, risk, signal }), withdrawn]); } catch { yes = false; }
-          if (signal.aborted) return { ok: false, error: `${tool} was not run: the run withdrew it.` };
-          if (!yes) {
-            log(`declined ${tool}: ${risk.reason}`);
-            return { ok: false, error: scrub(`Declined on the machine: ${tool} ${risk.reason}.`) };
-          }
-        }
-      }
+    async run(tool, input, call) {
+      // Never rejects: whatever fails (an unreadable privacy record, say) is a refused call.
       try {
-        const out = await opts.registry.execute(tool, input, {
-          tierId: 'workspace', sessionId: 'workspace', requireApproval: false, signal,
-          // Shown to a cloud model, whatever the destination asked about.
-          mayRead: (absPath) => mayRead(absPath),
-        });
-        return { ok: true, output: capResult(scrub(out)) };
+        return await runCall(tool, input, call);
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
-        log(`${tool} failed: ${message}`);
-        return { ok: false, error: scrub(message) };
+        log(`${tool} failed before it ran: ${message}`);
+        return { ok: false, error: scrub(`${tool} was not run: ${message}`) };
       }
     },
+  };
 
+  async function runCall(tool: string, input: Record<string, unknown>, { signal, waiting }: { signal: AbortSignal; waiting?: () => void }): Promise<CallOutcome> {
+    if (finished) return { ok: false, error: 'The workspace session is over.' };
+    if (!allowed.has(tool as never)) return { ok: false, error: `${tool} is not allowed on this machine for this run.` };
+    if (signal.aborted) return { ok: false, error: `${tool} was not run: the run withdrew it.` };
+    const privacy = opts.privacy?.();
+    // Commands see the folder through the jail: it hides local-only paths only when
+    // told them, and only when there is a jail. With none, nothing would keep a
+    // local-only file from a command whose output goes to a cloud model.
+    opts.registry.setPrivacyPaths?.(privacy);
+    if (PROCESS_TOOLS.has(tool) && privacy?.hasPolicies() && (opts.registry.processJailMode?.() ?? 'off') === 'off') {
+      return { ok: false, error: `${tool} is not run for a cloud run here: this folder has local-only files (privacy.paths), and with the process jail off nothing keeps them from a command.` };
+    }
+    let risk: Risk;
+    try { risk = assessRisk(tool, input, root); } catch { risk = { level: 'risky', category: 'unclassified', reason: `${tool} could not be checked` }; }
+    if (risk.level !== 'safe') {
+      const cp = await firstChange();
+      // Undoable only with a checkpoint: without one, a change asks as a risky one does.
+      let undoable = !!cp;
+      if (risk.level === 'recoverable' && !cp) {
+        risk = { ...risk, reason: `${risk.reason.replace(/ \(checkpointed\)$/, '')}, and no checkpoint of the folder could be taken to undo it` };
+      } else if (risk.level === 'recoverable' && risk.writes?.length && opts.checkpoints?.covers) {
+        // A file the checkpoint leaves out (one the project's .gitignore excludes,
+        // say) can't be put back by /undo, checkpoint or no.
+        const covered = await opts.checkpoints.covers(risk.writes).catch(() => false);
+        if (!covered) {
+          undoable = false;
+          risk = { ...risk, reason: `${risk.reason.replace(/ \(checkpointed\)$/, '')}, a file the checkpoint doesn't record, so undo couldn't put it back` };
+        }
+      }
+      if (risk.level === 'risky' || !undoable) {
+        waiting?.();
+        // Withdrawn while the question is open: the call ends now, whatever the question does.
+        const withdrawn = new Promise<false>((resolve) => {
+          if (signal.aborted) resolve(false); else signal.addEventListener('abort', () => resolve(false), { once: true });
+        });
+        let yes = false;
+        try { yes = await Promise.race([opts.ask({ tool, input, risk, signal }), withdrawn]); } catch { yes = false; }
+        if (signal.aborted) return { ok: false, error: `${tool} was not run: the run withdrew it.` };
+        if (!yes) {
+          log(`declined ${tool}: ${risk.reason}`);
+          return { ok: false, error: scrub(`Declined on the machine: ${tool} ${risk.reason}.`) };
+        }
+      }
+    }
+    try {
+      const out = await opts.registry.execute(tool, input, {
+        tierId: 'workspace', sessionId: 'workspace', requireApproval: false, signal,
+        // Shown to a cloud model, whatever the destination asked about.
+        mayRead: (absPath) => mayRead(absPath),
+      });
+      return { ok: true, output: capResult(scrub(out)) };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      log(`${tool} failed: ${message}`);
+      return { ok: false, error: scrub(message) };
+    }
+  }
+
+  return {
+    ...api,
     async finish() {
       if (finished) return;
       finished = true;

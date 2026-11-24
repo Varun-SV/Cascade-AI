@@ -386,6 +386,37 @@ describe('Codex on 596e50e', () => {
   });
 });
 
+describe('Codex on 9225441', () => {
+  it('the session ends when the approval this machine signed does, whatever the grant says', async () => {
+    const w = await world();
+    const dir = folder();
+    const id = w.register('user-1', 'dev-1');
+    const client = connectWorkspaceDevice({
+      controlUrl: `${w.base}/control`, runUrl: `${w.base}/run`, device: id, serverId: w.server.id, serverKey: w.server.publicKey,
+      approvalTtlMs: 800,
+      askUser: async () => ({ tools: ['file_read'], label: 'p' }),
+      open: async (consent) => createWorkspaceExecutor({ registry: registryFor(dir), tools: consent.tools, ask: async () => false }),
+    });
+    closers.push(() => client.close());
+    await client.ready;
+    await vi.waitFor(() => expect(w.hub.deviceOnline('user-1', 'dev-1')).toBe(true));
+    const { ws, tool } = await runWorkspace(w);
+    expect(await tool('file_read')({ path: 'README.md' })).toContain('hello');
+    // The grant is good for thirty minutes; the approval for less than a second.
+    expect(await ws.closed).toMatch(/closed/);
+    await expect(tool('file_read')({ path: 'README.md' })).rejects.toThrow(/no longer available/);
+  });
+
+  it('an unreadable privacy record refuses the call instead of throwing', async () => {
+    const dir = folder();
+    const broken = { hasPolicies: () => { throw new Error('the privacy record is unreadable'); }, coversFile: () => true } as unknown as PrivacyPaths;
+    const ex = createWorkspaceExecutor({ registry: registryFor(dir), tools: ['shell'], ask: async () => true, privacy: () => broken });
+    const out = await ex.run('shell', { command: 'ls' }, { signal: new AbortController().signal });
+    expect(out.ok).toBe(false);
+    expect((out as { error: string }).error).toMatch(/shell was not run: the privacy record is unreadable/);
+  });
+});
+
 describe('a workspace approval is its own: never a browser one, nor the reverse', () => {
   it('signs under its own domains', () => {
     const server = createIdentity('server');

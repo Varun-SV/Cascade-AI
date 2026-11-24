@@ -2385,6 +2385,33 @@ describe('workers share what they find (run-memory.ts)', () => {
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  // Codex on 9225441: a file written in a workspace on the user's machine isn't in this one's folder.
+  it('a promised file written on another machine is checked there, not in this folder', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-share-'));
+    try {
+      const calls: Array<[string, unknown]> = [];
+      const execute = vi.fn(async (name: string, input: Record<string, unknown>) => {
+        calls.push([name, input['path']]);
+        return name === 'file_read' ? '1\t# Report' : 'Wrote report.md';
+      });
+      const registry = makeToolRegistry({
+        getToolDefinitions: () => [
+          { name: 'file_write', description: 'Write a file', inputSchema: {} },
+          { name: 'file_read', description: 'Read a file', inputSchema: {} },
+        ],
+        getTool: () => ({ remote: true }),
+        getWorkspaceRoot: () => root,
+        execute,
+      } as unknown as Partial<ToolRegistry>);
+      const router = scripted([makeResult('', [{ id: 'w', name: 'file_write', input: { path: 'report.md', content: '# Report' } }], 'tool_use'), makeResult('Report written.')]);
+      const result = await new T3Worker(router, registry, 't2-a').execute(makeAssignment({ subtaskId: 's-a', files: ['report.md'] }), 'task-art');
+      expect(result.status).toBe('COMPLETED');
+      expect(calls).toContainEqual(['file_read', 'report.md']);
+      // Nothing was ever written here.
+      expect(fs.existsSync(path.join(root, 'report.md'))).toBe(false);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   // Codex on 3e1e80c: file_edit shows only the lines it replaced.
   it('its partial edit of a file someone else changed since it read it still brings the note', async () => {
     const { RunMemory } = await import('../knowledge/run-memory.js');

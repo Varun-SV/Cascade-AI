@@ -1925,8 +1925,33 @@ ${assignment.expectedOutput}`;
    * command may be writing one of these files, not yet marked.
    */
   private async verifyArtifacts(assignment: T2ToT3Assignment): Promise<{ ok: boolean; issues: string[] }> {
+    // Files written on another machine (a workspace the user serves: src/workspace/)
+    // are checked there, not in this machine's folder, where they never are.
+    if (this.tools.some((t) => ARTIFACT_TOOLS.has(t.name) && this.toolRegistry.getTool?.(t.name)?.remote)) {
+      return this.checkRemoteArtifacts(assignment);
+    }
     const check = () => this.checkArtifacts(assignment);
     return this.toolRegistry.whileShared ? this.toolRegistry.whileShared(check) : check();
+  }
+
+  /**
+   * The promised files, read through the workspace's own file_read: present and not
+   * empty. Without a remote file_read the run can't look, so nothing is claimed.
+   */
+  private async checkRemoteArtifacts(assignment: T2ToT3Assignment): Promise<{ ok: boolean; issues: string[] }> {
+    if (!this.toolRegistry.getTool?.('file_read')?.remote) return { ok: true, issues: [] };
+    const issues: string[] = [];
+    for (const artifactPath of this.extractArtifactPaths(assignment)) {
+      try {
+        const out = await this.toolRegistry.execute('file_read', { path: artifactPath }, {
+          tierId: this.id, sessionId: this.taskId, requireApproval: false, ...(this.signal ? { signal: this.signal } : {}),
+        });
+        if (!out.trim()) issues.push(`Artifact is empty: ${artifactPath}`);
+      } catch {
+        issues.push(`Expected artifact not found in the workspace: ${artifactPath}`);
+      }
+    }
+    return { ok: issues.length === 0, issues };
   }
 
   private async checkArtifacts(assignment: T2ToT3Assignment): Promise<{ ok: boolean; issues: string[] }> {
