@@ -16,7 +16,7 @@ import { PrivacyPaths } from '../core/privacy/paths.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { type WorkspaceConsent, type WorkspaceDeviceClient, connectWorkspaceDevice } from './device.js';
 import { type WorkspaceCheckpoints, type WorkspaceQuestion, createWorkspaceExecutor } from './executor.js';
-import { MAX_IN_FLIGHT, MAX_RESULT_CHARS, WORKSPACE_FAMILY, WORKSPACE_TOOLS, readDeviceFrame } from './protocol.js';
+import { MAX_CHANGED, MAX_IN_FLIGHT, MAX_RESULT_CHARS, WORKSPACE_FAMILY, WORKSPACE_TOOLS, readDeviceFrame, readServerFrame } from './protocol.js';
 import { openRemoteWorkspace } from './remote.js';
 
 const closers: (() => void | Promise<void>)[] = [];
@@ -89,7 +89,7 @@ async function machine(w: Awaited<ReturnType<typeof world>>, dir: string, setup:
       registry: registryFor(dir), tools: consent.tools,
       ask: async (q) => { questions.push(q); return setup.ask ? setup.ask(q) : false; },
       ...(setup.checkpoints ? { checkpoints: setup.checkpoints } : {}),
-      ...(setup.privacy ? { privacy: () => setup.privacy } : {}),
+      privacy: () => setup.privacy,
     }),
   });
   closers.push(() => client.close());
@@ -477,5 +477,100 @@ describe('a workspace approval is its own: never a browser one, nor the reverse'
       expect(asBrowser).toMatchObject({ outcome: 'refused' });
       expect(asWorkspace).toEqual({ outcome: 'claimed' });
     });
+  });
+});
+
+describe('the machine tells each worker which files it read have changed', () => {
+  /** A tool as a given worker (tier) calls it. */
+  const as = (ws: Awaited<ReturnType<typeof runWorkspace>>['ws'], worker: string) => (name: string, input: Record<string, unknown>) =>
+    ws.tools.find((t) => t.name === name)!.execute(input, { tierId: worker, sessionId: 's', requireApproval: false });
+  const NOTE = /Files in the workspace changed since you read them: (.*) — read them again before relying on them\./;
+
+  it('reports a file the worker read and something changed, on its next call, and only once', async () => {
+    const w = await world();
+    const dir = folder();
+    await machine(w, dir);
+    const { ws } = await runWorkspace(w);
+    const a = as(ws, 'worker-a');
+    expect(await a('file_read', { path: 'README.md' })).not.toMatch(NOTE);
+    expect(await a('file_list', { path: '.' })).not.toMatch(NOTE);
+    fs.writeFileSync(path.join(dir, 'README.md'), 'someone edited this on the machine\n');
+    const next = await a('file_list', { path: '.' });
+    expect(next.match(NOTE)?.[1]).toBe('README.md');
+    expect(await a('file_list', { path: '.' })).not.toMatch(NOTE);
+    // Gone is a change too, and reported once.
+    await a('file_read', { path: 'README.md' });
+    fs.rmSync(path.join(dir, 'README.md'));
+    expect((await a('file_list', { path: '.' })).match(NOTE)?.[1]).toBe('README.md');
+    expect(await a('file_list', { path: '.' })).not.toMatch(NOTE);
+  });
+
+  it("keeps each worker's reads to itself, and a worker's own write is no news to it", async () => {
+    const w = await world();
+    const dir = folder();
+    await machine(w, dir, { ask: async () => true, checkpoints: { begin: async () => ({ n: 1 }), end: async () => undefined } });
+    const { ws } = await runWorkspace(w);
+    const a = as(ws, 'worker-a');
+    const b = as(ws, 'worker-b');
+    await a('file_read', { path: 'README.md' });
+    fs.writeFileSync(path.join(dir, 'README.md'), 'changed by the user\n');
+    expect(await b('file_list', { path: '.' })).not.toMatch(NOTE);
+    expect(await a('file_list', { path: '.' })).toMatch(NOTE);
+    // A's own write of a file it read does not come back to it.
+    await a('file_read', { path: 'README.md' });
+    await a('file_write', { path: 'README.md', content: 'written by a, longer than before\n' });
+    expect(await a('file_list', { path: '.' })).not.toMatch(NOTE);
+  });
+
+  it('never names a local-only file, even one read before it became local-only', async () => {
+    const w = await world();
+    const dir = folder();
+    fs.mkdirSync(path.join(dir, 'secret'));
+    fs.writeFileSync(path.join(dir, 'secret', 'keys.txt'), 'sk-live-123');
+    const setup: DeviceSetup = {};
+    await machine(w, dir, setup);
+    const { ws } = await runWorkspace(w);
+    const a = as(ws, 'worker-a');
+    await a('file_read', { path: 'secret/keys.txt' });
+    setup.privacy = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }], { workspaceRoot: dir });
+    fs.writeFileSync(path.join(dir, 'secret', 'keys.txt'), 'sk-live-456-changed');
+    const out = await a('file_list', { path: '.' });
+    expect(out).not.toMatch(NOTE);
+    expect(out).not.toContain('Files in the workspace changed');
+    // A read the policy refuses is never recorded.
+    await expect(a('file_read', { path: 'secret/keys.txt' })).rejects.toThrow(/local-only/);
+    fs.writeFileSync(path.join(dir, 'secret', 'keys.txt'), 'again, different');
+    expect(await a('file_list', { path: '.' })).not.toMatch(NOTE);
+  });
+
+  it('sends only what a run may be shown: relative paths, capped in number and length', () => {
+    const many = Array.from({ length: MAX_CHANGED + 20 }, (_, i) => `src/f${i}.ts`);
+    const f = readDeviceFrame(JSON.stringify({ v: 1, t: 'result', id: 'c1', ok: true, output: 'x', changed: [...many, '/etc/passwd', '../x', 'C:\\x', 'a'.repeat(513), 'bad\nname', 7] }));
+    expect(f).toMatchObject({ t: 'result', ok: true });
+    const changed = (f as { changed: string[] }).changed;
+    expect(changed).toHaveLength(MAX_CHANGED);
+    expect(changed.every((p) => !p.startsWith('/') && !p.includes('..'))).toBe(true);
+    const odd = readDeviceFrame(JSON.stringify({ v: 1, t: 'result', id: 'c1', ok: true, output: 'x', changed: ['/etc/passwd', '..', 'a'.repeat(513)] }));
+    expect(odd).not.toHaveProperty('changed');
+    // The worker id is an id or the call is not one.
+    expect(readServerFrame(JSON.stringify({ v: 1, t: 'call', id: 'c1', tool: 'file_read', input: {}, worker: 'w-1' }))).toMatchObject({ worker: 'w-1' });
+    expect(readServerFrame(JSON.stringify({ v: 1, t: 'call', id: 'c1', tool: 'file_read', input: {}, worker: 'a'.repeat(65) }))).toBeNull();
+    expect(readServerFrame(JSON.stringify({ v: 1, t: 'call', id: 'c1', tool: 'file_read', input: {}, worker: '../x' }))).toBeNull();
+  });
+
+  it('caps the files it reports on the machine, and the note reaches the tool output', async () => {
+    const w = await world();
+    const dir = folder();
+    await machine(w, dir);
+    const { ws } = await runWorkspace(w);
+    const a = as(ws, 'worker-a');
+    const N = MAX_CHANGED + 10;
+    for (let i = 0; i < N; i++) { fs.writeFileSync(path.join(dir, `f${i}.txt`), 'one'); await a('file_read', { path: `f${i}.txt` }); }
+    for (let i = 0; i < N; i++) fs.writeFileSync(path.join(dir, `f${i}.txt`), 'changed, longer');
+    const out = await a('file_list', { path: '.' });
+    const listed = out.match(NOTE)![1]!.split(', ');
+    expect(listed).toHaveLength(MAX_CHANGED);
+    expect(listed.every((p) => /^f\d+\.txt$/.test(p))).toBe(true);
+    expect(out).not.toContain(dir);
   });
 });

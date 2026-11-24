@@ -67,6 +67,13 @@ const EnvSchema = z.object({
     .string()
     .optional()
     .transform((v) => v === '1' || v === 'true'),
+  // A folder on the user's own computer as a run's coding workspace, served by their
+  // desktop app (docs/design/workspace-env.md). Off unless the operator turns it on:
+  // with it off, none of its endpoints exist and a run can't ask for one.
+  WORKSPACE_RELAY: z
+    .string()
+    .optional()
+    .transform((v) => v === '1' || v === 'true'),
   // Hard per-run cost ceiling passed straight to Cascade's own budget guard
   // (src/core/router — maxCostPerRunUsd). A safety rail on the shared server
   // ahead of real per-plan entitlements (task #29).

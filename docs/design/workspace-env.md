@@ -1,6 +1,6 @@
 # Your own machine as a coding environment for cloud runs
 
-Status: design. Only the user's own machine is an environment: Cascade hosts
+Status: phases 1 and 2 (server) built; the desktop switch and the web picker are next. Only the user's own machine is an environment: Cascade hosts
 no cloud sandboxes (see "No cloud environments" at the end).
 
 ## What it is
@@ -112,6 +112,17 @@ the chosen folder, with everything a local run has:
    run, by the user, by anything else on the machine), so the worker is told
    before its next model call, as on a local run. Paths relative to the folder
    only, never contents, and never a local-only file's name.
+   *Built, server side:* `cloud/server/src/workspace-relay.ts`, behind
+   `WORKSPACE_RELAY` (off by default): a second hub on the browser relay's key and
+   `relay_devices` table, `/api/workspace-relay/control` and `/run` (desktop
+   devices only), `GET /api/workspace-relay/devices` (`{ id, name, online }`), and
+   a `workspaceDeviceId` run option. The run asks the device, waits for the claim,
+   and registers the machine's tools outside `enabledTools`
+   (`Cascade.addRemoteTools`); it tells the web app with `workspace:attached`,
+   `workspace:waiting` and `workspace:detached`. An offline or refusing device
+   fails the start with a reason. The change reports are built too: a `call`
+   carries the worker, the machine's `result` names changed files (relative,
+   at most 50), and the run's tool adds a note to the output.
 3. **Web app:** an environment picker beside the model picker, the run's changes
    as a file list and diffs, and approval prompts mirrored from the machine
    (answered on the machine).

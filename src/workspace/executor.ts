@@ -25,7 +25,11 @@ import path from 'node:path';
 import type { PrivacyPaths } from '../core/privacy/paths.js';
 import { assessRisk, type Risk } from '../core/permissions/risk.js';
 import type { ToolDefinition, ToolExecuteOptions } from '../types.js';
-import { capResult, isWorkspaceTool } from './protocol.js';
+import { MAX_CHANGED, MAX_CHANGED_PATH_CHARS, capResult, isWorkspaceTool } from './protocol.js';
+
+/** Files remembered per worker, and workers remembered: bounds on what the machine keeps. */
+const MAX_TRACKED_FILES = 500;
+const MAX_TRACKED_WORKERS = 64;
 
 /** What the executor needs of a tool registry: Cascade's ToolRegistry, rooted at the folder. */
 export interface WorkspaceRegistry {
@@ -71,13 +75,16 @@ export interface WorkspaceExecutorOptions {
   log?(line: string): void;
 }
 
-export type CallOutcome = { ok: true; output: string } | { ok: false; error: string };
+export type CallOutcome = { ok: true; output: string; changed?: string[] } | { ok: false; error: string };
 
 export interface WorkspaceExecutor {
   /** The allowed tools, with the schemas this machine's registry gives them. */
   definitions(): ToolDefinition[];
-  /** One call. `waiting` is called when it waits for the person's answer. */
-  run(tool: string, input: Record<string, unknown>, opts: { signal: AbortSignal; waiting?: () => void }): Promise<CallOutcome>;
+  /**
+   * One call. `waiting` is called when it waits for the person's answer. `worker` is
+   * who asks: the machine tells each worker which files it read have changed since.
+   */
+  run(tool: string, input: Record<string, unknown>, opts: { signal: AbortSignal; waiting?: () => void; worker?: string }): Promise<CallOutcome>;
   /** The session is over: the checkpoint is closed, so the run's changes can be undone. */
   finish(): Promise<void>;
 }
@@ -108,6 +115,56 @@ export function createWorkspaceExecutor(opts: WorkspaceExecutorOptions): Workspa
   /** Taken once, before the first change: the checkpoint, or null when none could be. */
   let checkpoint: Promise<{ n: number } | null> | null = null;
   let finished = false;
+  /** Per worker: the files it read here, as they were (mtime, size), by absolute path. */
+  const reads = new Map<string, Map<string, { mtimeMs: number; size: number }>>();
+
+  const stat = (abs: string): { mtimeMs: number; size: number } | null => {
+    try { const st = fs.statSync(abs); return st.isFile() ? { mtimeMs: st.mtimeMs, size: st.size } : null; } catch { return null; }
+  };
+  const inFolder = (abs: string): string | null => {
+    const rel = path.relative(root, abs);
+    return rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? rel.split(path.sep).join('/') : null;
+  };
+
+  /**
+   * After a successful call by `worker`: its own reads and writes are no news to it, and
+   * what else it read earlier is checked against the disk. Returns the folder-relative
+   * paths that changed since, once each. Never a local-only file's name, and never
+   * more than the protocol allows.
+   */
+  const trackReads = (worker: string, tool: string, input: Record<string, unknown>): string[] => {
+    let mine = reads.get(worker);
+    const given = typeof input['path'] === 'string' ? path.resolve(root, input['path']) : null;
+    if (given && tool === 'file_read' && inFolder(given) !== null && mayRead(given)) {
+      if (!mine) {
+        if (reads.size >= MAX_TRACKED_WORKERS) reads.delete(reads.keys().next().value as string);
+        mine = new Map();
+        reads.set(worker, mine);
+      }
+      const now = stat(given);
+      if (now) {
+        mine.delete(given);
+        mine.set(given, now);
+        if (mine.size > MAX_TRACKED_FILES) mine.delete(mine.keys().next().value as string);
+      }
+    } else if (given && mine?.has(given)) {
+      // Its own write or delete: it knows.
+      const now = tool === 'file_write' || tool === 'file_edit' ? stat(given) : null;
+      if (now) mine.set(given, now); else mine.delete(given);
+    }
+    if (!mine) return [];
+    const changed: string[] = [];
+    for (const [abs, was] of [...mine]) {
+      const now = stat(abs);
+      if (now && now.mtimeMs === was.mtimeMs && now.size === was.size) continue;
+      // Reported once: a file that is gone is forgotten, one that changed is held as it is now.
+      if (now) mine.set(abs, now); else mine.delete(abs);
+      const rel = inFolder(abs);
+      if (rel === null || rel.length > MAX_CHANGED_PATH_CHARS || !mayRead(abs)) continue;
+      if (changed.length < MAX_CHANGED) changed.push(rel);
+    }
+    return changed;
+  };
 
   const firstChange = (): Promise<{ n: number } | null> => {
     checkpoint ??= opts.checkpoints
@@ -128,7 +185,13 @@ export function createWorkspaceExecutor(opts: WorkspaceExecutorOptions): Workspa
     async run(tool, input, call) {
       // Never rejects: whatever fails (an unreadable privacy record, say) is a refused call.
       try {
-        return await runCall(tool, input, call);
+        const outcome = await runCall(tool, input, call);
+        if (!outcome.ok || !call.worker) return outcome;
+        // Best effort: a failure to look at the disk is no failure of the call.
+        try {
+          const changed = trackReads(call.worker, tool, input);
+          return changed.length ? { ...outcome, changed } : outcome;
+        } catch { return outcome; }
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         log(`${tool} failed before it ran: ${message}`);
@@ -137,7 +200,7 @@ export function createWorkspaceExecutor(opts: WorkspaceExecutorOptions): Workspa
     },
   };
 
-  async function runCall(tool: string, input: Record<string, unknown>, { signal, waiting }: { signal: AbortSignal; waiting?: () => void }): Promise<CallOutcome> {
+  async function runCall(tool: string, input: Record<string, unknown>, { signal, waiting }: { signal: AbortSignal; waiting?: () => void; worker?: string }): Promise<CallOutcome> {
     if (finished) return { ok: false, error: 'The workspace session is over.' };
     if (!allowed.has(tool as never)) return { ok: false, error: `${tool} is not allowed on this machine for this run.` };
     if (signal.aborted) return { ok: false, error: `${tool} was not run: the run withdrew it.` };

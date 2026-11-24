@@ -1129,6 +1129,24 @@ export class Cascade extends EventEmitter {
   }
 
   /**
+   * Give the run tools that run on another machine: a workspace the user serves
+   * from their own computer (src/workspace/remote.ts). Registered outside the
+   * `enabledTools` allowlist, like the browser: that list limits what THIS machine
+   * is asked to run, and these never run here. `disabledTools` still removes any of
+   * them. Returns the names registered.
+   */
+  addRemoteTools(tools: readonly import('../tools/base.js').BaseTool[]): string[] {
+    const disabled = this.config.tools?.disabledTools ?? [];
+    const names: string[] = [];
+    for (const tool of tools) {
+      if (!tool.remote || disabled.includes(tool.name)) continue;
+      this.toolRegistry.register(tool);
+      names.push(tool.name);
+    }
+    return names;
+  }
+
+  /**
    * Let the agent read the page the user has open in the host's browser.
    *
    * Host-supplied because only a host WITH a browser can answer it — so the
