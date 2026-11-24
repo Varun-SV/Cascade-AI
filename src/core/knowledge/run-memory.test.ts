@@ -688,7 +688,7 @@ describe('a read of named files is kept until one of them changes', () => {
     expect(files('cat a.txt')).toEqual(['a.txt']);
     expect(files('head -n 5 a.txt')).toEqual(['a.txt']);
     expect(files('wc -l a.txt b.txt')).toEqual(['a.txt', 'b.txt']);
-    expect(files('diff a.txt "b.txt"')).toEqual(['a.txt', 'b.txt']);
+    expect(files('diff a.txt b.txt')).toEqual(['a.txt', 'b.txt']);
     expect(files('Get-Content a.txt')).toEqual(['a.txt']);
     // What is in a folder, or more than one command, or a file not there: not this rule.
     expect(files('ls')).toBeUndefined();
@@ -735,6 +735,55 @@ describe('a read of named files is kept until one of them changes', () => {
     expect(mem.reuse('shell', { command: 'cat a.txt' })).toBeNull();
     mem.observe('file_write', { path: 'other.txt' }, 'written', 'T3-b', writing, ok);
     expect(mem.reuse('shell', { command: 'cat a.txt' })).not.toBeNull();
+  });
+});
+
+describe('Codex on a0cb796', () => {
+  const write = (rel: string, text: string) => fs.writeFileSync(path.join(root, rel), text);
+
+  it('not an option that makes the answer about more than the file (stat -f, tail -f)', () => {
+    write('a.txt', 'a');
+    const files = (command: string) => readsOf(command, root)?.map((f) => path.relative(root, f));
+    expect(files('stat -f a.txt')).toBeUndefined();
+    expect(files('stat -Lf a.txt')).toBeUndefined();
+    expect(files('stat --file-system a.txt')).toBeUndefined();
+    expect(files('tail -f a.txt')).toBeUndefined();
+    expect(files('tail --follow a.txt')).toBeUndefined();
+    expect(files('cat - a.txt')).toBeUndefined();
+    // Control.
+    expect(files('stat -L a.txt')).toEqual(['a.txt']);
+    expect(files('tail --lines=3 a.txt')).toEqual(['a.txt']);
+  });
+
+  it('not quoting or escapes, which change which file the shell reads', () => {
+    write('a', '1');
+    write('b', '2');
+    write('a b', '3');
+    const files = (command: string) => readsOf(command, root)?.map((f) => path.relative(root, f));
+    expect(files('cat "a b"')).toBeUndefined();
+    expect(files("cat 'a b'")).toBeUndefined();
+    if (process.platform !== 'win32') expect(files('cat a\\ b')).toBeUndefined();
+    expect(files('cat $HOME/a')).toBeUndefined();
+    expect(files('cat < a')).toBeUndefined();
+    expect(files('cat a b')).toEqual(['a', 'b']);
+  });
+
+  it('a file changed while the command read it: the worker is told, as it holds the old copy', () => {
+    write('a.txt', 'alpha');
+    const mem = new RunMemory(root);
+    const ticket = mem.begin('shell', { command: 'cat a.txt' });
+    write('a.txt', 'alpha, edited meanwhile');
+    mem.observe('shell', { command: 'cat a.txt' }, 'alpha', 'T3-a', ticket, ok);
+    expect(mem.changedFor('T3-a')).toEqual([{ path: 'a.txt', gone: false }]);
+  });
+
+  it('a worker given a stored read is told when that file changes', () => {
+    write('a.txt', 'alpha');
+    const mem = new RunMemory(root);
+    run(mem, 'shell', { command: 'cat a.txt' }, 'alpha', 'T3-a');
+    expect(mem.reuse('shell', { command: 'cat a.txt' }, 'T3-b')).toEqual({ output: 'alpha', by: 'T3-a' });
+    write('a.txt', 'alpha, edited');
+    expect(mem.changedFor('T3-b')).toEqual([{ path: 'a.txt', gone: false }]);
   });
 });
 

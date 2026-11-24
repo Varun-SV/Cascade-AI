@@ -445,6 +445,13 @@ function onSearchPath(name: string): boolean {
 const FILE_READERS = new Set(['cat', 'type', 'head', 'tail', 'wc', 'stat', 'file', 'cmp', 'diff', 'get-content', 'gc']);
 /** Options of head/tail that take a value as the next word. */
 const VALUE_OPTIONS = /^(-n|-c|--lines|--bytes)$/;
+/**
+ * Options that make the answer depend on more than the named files: `stat -f`
+ * reports the whole filesystem (free blocks change with any write), `tail -f`
+ * follows the file instead of reading it. A long option is accepted only for
+ * the value options above.
+ */
+const WIDER_OPTIONS: Record<string, RegExp> = { stat: /f/, tail: /[fF]/ };
 
 /**
  * The files a read-only shell command reads, when its answer depends on them
@@ -455,16 +462,25 @@ const VALUE_OPTIONS = /^(-n|-c|--lines|--bytes)$/;
  */
 export function readsOf(command: string, cwd: string): string[] | null {
   if (/&&|\|\||;|\||&|\n|[*?[\]]/.test(command)) return null;
-  const words = command.trim().split(/\s+/).map((w) => w.replace(/['"\\]/g, '')).filter(Boolean);
+  // Quoting, escapes, expansions and redirects change which words the shell
+  // sees; rather than track the wrong files, none of these are taken. (A
+  // backslash is Windows' path separator there, not an escape.)
+  if (/['"`$~<>(){}]/.test(command) || (process.platform !== 'win32' && command.includes('\\'))) return null;
+  const words = command.trim().split(/\s+/).filter(Boolean);
   const cmd = words[0]?.toLowerCase();
   if (!cmd || !FILE_READERS.has(cmd)) return null;
   const files: string[] = [];
   for (let i = 1; i < words.length; i++) {
     const w = words[i]!;
     if (w.startsWith('-')) {
-      // PowerShell parameters take values in ways not worth guessing at.
-      if (cmd === 'get-content' || cmd === 'gc') return null;
-      if (VALUE_OPTIONS.test(w)) i++;
+      // PowerShell parameters take values in ways not worth guessing at; `-` alone reads stdin.
+      if (cmd === 'get-content' || cmd === 'gc' || w === '-') return null;
+      if (VALUE_OPTIONS.test(w)) { i++; continue; }
+      if (w.startsWith('--')) {
+        if (/^--(lines|bytes)=/.test(w)) continue;
+        return null;
+      }
+      if (WIDER_OPTIONS[cmd]?.test(w.slice(1))) return null;
       continue;
     }
     const abs = path.resolve(cwd, w);
@@ -616,13 +632,18 @@ export class RunMemory {
    * The answer this read-only call gave earlier in the run, when nothing has
    * changed since: the call needn't run again. Null otherwise.
    */
-  reuse(tool: string, input: Record<string, unknown>): { output: string; by: string } | null {
+  reuse(tool: string, input: Record<string, unknown>, to?: string): { output: string; by: string } | null {
     const key = this.reusable(tool, input);
     const hit = key ? this.results.get(key) : undefined;
     if (!hit || this.changing !== 0 || this.changes.busy()) return null;
     // Depends on named files: right as long as they are as they were, however long
     // ago and whatever else has run (an edit outside Cascade changes them too).
-    if (hit.reads) return hit.reads.every(([abs, was]) => sameSnapshot(was, snapshot(abs))) ? { output: hit.output, by: hit.by } : null;
+    if (hit.reads) {
+      if (!hit.reads.every(([abs, was]) => sameSnapshot(was, snapshot(abs)))) return null;
+      // The worker given it now holds those files as they were: told if they change.
+      if (to) for (const [abs, was] of hit.reads) this.noteRead(to, abs, was);
+      return { output: hit.output, by: hit.by };
+    }
     return hit.epoch === this.epoch && Date.now() - hit.at <= MAX_ANSWER_AGE_MS && hit.mark === this.changes.current()
       ? { output: hit.output, by: hit.by } : null;
   }
@@ -670,7 +691,8 @@ export class RunMemory {
     }
     const key = this.reusable(tool, input);
     // The files a read read are files this worker now has in its prompt.
-    for (const [abs] of started?.reads ?? []) this.noteRead(by, abs);
+    // As they were when it started: a change while it ran is one it didn't see.
+    for (const [abs, was] of started?.reads ?? []) this.noteRead(by, abs, was ?? undefined);
     if (!key || how.failed || !started || this.changes.busy() || output.length > MAX_RESULT_CHARS) return;
     let stored: { output: string; by: string; epoch: number; mark: string; at: number; reads?: Array<[string, Snapshot]> } | null = null;
     if (started.reads) {
@@ -778,9 +800,12 @@ export class RunMemory {
     return [...this.facts.values()].filter((f) => this.mayShow(f, rules)).map(({ key, text, from }) => ({ key, text, from }));
   }
 
-  /** `worker` has read this file into its prompt: it is told if the file changes. */
-  noteRead(worker: string, abs: string): void {
-    const snap = snapshot(abs);
+  /**
+   * `worker` has read this file into its prompt: it is told if the file changes.
+   * `as` is the file as it was read, when that was earlier than now.
+   */
+  noteRead(worker: string, abs: string, as?: Snapshot): void {
+    const snap = as ?? snapshot(abs);
     if (!snap) return;
     let reads = this.readsBy.get(worker);
     if (!reads) { reads = new Map(); this.readsBy.set(worker, reads); }
