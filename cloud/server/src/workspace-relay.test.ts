@@ -388,6 +388,31 @@ describe('a run started with workspaceDeviceId', () => {
     expect(fs.existsSync(path.join(m.dir, 'README.md'))).toBe(true);
   }, 30_000);
 
+  it('tells the web app which files a workspace run changed, and when a call is answered, without any output', async () => {
+    const w = await server();
+    const alice = w.user('alice');
+    const m = await desktop(w, alice);
+    const stub = await startStubOpenAIServer({ delayMs: 3000 });
+    cleanup.push(() => stub.close());
+    const original = Cascade.prototype.addRemoteTools;
+    let run: InstanceType<typeof Cascade> | undefined;
+    const spy = vi.spyOn(Cascade.prototype, 'addRemoteTools').mockImplementation(function (this: InstanceType<typeof Cascade>, t) { run = this; return original.call(this, t); });
+    cleanup.push(() => spy.mockRestore());
+    const stop = new AbortController();
+    const { socket, result } = await runTurn(w, alice.id, m.device.id, { stub, signal: stop.signal });
+    await vi.waitFor(() => expect(run).toBeDefined(), { timeout: 10_000 });
+    run!.emit('tool:call', { id: 'c1', tierId: 't', toolName: 'file_write', input: { path: 'notes.md', content: 'hello' } });
+    run!.emit('tool:call', { id: 'c2', tierId: 't', toolName: 'shell', input: { command: 'cat secret' } });
+    run!.emit('tool:result', { id: 'c1', tierId: 't', toolName: 'file_write', output: 'TOP SECRET OUTPUT', durationMs: 1 });
+    expect(socket.named('workspace:call')).toHaveLength(1);
+    expect(socket.named('workspace:call')[0]).toMatchObject({ runId: 'client-run-1', id: 'c1', change: { kind: 'write', path: 'notes.md', content: 'hello' } });
+    expect(socket.named('workspace:result')[0]).toMatchObject({ id: 'c1', tool: 'file_write', ok: true });
+    expect(JSON.stringify(socket.events)).not.toContain('TOP SECRET');
+    expect(JSON.stringify(socket.events)).not.toContain('cat secret');
+    stop.abort();
+    await result.catch(() => undefined);
+  }, 30_000);
+
   it('an offline desktop fails the start with a clear message, before anything is saved', async () => {
     const w = await server();
     const alice = w.user('alice');

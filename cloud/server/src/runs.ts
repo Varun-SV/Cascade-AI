@@ -17,6 +17,7 @@ import {
 import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ApprovalRequest, ProviderConfig, BrowserAllowance, BrowserInput } from '#cascade-ai';
 import { attachRemoteBrowser, providerRationsSessions, type RelayForRun } from './remote-browser.js';
 import type { BrowserRelay } from './browser-relay.js';
+import { workspaceCallEvent, workspaceResultEvent } from './workspace-events.js';
 import { WorkspaceRunError, openWorkspaceForRun, type RunWorkspace, type WorkspaceRelay } from './workspace-relay.js';
 import { decryptAtRest } from './secrets.js';
 import { checkEndpointUrl } from './user-endpoint.js';
@@ -2099,6 +2100,17 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
     // Gone mid-run: the calls in flight and every later one fail with that reason, which
     // the model reads, and the web app is told. The run never waits on a connection that is over.
     void ws.remote.closed.then((reason) => socket.emit('workspace:detached', { ...where, reason }));
+    // The web app's changed-files panel and its "waiting" notice: two small events built from the
+    // run's calls, never their outputs (see workspace-events.ts).
+    const served = new Set(ws.remote.tools.map((t) => t.name));
+    cascade.on('tool:call', (e: unknown) => {
+      const ev = workspaceCallEvent(e as object, served);
+      if (ev) socket.emit('workspace:call', { conversationId: conversation.id, runId: payload.runId, ...ev });
+    });
+    cascade.on('tool:result', (e: unknown) => {
+      const ev = workspaceResultEvent(e as object, served);
+      if (ev) socket.emit('workspace:result', { conversationId: conversation.id, runId: payload.runId, ...ev });
+    });
   }
 
   // A hosted run has no browser of its own. This attaches one from whatever

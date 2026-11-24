@@ -5,6 +5,12 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.99.11 - 2026-11-24
+
+### Added
+- **Choose where a Cascade Cloud chat works, from the message box.** When the server has workspaces on, a new Environment button next to the tools lists "Cloud (no files)", which is the default, and each of your desktop computers with a dot for whether it is serving now. A computer that is not serving is shown but cannot be picked, with a note to open the Cascade desktop app on it and turn workspace serving on. The list is read again each time you open it, the choice is remembered per chat, and with no paired computer the menu says how to pair one. Fast answer is turned off while a computer is chosen, because it uses no tools. Runs started this way carry your choice to the server, and any refusal (the computer is offline, or you said no there) shows as the error it is.
+- **A run in your folder shows where it works and what it changed.** The chat shows "Waiting for <computer> to allow this run…" while your computer asks you, then a chip "Working in <folder name> on <computer>" (never a path), a notice "Waiting for your approval on <computer> (<tool>)" while a step waits for you there, and the chip reads ended when the run is over. A "Files changed in your workspace" list shows each file the run wrote, edited or deleted, with a red and green diff for an edit, the new content for a write, and "deleted" for a delete, and notes any file that changed on your computer since the run read it. To feed it, the server now sends two small events for workspace runs: the path and change of each file-changing call, and when a call is answered. Command output and file contents it read are never sent, and nothing is logged.
+
 ## 0.99.9 - 2026-11-24
 
 ### Added

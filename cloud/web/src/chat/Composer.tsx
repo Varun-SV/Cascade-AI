@@ -3,12 +3,13 @@ import { browserChip, CHECKING, type BrowserAllowanceView } from './browserAllow
 import clsx from 'clsx';
 import {
   ArrowUp, Paperclip, X, Loader2, Globe, Square, Zap, FileText, MonitorPlay, Plus, SlidersHorizontal,
-  ChevronDown, Sparkles, Settings2, Plug, Brain,
+  ChevronDown, Sparkles, Settings2, Plug, Brain, Laptop,
 } from 'lucide-react';
 import Menu, { type MenuItem } from '../components/Menu.js';
 import { fetchMcpServers, setMcpServerEnabled, uploadImage, uploadDocument, uploadUrl, type McpServer } from '../lib/api.js';
 import type { Skill } from '../lib/types.js';
 import { THINKING_LEVELS, type ThinkingLevel } from '../lib/prefs.js';
+import { CLOUD_ENV, NO_DEVICES_HINT, chosenDeviceName, pickerOptions, type WorkspaceDevice } from '../lib/workspaceRun.js';
 import type { ChatAttachment, ForceTier, RoutingMode, SendInput } from './useChatSession.js';
 
 const ALLOWED = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
@@ -66,7 +67,23 @@ function browserSub(allowance: BrowserAllowanceView, ownOnly: boolean): string {
   return left === 0 ? `All ${allowance.limit} used today` : `${left} of ${allowance.limit} left today`;
 }
 
+/** The environment picker: where this chat's runs work. Absent when the server has no workspace relay. */
+export interface WorkspacePicker {
+  devices: WorkspaceDevice[];
+  /** The list has been read at least once. */
+  known: boolean;
+  loading: boolean;
+  /** The last read of the list failed. */
+  failed?: boolean;
+  /** The chosen device's id; undefined is Cloud. */
+  selected: string | undefined;
+  onSelect: (deviceId: string | undefined) => void;
+  /** The picker opened: re-read the list. */
+  onOpen: () => void;
+}
+
 interface Props {
+  workspace?: WorkspacePicker;
   skills: Skill[];
   skillId: string;
   onSkillChange: (id: string) => void;
@@ -107,13 +124,13 @@ const THINKING_OPTIONS: Record<ThinkingLevel, { label: string; sub: string }> = 
   high: { label: 'High', sub: 'Thinks longest; slower, costs more' },
 };
 
-type MenuKey = 'plus' | 'tools' | 'mode';
+type MenuKey = 'plus' | 'tools' | 'mode' | 'env';
 
 export default function Composer({
   skills, skillId, onSkillChange, hasProviders, busy, onSend, onStop,
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange,
   browserMode, onBrowserModeChange, browserAvailable, browserOwnOnly = false, browserAllowance, thinkingUnavailable = false, thinking = 'auto', onThinkingChange,
-  onManageSkills, onManageConnectors, draftRequest,
+  onManageSkills, onManageConnectors, draftRequest, workspace,
 }: Props) {
   const chip = browserChip(browserAllowance ?? null);
   const [input, setInput] = useState('');
@@ -123,6 +140,10 @@ export default function Composer({
   const [uploadError, setUploadError] = useState<string | null>(null);
   // Fast answer applies to the next message only, like the prototype's toggle.
   const [fastNext, setFastNext] = useState(false);
+  // A workspace run uses tools on the user's computer, and a fast answer uses none: the two
+  // cannot be asked for together, so choosing a computer turns Fast answer off and holds it off.
+  const workspaceChosen = workspace?.selected !== undefined;
+  useEffect(() => { if (workspaceChosen) setFastNext(false); }, [workspaceChosen]);
   const chooseThinking = (level: ThinkingLevel) => onThinkingChange?.(level);
   const [menu, setMenu] = useState<{ key: MenuKey; anchor: HTMLElement } | null>(null);
   const [servers, setServers] = useState<McpServer[] | null>(null);
@@ -241,6 +262,26 @@ export default function Composer({
   };
 
   function itemsFor(key: MenuKey): MenuItem[] {
+    if (key === 'env' && workspace) {
+      const opts = pickerOptions(workspace.devices, workspace.selected);
+      const items: MenuItem[] = [{ kind: 'label', label: 'Where this chat works' }];
+      for (const o of opts) {
+        const isCloud = o.value === CLOUD_ENV;
+        items.push({
+          kind: 'radio', label: o.label, ...(o.sub ? { sub: o.sub } : {}),
+          checked: isCloud ? workspace.selected === undefined : workspace.selected === o.value,
+          disabled: o.disabled,
+          ...(o.online !== undefined ? { dot: o.online ? 'on' as const : 'off' as const } : {}),
+          ...(o.disabled ? { title: o.sub ?? '' } : {}),
+          onSelect: () => { workspace.onSelect(isCloud ? undefined : o.value); setMenu(null); },
+        });
+      }
+      if (workspace.loading && !workspace.known) items.push({ kind: 'custom', key: 'env-loading', render: <p className="m-0 px-[9px] py-1 text-[12.5px] text-ink-500">Looking for your computers…</p> });
+      else if (workspace.failed && !workspace.known) items.push({ kind: 'custom', key: 'env-failed', render: <p className="m-0 px-[9px] py-1 text-[12.5px] text-ink-500">Could not load your computers. Try again.</p> });
+      else if (workspace.known && workspace.devices.length === 0) items.push({ kind: 'custom', key: 'env-none', render: <p className="m-0 px-[9px] py-1 text-[12.5px] text-ink-500">{NO_DEVICES_HINT}</p> });
+      if (workspace.selected !== undefined) items.push({ kind: 'custom', key: 'env-fast', render: <p className="m-0 px-[9px] py-1 text-[12px] text-ink-500">Fast answer is off while a computer is chosen: it uses no tools, so it cannot work in your files.</p> });
+      return items;
+    }
     if (key === 'plus') {
       return [
         {
@@ -295,7 +336,11 @@ export default function Composer({
         render: <p className="m-0 px-[9px] py-1 text-[12px] text-ink-500">{thinkingUnavailable ? "Not available: Azure deployments don't take a thinking setting." : 'Not sent to Azure deployments.'}</p>,
       },
       { kind: 'separator' },
-      { kind: 'toggle', label: 'Fast answer', sub: 'Next message skips orchestration', icon: <Zap size={15} />, checked: fastNext, onToggle: () => setFastNext((f) => !f) },
+      {
+        kind: 'toggle', label: 'Fast answer', icon: <Zap size={15} />, checked: fastNext, onToggle: () => setFastNext((f) => !f),
+        sub: workspaceChosen ? 'Off while a computer is chosen: it uses no tools' : 'Next message skips orchestration',
+        disabled: workspaceChosen,
+      },
     ];
   }
 
@@ -306,6 +351,8 @@ export default function Composer({
   if (thinking !== 'auto' && !thinkingUnavailable) tokens.push({ key: 'thinking', icon: <Brain size={14} />, label: `Thinking: ${THINKING_OPTIONS[thinking].label}`, off: () => chooseThinking('auto') });
   if (webSearch) tokens.push({ key: 'web', icon: <Globe size={14} />, label: 'Web', off: () => onWebSearchChange(false) });
   if (browserMode) tokens.push({ key: 'browser', icon: <MonitorPlay size={14} />, label: 'Browser', off: () => onBrowserModeChange(false) });
+  const envName = workspace ? chosenDeviceName(workspace.devices, workspace.selected) : null;
+  if (envName) tokens.push({ key: 'env', icon: <Laptop size={14} />, label: envName, off: () => workspace?.onSelect(undefined) });
   if (skillId && skillId !== 'general' && skillName) tokens.push({ key: 'skill', icon: <Sparkles size={14} />, label: skillName, off: () => onSkillChange('general') });
 
   const routeLabel = ROUTING_MODES.find((m) => m.value === routingMode)?.label ?? 'Auto';
@@ -385,6 +432,24 @@ export default function Composer({
         >
           <SlidersHorizontal size={17} />
         </button>
+        {workspace && (
+          <button
+            type="button"
+            aria-label="Environment"
+            title="Where this chat works"
+            aria-haspopup="menu"
+            aria-expanded={menu?.key === 'env'}
+            onClick={(e) => {
+              // Re-read the list as it opens: an app opened a moment ago should show as online.
+              if (menu?.key !== 'env') workspace.onOpen();
+              openMenu('env')(e);
+            }}
+            disabled={busy}
+            className={clsx('cz-ib', workspace.selected !== undefined && 'text-accent-500')}
+          >
+            <Laptop size={17} />
+          </button>
+        )}
         {tokens.length > 0 && (
           <div className="flex flex-wrap gap-1.5">
             {tokens.map((t) => (
@@ -435,7 +500,7 @@ export default function Composer({
       </div>
       {menu && (
         <Menu
-          label={menu.key === 'plus' ? 'Attach and skills' : menu.key === 'tools' ? 'Tools' : 'Routing and tier'}
+          label={menu.key === 'plus' ? 'Attach and skills' : menu.key === 'tools' ? 'Tools' : menu.key === 'env' ? 'Environment' : 'Routing and tier'}
           anchor={menu.anchor}
           items={itemsFor(menu.key)}
           onClose={() => setMenu(null)}

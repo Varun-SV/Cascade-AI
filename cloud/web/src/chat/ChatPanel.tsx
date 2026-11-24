@@ -5,7 +5,9 @@ import { AlertTriangle, KeyRound, Layers, ChevronDown, Search, BookOpen, Calenda
 import CascadeMark from '../components/CascadeMark.js';
 import { flyDrop } from './motion.js';
 import Message from './Message.js';
-import Composer from './Composer.js';
+import Composer, { type WorkspacePicker } from './Composer.js';
+import WorkspaceRunCard from './WorkspaceRunCard.js';
+import type { WorkspaceRunView } from '../lib/workspaceRun.js';
 import type { ThinkingLevel } from '../lib/prefs.js';
 import PlanNotice from './PlanNotice.js';
 import ActivityDrawer from './ActivityDrawer.js';
@@ -21,6 +23,10 @@ import { takePendingPrompt } from '../lib/pendingPrompt.js';
 import type { ToolApproval } from './useChatSession.js';
 
 interface Props {
+  /** The environment picker in the composer; absent when the server has no workspace relay. */
+  workspace?: WorkspacePicker;
+  /** The run working in a folder on the user's computer, if this conversation has one. */
+  workspaceRun?: { view: WorkspaceRunView | undefined; awaitingConsent: boolean; awaitingDeviceName: string };
   messages: ChatMessage[];
   busy: boolean;
   error: string | null;
@@ -116,6 +122,7 @@ interface Props {
 }
 
 export default function ChatPanel({
+  workspace, workspaceRun,
   messages, busy, error, status, hasProviders, thinkingUnavailable, thinking, onThinkingChange, skills, skillId, onSkillChange, onSend, onStop, onRegenerate,
   onEditMessage, onDeleteMessage, onSelectSibling,
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange,
@@ -280,6 +287,9 @@ export default function ChatPanel({
               {browserRefusedNotice && (
                 <div role="status" className={note}><AlertTriangle size={14} className="shrink-0 text-warning-500" /><span>{browserRefusedNotice}</span></div>
               )}
+              {workspaceRun && (
+                <WorkspaceRunCard view={workspaceRun.view} awaitingConsent={workspaceRun.awaitingConsent} awaitingDeviceName={workspaceRun.awaitingDeviceName} />
+              )}
               {knowledgeNotice && (
                 <div className={note}><Search size={14} className="shrink-0 text-ink-500" /><span>{knowledgeNotice}</span></div>
               )}
@@ -385,6 +395,7 @@ export default function ChatPanel({
             onManageSkills={onManageSkills}
             onManageConnectors={onManageConnectors}
             draftRequest={draftRequest}
+            workspace={workspace}
           />
           {empty && (
             <div className="flex flex-wrap justify-center gap-2">

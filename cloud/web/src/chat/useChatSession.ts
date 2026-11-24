@@ -458,7 +458,15 @@ export function useChatSession(
    * while the only control for it is gone — see the effect below.
    */
   controlsVisible = true,
+  /**
+   * The desktop this chat's runs work on, read when a run is sent: a getter, not a value,
+   * so the choice (kept per conversation by `useWorkspaceRun`, which reads this hook's
+   * conversation) can follow it without the two hooks needing each other's output.
+   */
+  getWorkspaceDeviceId?: () => string | undefined,
 ) {
+  const workspaceDeviceGetterRef = useRef(getWorkspaceDeviceId);
+  workspaceDeviceGetterRef.current = getWorkspaceDeviceId;
   const [conversationId, setConversationId] = useState<string | undefined>(initialConversationId);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [busy, setBusy] = useState(false);
@@ -2834,6 +2842,10 @@ export function useChatSession(
             webSearchConfig,
             complexityHint,
             fastAnswer: fast || undefined,
+            // Work in a folder on the user's own computer. Sent even with a fast answer, which
+            // the server refuses with a message that says why, rather than quietly dropping
+            // the choice the composer shows.
+            workspaceDeviceId: workspaceDeviceGetterRef.current?.() || undefined,
             fastAnswerModel: fast ? (fastAnswerModel() || undefined) : undefined,
             // Advanced per-tier generation params (omitted when none are set,
             // and moot for a fast answer, which is a single direct call).
@@ -3283,7 +3295,7 @@ export function useChatSession(
 
   return {
     messages, send, stop, regenerate, editMessage, deleteMessage: deleteMessageById, selectSibling,
-    busy, error, status, lastTokens, lastSaved, conversationId, loadMessages, runningConversationIds,
+    busy, error, status, lastTokens, lastSaved, conversationId, activeConversation: currentConversation, loadMessages, runningConversationIds,
     setConversationId: selectConversation,
     contextTokens, contextWindow,
     routingMode, setRoutingMode, forceTier, setForceTier, thinking, setThinking, webSearch, setWebSearch, browserMode, setBrowserMode, approval,

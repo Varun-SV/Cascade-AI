@@ -27,6 +27,11 @@ export interface CloudConfig {
    * a deployment can have this and no hosted browser at all. Absent means no.
    */
   browserRelay?: boolean;
+  /**
+   * Whether a run can work in a folder on the user's own computer, through the
+   * desktop app (the workspace relay). Absent means no.
+   */
+  workspaceRelay?: boolean;
 }
 
 async function json<T>(fetchPromise: Promise<Response>): Promise<T> {
@@ -36,6 +41,13 @@ async function json<T>(fetchPromise: Promise<Response>): Promise<T> {
     throw new Error((body as { error?: string }).error ?? `Request failed: ${res.status}`);
   }
   return res.json() as Promise<T>;
+}
+
+/** One of the user's own desktops, and whether it is serving workspaces right now. */
+export interface WorkspaceDevice { id: string; name: string; online: boolean }
+
+export function fetchWorkspaceDevices(): Promise<{ devices: WorkspaceDevice[] }> {
+  return json(fetch('/api/workspace-relay/devices', { credentials: 'include' }));
 }
 
 export function fetchConfig(): Promise<CloudConfig> {
