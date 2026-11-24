@@ -33,6 +33,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Azure deployments are no longer sent `reasoning_effort`.** A GPT-6 Luna or
   Sol deployment was sent the `none` that OpenAI's own API needs for tool calls.
 
+## 0.99.4 - 2026-11-24
+
+### Fixed
+- **The model leaderboard no longer loses models.** The shared learning pool
+  (`model-perf.json`) behind Auto routing and the leaderboard was being
+  overwritten instead of added to. Each run saved its whole picture of the pool,
+  and three things made that picture wrong:
+  - the run saved before its non-blocking load had finished;
+  - the load had failed;
+  - other runs had saved since it loaded.
+
+  In each case everything else in the pool was replaced by the models that run
+  used. Now a save adds only what its own run recorded: the file is re-read
+  under a lock, the run's increments are added to it, and the sum is written
+  whole. Runs on the same pool take turns: the cloud server's concurrent runs,
+  and the CLI and desktop app on one machine. A pool that can't be read is
+  never written over; the run's increments wait for the next save. A file
+  that isn't a pool is kept beside it as `model-perf.json.corrupt-<time>`,
+  not replaced. Models lost before this fix aren't recovered; the pool refills
+  as models are used.
+
 ## 0.99.3 - 2026-11-24
 
 ### Fixed

@@ -51,12 +51,160 @@ interface FeatureStat {
 
 const DEFAULT_STATS_FILE = path.join(os.homedir(), '.cascade', 'model-perf.json');
 
+/** How long a save waits for another writer's lock before giving up until the next save. */
+const LOCK_WAIT_MS = 5_000;
+/** A lock older than this was left by a writer that died mid-save. */
+const LOCK_STALE_MS = 30_000;
+
+/**
+ * Saves of one file in this process, in order. The cloud server runs every run
+ * through its own tracker in one process, all on the same pool file.
+ */
+const saveQueues = new Map<string, Promise<unknown>>();
+
+type Pool = { models: Map<string, ModelStat>; features: Map<string, FeatureStat> };
+const emptyPool = (): Pool => ({ models: new Map(), features: new Map() });
+
+/** a + b, field by field. Either may be missing fields an older pool never kept. */
+function addStat(a: ModelStat | undefined, b: ModelStat): ModelStat {
+  const explicit = (a?.explicitCount ?? 0) + (b.explicitCount ?? 0);
+  return {
+    successCount: (a?.successCount ?? 0) + b.successCount,
+    failureCount: (a?.failureCount ?? 0) + b.failureCount,
+    totalRetries: (a?.totalRetries ?? 0) + b.totalRetries,
+    totalCostUsd: (a?.totalCostUsd ?? 0) + b.totalCostUsd,
+    sampleCount: (a?.sampleCount ?? 0) + b.sampleCount,
+    totalContextTokens: (a?.totalContextTokens ?? 0) + (b.totalContextTokens ?? 0),
+    failureContextTokens: (a?.failureContextTokens ?? 0) + (b.failureContextTokens ?? 0),
+    ...(explicit ? { explicitCount: explicit } : {}),
+  };
+}
+
+function addFeature(a: FeatureStat | undefined, b: FeatureStat): FeatureStat {
+  return { totalCostUsd: (a?.totalCostUsd ?? 0) + b.totalCostUsd, runCount: (a?.runCount ?? 0) + b.runCount };
+}
+
+/** base plus every delta, as a new pool. */
+function merged(base: Pool, delta: Pool): Pool {
+  const out: Pool = { models: new Map(base.models), features: new Map(base.features) };
+  for (const [k, d] of delta.models) out.models.set(k, addStat(out.models.get(k), d));
+  for (const [k, d] of delta.features) out.features.set(k, addFeature(out.features.get(k), d));
+  return out;
+}
+
+/** The pool a file holds: the current format, or the old flat one ({ "modelId:taskType": ModelStat }). */
+function poolFrom(parsed: unknown): Pool {
+  const pool = emptyPool();
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not a pool');
+  const p = parsed as Record<string, unknown> & { models?: Record<string, ModelStat>; features?: Record<string, FeatureStat> };
+  const isStat = (v: unknown): v is ModelStat => !!v && typeof v === 'object' && typeof (v as ModelStat).successCount === 'number';
+  if (p.models && typeof p.models === 'object') {
+    for (const [key, stat] of Object.entries(p.models)) if (isStat(stat)) pool.models.set(key, stat);
+  } else {
+    for (const [key, stat] of Object.entries(p)) if (isStat(stat)) pool.models.set(key, stat);
+  }
+  if (p.features && typeof p.features === 'object') {
+    for (const [key, stat] of Object.entries(p.features)) {
+      if (stat && typeof stat === 'object' && typeof stat.totalCostUsd === 'number') pool.features.set(key, stat);
+    }
+  }
+  return pool;
+}
+
+const isMissing = (e: unknown): boolean => (e as NodeJS.ErrnoException)?.code === 'ENOENT';
+
+/**
+ * The pool on disk. Missing is an empty pool. A read that fails throws: the
+ * caller must not write over a pool it couldn't read. A file that isn't a pool
+ * reads as empty; a writer (`setAside`) first moves it to `<file>.corrupt-<time>`,
+ * so it is kept rather than written over.
+ */
+async function readPool(file: string, setAside = false): Promise<Pool> {
+  let raw: string;
+  try { raw = await fs.readFile(file, 'utf-8'); } catch (e) { if (isMissing(e)) return emptyPool(); throw e; }
+  try { return poolFrom(JSON.parse(raw)); } catch {
+    if (setAside) await fs.rename(file, `${file}.corrupt-${Date.now()}`);
+    return emptyPool();
+  }
+}
+
+/** Creates `file` holding `token`, or returns false if it exists. */
+async function create(file: string, token: string): Promise<boolean> {
+  try {
+    const h = await fs.open(file, 'wx');
+    try { await h.writeFile(token); } finally { await h.close(); }
+    return true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === 'EEXIST') return false;
+    throw e;
+  }
+}
+
+const ageOf = (st: { mtimeMs: number }): number => Date.now() - st.mtimeMs;
+
+/**
+ * Removes `lock` if it is still the stale lock it was found to be.
+ *
+ * Two writers can find the same stale lock. If each simply removed it, the
+ * second could remove the lock the first had just taken in its place, and both
+ * would write at once. So a stale lock is only removed under a second, briefly
+ * held lock (`<lock>.takeover`), after checking again, under it, that it is the
+ * same file (inode) and still stale. The takeover lock is held for two system
+ * calls; one left by a writer that died holding it is cleared after a while.
+ */
+async function removeIfStale(lock: string, seen: { ino: number }, token: string): Promise<boolean> {
+  const takeover = `${lock}.takeover`;
+  if (!(await create(takeover, token))) {
+    // Another writer is taking it over (or died doing so): wait like for any lock.
+    const st = await fs.stat(takeover).catch(() => null);
+    if (st && ageOf(st) > LOCK_STALE_MS) await fs.rm(takeover, { force: true });
+    return false;
+  }
+  try {
+    const now = await fs.stat(lock).catch(() => null);
+    if (now && now.ino === seen.ino && ageOf(now) > LOCK_STALE_MS) { await fs.rm(lock, { force: true }); return true; }
+    return false;
+  } finally {
+    await fs.rm(takeover, { force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Holds `<file>.lock` while `fn` runs, so writers in other processes (CLI,
+ * desktop) take turns. Exported for tests.
+ */
+export async function withFileLock<T>(file: string, fn: () => Promise<T>, opts: { waitMs?: number } = {}): Promise<T> {
+  const lock = `${file}.lock`;
+  const token = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+  const deadline = Date.now() + (opts.waitMs ?? LOCK_WAIT_MS);
+  while (!(await create(lock, token))) {
+    const st = await fs.stat(lock).catch(() => null);
+    // Removed: try again at once. Otherwise it is waited for, within the deadline, like a live lock.
+    if (st && ageOf(st) > LOCK_STALE_MS && await removeIfStale(lock, st, token)) continue;
+    if (Date.now() > deadline) throw new Error('model-perf pool is locked');
+    await new Promise((r) => setTimeout(r, 25 + Math.random() * 50));
+  }
+  try { return await fn(); } finally {
+    // Only our own: had this run past the stale age, the lock may now be someone else's.
+    const held = await fs.readFile(lock, 'utf-8').catch(() => null);
+    if (held === token) await fs.rm(lock, { force: true }).catch(() => {});
+  }
+}
+
 export class ModelPerformanceTracker {
+  /**
+   * What this tracker reads scores from: the pool as last read from disk, plus
+   * everything recorded here that isn't saved yet.
+   */
   private stats = new Map<string, ModelStat>();
   private featureStats = new Map<string, FeatureStat>();
+  /** The pool as last read from (or written to) disk. */
+  private base: Pool = emptyPool();
+  /** What this tracker recorded since its last save: the only thing a save adds to the file. */
+  private pending: Pool = emptyPool();
   private readonly statsFile: string;
   private readonly readOnly: boolean;
-  private loaded = false;
+  private loading?: Promise<void>;
 
   /**
    * @param statsFile where stats persist (cloud → the persistent volume).
@@ -64,52 +212,83 @@ export class ModelPerformanceTracker {
    *        run's outcomes — the opt-out path for users who declined to contribute.
    */
   constructor(statsFile = DEFAULT_STATS_FILE, options: { readOnly?: boolean } = {}) {
-    this.statsFile = statsFile;
+    this.statsFile = path.resolve(statsFile);
     this.readOnly = options.readOnly ?? false;
   }
 
-  async load(): Promise<void> {
-    if (this.loaded) return;
-    this.loaded = true;
+  /**
+   * Reads the pool. Safe to call without awaiting: what is recorded before it
+   * finishes is kept, on top of what it reads.
+   */
+  load(): Promise<void> {
+    this.loading ??= (async () => {
+      try { this.base = await readPool(this.statsFile); } catch { /* unreadable now: scores start from the prior; save re-reads */ }
+      this.refresh();
+    })();
+    return this.loading;
+  }
+
+  /**
+   * Adds what this tracker recorded since its last save to the pool on disk.
+   *
+   * It never writes its own picture of the pool. The file is re-read under a
+   * lock, this tracker's increments are added to it, and the sum is written
+   * whole (temp + rename). Writing the in-memory snapshot instead lost everything
+   * another writer had added since this tracker loaded, and wiped the pool to
+   * this run's models when a save beat the non-blocking load, or followed a
+   * load that failed.
+   *
+   * A pool that can't be read is left alone: the increments stay pending for
+   * the next save.
+   */
+  save(): Promise<void> {
+    if (this.readOnly) return Promise.resolve(); // opted out — never write this user's outcomes
+    const prev = saveQueues.get(this.statsFile) ?? Promise.resolve();
+    const run = prev.then(() => this.saveNow()).catch(() => { /* non-critical: increments stay pending */ });
+    saveQueues.set(this.statsFile, run);
+    void run.finally(() => { if (saveQueues.get(this.statsFile) === run) saveQueues.delete(this.statsFile); });
+    return run;
+  }
+
+  private async saveNow(): Promise<void> {
+    await this.load();
+    if (this.pending.models.size === 0 && this.pending.features.size === 0) return;
+    const sent = this.pending;
+    this.pending = emptyPool();
     try {
-      const raw = await fs.readFile(this.statsFile, 'utf-8');
-      const parsed = JSON.parse(raw) as Record<string, unknown> & { models?: Record<string, ModelStat>; features?: Record<string, FeatureStat> };
-      if (parsed.models) {
-        for (const [key, stat] of Object.entries(parsed.models)) this.stats.set(key, stat);
-      } else {
-        // Fallback for the old flat format: { "modelId:taskType": ModelStat }.
-        for (const [key, stat] of Object.entries(parsed)) {
-          if (stat && typeof stat === 'object' && typeof (stat as ModelStat).successCount === 'number') {
-            this.stats.set(key, stat as ModelStat);
-          }
-        }
-      }
-      if (parsed.features) {
-        for (const [key, stat] of Object.entries(parsed.features)) this.featureStats.set(key, stat);
-      }
-    } catch {
-      // File doesn't exist yet — start fresh
+      await fs.mkdir(path.dirname(this.statsFile), { recursive: true });
+      const written = await withFileLock(this.statsFile, async () => {
+        const next = merged(await readPool(this.statsFile, true), sent);
+        const json = JSON.stringify({ models: Object.fromEntries(next.models), features: Object.fromEntries(next.features) }, null, 2);
+        // A per-process temp name, renamed over the file: a reader never sees half a pool.
+        const tmp = `${this.statsFile}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+        try {
+          await fs.writeFile(tmp, json, 'utf-8');
+          await fs.rename(tmp, this.statsFile);
+        } catch (e) { await fs.rm(tmp, { force: true }).catch(() => {}); throw e; }
+        return next;
+      });
+      this.base = written;
+    } catch (e) {
+      // Not written: put the increments back, ahead of anything recorded meanwhile.
+      this.pending = merged(sent, this.pending);
+      throw e;
+    } finally {
+      this.refresh();
     }
   }
 
-  async save(): Promise<void> {
-    if (this.readOnly) return; // opted out — never write this user's outcomes
-    try {
-      await fs.mkdir(path.dirname(this.statsFile), { recursive: true });
-      const modelsObj: Record<string, ModelStat> = {};
-      const featuresObj: Record<string, FeatureStat> = {};
-      for (const [key, stat] of this.stats) modelsObj[key] = stat;
-      for (const [key, stat] of this.featureStats) featuresObj[key] = stat;
-      const json = JSON.stringify({ models: modelsObj, features: featuresObj }, null, 2);
-      // Atomic write (temp + rename) so concurrent writers on the shared cloud
-      // file never observe a half-written, corrupt JSON — the rename swaps the
-      // file in whole. A per-process temp suffix avoids two writers colliding on
-      // the same temp path. Worst case under contention is a lost increment
-      // (last rename wins), never a corrupt file.
-      const tmp = `${this.statsFile}.${process.pid}.${Date.now()}.tmp`;
-      await fs.writeFile(tmp, json, 'utf-8');
-      await fs.rename(tmp, this.statsFile);
-    } catch { /* non-critical */ }
+  /** stats = base + pending. */
+  private refresh(): void {
+    const view = merged(this.base, this.pending);
+    this.stats = view.models;
+    this.featureStats = view.features;
+  }
+
+  /** Adds one increment to what is pending and to what scores are read from. */
+  private add(key: string, delta: ModelStat): void {
+    this.pending.models.set(key, addStat(this.pending.models.get(key), delta));
+    this.stats.set(key, addStat(this.stats.get(key), delta));
   }
 
   record(
@@ -125,33 +304,28 @@ export class ModelPerformanceTracker {
      * sampleCount: one thing happened, however much it tells us.
      */
     weight = 1,
+    explicit = false,
   ): void {
     if (this.readOnly) return; // opted out — read scores, don't contribute
-    const key = `${modelId}:${taskType}`;
-    const s = this.stats.get(key) ?? {
-      successCount: 0, failureCount: 0, totalRetries: 0, totalCostUsd: 0, sampleCount: 0,
-      totalContextTokens: 0, failureContextTokens: 0,
-    };
     const w = Math.max(0, weight);
-    this.stats.set(key, {
-      successCount: s.successCount + (outcome === 'success' ? w : 0),
-      failureCount: s.failureCount + (outcome === 'failure' ? w : 0),
-      totalRetries: s.totalRetries + retries,
-      totalCostUsd: s.totalCostUsd + costUsd,
-      sampleCount: s.sampleCount + 1,
-      totalContextTokens: (s.totalContextTokens ?? 0) + Math.max(0, contextTokens),
-      failureContextTokens: (s.failureContextTokens ?? 0) + (outcome === 'failure' ? Math.max(0, contextTokens) : 0),
-      ...(s.explicitCount ? { explicitCount: s.explicitCount } : {}),
+    const tokens = Math.max(0, contextTokens);
+    this.add(`${modelId}:${taskType}`, {
+      successCount: outcome === 'success' ? w : 0,
+      failureCount: outcome === 'failure' ? w : 0,
+      totalRetries: retries,
+      totalCostUsd: costUsd,
+      sampleCount: 1,
+      totalContextTokens: tokens,
+      failureContextTokens: outcome === 'failure' ? tokens : 0,
+      ...(explicit ? { explicitCount: 1 } : {}),
     });
   }
 
   recordFeatureCost(featureTag: string, costUsd: number): void {
     if (this.readOnly) return;
-    const s = this.featureStats.get(featureTag) ?? { totalCostUsd: 0, runCount: 0 };
-    this.featureStats.set(featureTag, {
-      totalCostUsd: s.totalCostUsd + costUsd,
-      runCount: s.runCount + 1,
-    });
+    const delta = { totalCostUsd: costUsd, runCount: 1 };
+    this.pending.features.set(featureTag, addFeature(this.pending.features.get(featureTag), delta));
+    this.featureStats.set(featureTag, addFeature(this.featureStats.get(featureTag), delta));
   }
 
   /**
@@ -180,10 +354,7 @@ export class ModelPerformanceTracker {
    */
   recordExplicit(modelId: string, taskType: TaskType, rating: 'good' | 'bad', costUsd = 0): void {
     const outcome = rating === 'good' ? 'success' : 'failure';
-    this.record(modelId, taskType, outcome, 0, costUsd, 0, ModelPerformanceTracker.EXPLICIT_RATING_WEIGHT);
-    if (this.readOnly) return;
-    const s = this.stats.get(`${modelId}:${taskType}`);
-    if (s) s.explicitCount = (s.explicitCount ?? 0) + 1;
+    this.record(modelId, taskType, outcome, 0, costUsd, 0, ModelPerformanceTracker.EXPLICIT_RATING_WEIGHT, true);
   }
 
   /** Returns all stats keyed by "modelId:taskType" — used by `cascade stats`. */
