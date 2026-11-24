@@ -39,6 +39,7 @@ import { planSpecShape, quotedFieldRules } from './plan-spec.js';
 import { REPORTING_INTEGRITY_RULE } from './integrity.js';
 import { describeBrowserForPlanner } from './browser-planning.js';
 import { factMayLeave } from '../knowledge/world-state.js';
+import { formatPlannerFacts } from '../knowledge/run-memory.js';
 import { assembleFinishedWork, directAnswerPrompt, isBudgetStop, keepFirst, sectionsWithin, workersWithin } from '../router/run-budget.js';
 
 /** Case-insensitive shared keywords between two keyword lists. */
@@ -673,6 +674,11 @@ In 3-5 terse bullets, flag the most important RISKS, GAPS, or over-/under-decomp
         }
       }
     }
+    // What workers found about this machine (no git repository here, a command not
+    // installed), so the plan doesn't ask for what can't be done. Checked against
+    // the machine and the privacy rules now (RunMemory.known).
+    const found = this.router.getRunMemory?.(this.toolRegistry.getWorkspaceRoot?.() ?? process.cwd())?.known() ?? [];
+    if (found.length) worldStateContext += `\n\n${formatPlannerFacts(found)}`;
     const contextSection = systemContext ? `\nProject context:\n${systemContext}` : '';
     // Read BEFORE the prompt is built, not after: the plan's shape depends on
     // it. A run with no file tools must not be shown a worked example that

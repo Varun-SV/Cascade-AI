@@ -752,6 +752,26 @@ describe('T2 decomposition prompt — file capability awareness', () => {
     expect(captured.prompt).toMatch(/that call IS the deliverable/i);
   });
 
+  // A worker found the folder isn't a repository: the next section's plan, and its
+  // workers' briefs, shouldn't ask for git.
+  it('is told what workers found about this machine', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const { RunMemory } = await import('../knowledge/run-memory.js');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-t2-'));
+    try {
+      const memory = new RunMemory(root);
+      memory.observe('shell', { command: 'git status' }, 'Exit 128:\nfatal: not a git repository (or any of the parent directories): .git', 'T3-a', memory.begin('shell', { command: 'git status' }), { failed: true, publish: true });
+      const captured: { prompt?: string } = {};
+      const manager = makeManager(captured, ['shell']);
+      (manager as unknown as { router: Record<string, unknown> }).router['getRunMemory'] = () => memory;
+      (manager as unknown as { toolRegistry: Record<string, unknown> }).toolRegistry['getWorkspaceRoot'] = () => root;
+      await (manager as unknown as { decomposeSection: Decompose }).decomposeSection(section);
+      expect(captured.prompt).toMatch(/KNOWN ABOUT THIS MACHINE[^\n]*\n- The project folder is not a git repository/);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('asks for answer-shaped criteria when nothing can write a file', async () => {
     const captured: { prompt?: string } = {};
     const manager = makeManager(captured, ['web_search', 'web_fetch']);

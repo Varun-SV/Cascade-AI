@@ -36,6 +36,7 @@ import { compileSubtaskGraph } from '../orchestration/adapters.js';
 import { planSpecShape, typedFieldRules } from './plan-spec.js';
 import { keepFirst, workersWithin } from '../router/run-budget.js';
 import { parseModelJson } from '../../utils/json-extract.js';
+import { formatPlannerFacts } from '../knowledge/run-memory.js';
 
 // Built per-run so the peer-coordination hint only appears when the
 // peer_message tool is actually registered. On a restricted host (e.g. cloud
@@ -546,13 +547,16 @@ export class T2Manager extends BaseTier {
     const toolNames = this.toolRegistry.getToolDefinitions().map((t) => t.name);
     const spec = planSpecShape(canProduceFiles(toolNames), canProduceNonDiskDeliverables(toolNames));
     const most = Math.min(4, this.workersAffordable(assignment));
+    // What workers have found about this machine so far, this run or earlier: the
+    // subtasks it writes, and the briefs its workers get, take it into account.
+    const found = this.router.getRunMemory?.(this.toolRegistry.getWorkspaceRoot?.() ?? process.cwd())?.known() ?? [];
     const prompt = `Decompose this section into ${most === 1 ? '1 concrete subtask' : `1-${most} concrete subtasks`} for T3 workers — the FEWEST that fully cover it (one subtask is the correct answer for a small section).${most < 4 ? ' The task\'s budget pays for no more than that.' : ''}${spec.preamble ? `\n\n${spec.preamble}` : ''}
 
 Section: ${assignment.sectionTitle}
 Description: ${assignment.description}
 Expected output: ${assignment.expectedOutput}
 Constraints: ${assignment.constraints.join('; ')}
-${peerPlans ? `\nContext from sibling T2 plans (use this to align execution and avoid overlaps):\n${peerPlans}\n` : ''}
+${peerPlans ? `\nContext from sibling T2 plans (use this to align execution and avoid overlaps):\n${peerPlans}\n` : ''}${found.length ? `\n${formatPlannerFacts(found)}\n` : ''}
 Return a JSON array of subtask objects, each with:
 - subtaskId: string (unique)
 - subtaskTitle: string

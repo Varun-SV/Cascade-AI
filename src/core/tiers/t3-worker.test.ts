@@ -2361,4 +2361,58 @@ describe('workers share what they find (run-memory.ts)', () => {
       expect(memory.reuse('shell', { command: 'ls' })).toBeNull();
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
+
+  // The user's question: a worker read a file, then another worker (or a command,
+  // or an edit outside Cascade) changed it. Its next model call says so.
+  it('a file it read and someone else changed is named before its next model call; its own write is not', async () => {
+    const { RunMemory } = await import('../knowledge/run-memory.js');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-share-'));
+    try {
+      fs.writeFileSync(path.join(root, 'notes.md'), 'v1');
+      fs.writeFileSync(path.join(root, 'mine.md'), 'm1');
+      const memory = new RunMemory(root);
+      const notes: string[][] = [];
+      const queue = [
+        makeResult('', [{ id: 'r1', name: 'file_read', input: { path: 'notes.md' } }, { id: 'r2', name: 'file_read', input: { path: 'mine.md' } }], 'tool_use'),
+        makeResult('', [{ id: 'w', name: 'file_write', input: { path: 'mine.md', content: 'm2, longer' } }], 'tool_use'),
+        makeResult('done'),
+      ];
+      const router = {
+        generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }> }) => {
+          notes.push(options.messages.map((m) => m.content).filter((c): c is string => typeof c === 'string' && c.startsWith('FILES CHANGED SINCE YOU READ THEM')));
+          return queue.shift() ?? makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }),
+        getModelForTier: () => undefined,
+        getRunMemory: () => memory,
+      } as unknown as CascadeRouter;
+      const execute = vi.fn(async (name: string, input: Record<string, unknown>, opts: { noteRead?: (abs: string) => void }) => {
+        const abs = path.join(root, String(input['path']));
+        if (name === 'file_read') {
+          opts.noteRead?.(abs);
+          const text = fs.readFileSync(abs, 'utf8');
+          // Meanwhile, another worker rewrites notes.md.
+          if (input['path'] === 'notes.md') fs.writeFileSync(abs, 'v2, from another worker');
+          return text;
+        }
+        fs.writeFileSync(abs, String(input['content']));
+        return 'written';
+      });
+      const registry = makeToolRegistry({
+        getToolDefinitions: () => [
+          { name: 'file_read', description: 'Read a file', inputSchema: {} },
+          { name: 'file_write', description: 'Write a file', inputSchema: {} },
+        ],
+        getWorkspaceRoot: () => root,
+        execute,
+      } as unknown as Partial<ToolRegistry>);
+      await new T3Worker(router, registry, 't2-c').execute(makeAssignment({ subtaskId: 's-c' }), 'task-share');
+      // First call: nothing read yet. Second: notes.md changed by someone else.
+      expect(notes[0]).toEqual([]);
+      expect(notes[1]).toHaveLength(1);
+      expect(notes[1]![0]).toContain('- notes.md');
+      expect(notes[1]![0]).not.toContain('mine.md');
+      // Third, after its own write to mine.md: no new note (the one note stays in its history).
+      expect(notes[2]).toEqual(notes[1]);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
 });

@@ -2,7 +2,8 @@
 //  Cascade AI — T3 Worker
 // ─────────────────────────────────────────────
 
-import { formatRunFacts } from '../knowledge/run-memory.js';
+import { formatChangedFiles, formatRunFacts } from '../knowledge/run-memory.js';
+import { resolveInWorkspace } from '../../tools/utils/workspace-path.js';
 import { assessRisk } from '../permissions/risk.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -1107,10 +1108,15 @@ export class T3Worker extends BaseTier {
 
       // What other workers (or earlier runs) found, before this worker pays to
       // find it too. Not for a local-only subtask: it shares nothing either way.
+      const board = this.router.getRunMemory?.(this.artifactRoot());
       if (!this.localOnlyMatch) {
-        const found = this.router.getRunMemory?.(this.artifactRoot())?.unseenBy(this.id) ?? [];
+        const found = board?.unseenBy(this.id) ?? [];
         if (found.length) await this.context.addMessage({ role: 'user', content: formatRunFacts(found) });
       }
+      // Files it read that someone has changed since: what it holds of them is out
+      // of date. A local-only subtask is told of private files too (its model is private).
+      const changed = board?.changedFor(this.id, this.localOnlyMatch) ?? [];
+      if (changed.length) await this.context.addMessage({ role: 'user', content: formatChangedFiles(changed) });
 
       let textToolSuffix = '';
       if (useTextTools) {
@@ -1498,6 +1504,10 @@ export class T3Worker extends BaseTier {
       }
       const durationMs = Date.now() - toolStartMs;
       const text = typeof result === 'string' ? result : JSON.stringify(result);
+      // Its own write is no news to it (the next model call doesn't say the file changed).
+      if (this.isFileOperation(tc.name) && typeof tc.input['path'] === 'string') {
+        try { board?.noteWritten(this.id, resolveInWorkspace(this.artifactRoot(), tc.input['path'])); } catch { /* outside the workspace: not tracked */ }
+      }
       // Judged now, not before the call: a read during it can make this subtask
       // local-only, and then what it got stays here.
       board?.observe(tc.name, tc.input, text, this.id, boardAt, { failed: /^Exit [1-9]\d*:/.test(text), publish: !this.localOnlyMatch });
@@ -1817,6 +1827,8 @@ export class T3Worker extends BaseTier {
 
   /** Keep a file as a source of what this subtask learns (extractAndStoreFacts): one read into a prompt. */
   private readonly noteRead = (absPath: string): void => {
+    // Told before a later model call if someone changes it (changedFor).
+    this.router.getRunMemory?.(this.artifactRoot())?.noteRead(this.id, absPath);
     const rel = path.relative(this.artifactRoot(), absPath);
     if (rel && !leavesBase(rel)) this.readForModel.add(rel.split(path.sep).join('/'));
   };
