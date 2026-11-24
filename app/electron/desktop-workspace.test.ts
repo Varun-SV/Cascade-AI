@@ -391,6 +391,29 @@ describe('a served run', () => {
     expect(h.ws.status().lastRun).toMatchObject({ canUndo: false, note: expect.stringMatching(/incomplete/) });
   });
 
+  it("an undo still working when a newer run ends marks only its own run undone", async () => {
+    const h = harness();
+    const a = await opened(h);
+    a.s.onServing!({ runId: 'run-1', userId: 'u', expiresAt: 1, label: 'proj' });
+    await a.exec.checkpoints.begin('run');
+    h.checkpoints.list.mockReturnValue([{ n: 3, changed: 2, after: 's' }]);
+    a.s.onServing!(null);
+    let finish!: (v: { restored: string[]; removed: string[]; skipped: string[] }) => void;
+    h.checkpoints.undo.mockReturnValueOnce(new Promise((r) => { finish = r; }) as never);
+    const undoing = h.ws.undoLastRun();
+    expect(await h.ws.undoLastRun()).toMatchObject({ error: expect.stringMatching(/already running/) });
+    // Another run starts and ends while the undo works.
+    const b = await opened(h);
+    b.s.onServing!({ runId: 'run-1', userId: 'u', expiresAt: 1, label: 'proj' });
+    h.checkpoints.begin.mockResolvedValueOnce({ n: 4 });
+    await b.exec.checkpoints.begin('run');
+    h.checkpoints.list.mockReturnValue([{ n: 3, changed: 2, after: 's' }, { n: 4, changed: 4, after: 's' }]);
+    b.s.onServing!(null);
+    finish({ restored: ['a'], removed: [], skipped: [] });
+    expect(await undoing).toMatchObject({ ok: true });
+    expect(h.ws.status().lastRun).toMatchObject({ undone: false, canUndo: true, changed: 4 });
+  });
+
   it('keeps open questions for a window that opens later, and drops them once answered or closed', async () => {
     const h = harness();
     h.ws.enable();

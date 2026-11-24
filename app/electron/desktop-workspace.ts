@@ -133,6 +133,8 @@ export function createDesktopWorkspace(deps: DesktopWorkspaceDeps) {
   const callAsks = new Map<number, CallAsk>();
   let nextAsk = 1;
   let nextCall = 1;
+  /** An undo from the banner is putting files back. */
+  let undoing = false;
   let serving: AbortController | null = null;
   let client: { stop(reason?: string): void } | null = null;
   let connected = false;
@@ -446,15 +448,20 @@ export function createDesktopWorkspace(deps: DesktopWorkspaceDeps) {
       if (!mine) return { error: 'That run\'s checkpoint is gone, so there is nothing to undo from here.' };
       if (mine.undone) { last = { ...last, undone: true, canUndo: false, note: 'Already undone (from Cascade).' }; publish(); return { error: 'That run\'s changes were already undone.' }; }
       if (all.filter((c) => !c.undone).at(-1)?.n !== last.n) return { error: 'A newer checkpoint exists for this folder, so undoing the run from here could put back more than it changed. Use /undo in Cascade for that folder.' };
-      const r = await store.undo(1);
+      if (undoing) return { error: 'An undo is already running.' };
+      // The run this undo is for: another run can start and end while it works, and
+      // its summary then replaces this one, which must be left as it is.
+      const target = last;
+      const update = (next: NonNullable<typeof last>): void => { if (last === target) { last = next; publish(); } };
+      undoing = true;
+      let r: Awaited<ReturnType<CheckpointStore['undo']>>;
+      try { r = await store.undo(1); } finally { undoing = false; }
       // The run's last snapshot was never written: nothing was put back.
       if (r.incomplete?.length) {
-        last = { ...last, note: 'This run\'s checkpoint is incomplete, so its changes could not be undone from here. Use /undo --force in Cascade for that folder if you are sure.' };
-        publish();
+        update({ ...target, note: 'This run\'s checkpoint is incomplete, so its changes could not be undone from here. Use /undo --force in Cascade for that folder if you are sure.' });
         return { error: 'The run\'s checkpoint is incomplete, so nothing was undone.' };
       }
-      last = { ...last, undone: true, canUndo: false, note: r.skipped.length ? `${r.skipped.length} file(s) changed since the run were left as they are.` : null };
-      publish();
+      update({ ...target, undone: true, canUndo: false, note: r.skipped.length ? `${r.skipped.length} file(s) changed since the run were left as they are.` : null });
       return { ok: true, restored: r.restored.length, removed: r.removed.length, skipped: r.skipped.length };
     },
 

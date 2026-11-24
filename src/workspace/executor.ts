@@ -25,7 +25,7 @@ import path from 'node:path';
 import type { PrivacyPaths } from '../core/privacy/paths.js';
 import { assessRisk, type Risk } from '../core/permissions/risk.js';
 import type { ToolDefinition, ToolExecuteOptions } from '../types.js';
-import { MAX_CHANGED, MAX_CHANGED_PATH_CHARS, capResult, isWorkspaceTool } from './protocol.js';
+import { CUT_NOTE, MAX_CHANGED, MAX_CHANGED_PATH_CHARS, capResult, isWorkspaceTool } from './protocol.js';
 
 /** Files remembered per worker, and workers remembered: bounds on what the machine keeps. */
 const MAX_TRACKED_FILES = 500;
@@ -135,7 +135,7 @@ export function createWorkspaceExecutor(opts: WorkspaceExecutorOptions): Workspa
    * paths that changed since, once each. Never a local-only file's name, and never
    * more than the protocol allows.
    */
-  const trackReads = (worker: string, tool: string, input: Record<string, unknown>, heldWasCurrent = true): string[] => {
+  const trackReads = (worker: string, tool: string, input: Record<string, unknown>, heldWasCurrent = true, complete = true): string[] => {
     let mine = reads.get(worker);
     const given = typeof input['path'] === 'string' ? path.resolve(root, input['path']) : null;
     if (given && tool === 'file_read' && inFolder(given) !== null && mayRead(given)) {
@@ -147,7 +147,8 @@ export function createWorkspaceExecutor(opts: WorkspaceExecutorOptions): Workspa
       const now = stat(given);
       // A read of part of a file (offset, limit) shows only that part: a file already
       // held keeps what it was held at, so a change elsewhere in it is still reported.
-      const partial = (typeof input['offset'] === 'number' && input['offset'] > 1) || typeof input['limit'] === 'number';
+      // So does a whole read the result cap cut short: the rest was never sent.
+      const partial = !complete || (typeof input['offset'] === 'number' && input['offset'] > 1) || typeof input['limit'] === 'number';
       if (now && !(partial && mine.has(given))) {
         mine.delete(given);
         mine.set(given, now);
@@ -209,7 +210,7 @@ export function createWorkspaceExecutor(opts: WorkspaceExecutorOptions): Workspa
         if (!outcome.ok || !call.worker) return outcome;
         // Best effort: a failure to look at the disk is no failure of the call.
         try {
-          const changed = trackReads(call.worker, tool, input, heldWasCurrent);
+          const changed = trackReads(call.worker, tool, input, heldWasCurrent, !CUT_NOTE.test(outcome.output));
           return changed.length ? { ...outcome, changed } : outcome;
         } catch { return outcome; }
       } catch (e) {
