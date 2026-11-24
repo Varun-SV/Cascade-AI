@@ -787,6 +787,39 @@ describe('Codex on a0cb796', () => {
   });
 });
 
+describe('Codex on 6f99570', () => {
+  const write = (rel: string, text: string) => fs.writeFileSync(path.join(root, rel), text);
+
+  it('not an option that reads other files named inside one (file -f, file -m, diff -X), nor one not known to be safe', () => {
+    write('names.txt', 'a.txt\n');
+    write('a.txt', 'a');
+    write('b.txt', 'b');
+    const files = (command: string) => readsOf(command, root)?.map((f) => path.relative(root, f));
+    expect(files('file -f names.txt')).toBeUndefined();
+    expect(files('file -m names.txt a.txt')).toBeUndefined();
+    expect(files('diff -X names.txt a.txt b.txt')).toBeUndefined();
+    expect(files('cat -Z a.txt')).toBeUndefined();
+    expect(files('stat -c a.txt')).toBeUndefined();
+    // Control: options that only change how the named files are shown.
+    expect(files('file -b a.txt')).toEqual(['a.txt']);
+    expect(files('cat -n a.txt')).toEqual(['a.txt']);
+    expect(files('diff -u a.txt b.txt')).toEqual(['a.txt', 'b.txt']);
+    expect(files('head -20 a.txt')).toEqual(['a.txt']);
+    // A count is the next word for head and tail only: wc reads both files here.
+    expect(files('wc -c a.txt b.txt')).toEqual(['a.txt', 'b.txt']);
+    expect(files('head -n 1 a.txt')).toEqual(['a.txt']);
+  });
+
+  it("a local-only worker's shell read is tracked for it, though nothing goes on the board", () => {
+    write('a.txt', 'alpha');
+    const mem = new RunMemory(root);
+    run(mem, 'shell', { command: 'cat a.txt' }, 'alpha', 'T3-private', { failed: false, publish: false });
+    expect(mem.reuse('shell', { command: 'cat a.txt' })).toBeNull();
+    write('a.txt', 'alpha, edited');
+    expect(mem.changedFor('T3-private', true)).toEqual([{ path: 'a.txt', gone: false }]);
+  });
+});
+
 describe('facts checked against the machine', () => {
   let saved: string | undefined;
   beforeEach(() => { saved = process.env['PATH']; });

@@ -446,12 +446,23 @@ const FILE_READERS = new Set(['cat', 'type', 'head', 'tail', 'wc', 'stat', 'file
 /** Options of head/tail that take a value as the next word. */
 const VALUE_OPTIONS = /^(-n|-c|--lines|--bytes)$/;
 /**
- * Options that make the answer depend on more than the named files: `stat -f`
- * reports the whole filesystem (free blocks change with any write), `tail -f`
- * follows the file instead of reading it. A long option is accepted only for
- * the value options above.
+ * The short options taken, per command: only ones that change how the named
+ * files are shown, not which files are read or what else is reported. Left out
+ * on purpose, among others: `stat -f` (the whole filesystem's free blocks),
+ * `tail -f` (follows), `file -f`/`-m` and `diff -X` (read other files named
+ * inside), and anything that takes a value. Any other option, and every long
+ * one but the value options above, means the command isn't taken.
  */
-const WIDER_OPTIONS: Record<string, RegExp> = { stat: /f/, tail: /[fF]/ };
+const SHORT_OPTIONS: Record<string, RegExp> = {
+  cat: /^-[AbeEnstTuv]+$/,
+  head: /^-(\d+|[qv]+)$/,
+  tail: /^-(\d+|[qv]+)$/,
+  wc: /^-[clmwL]+$/,
+  stat: /^-[Lt]+$/,
+  file: /^-[bhiLkNz]+$/,
+  cmp: /^-[bls]+$/,
+  diff: /^-[abBdEiNpqstTuwy]+$/,
+};
 
 /**
  * The files a read-only shell command reads, when its answer depends on them
@@ -475,12 +486,14 @@ export function readsOf(command: string, cwd: string): string[] | null {
     if (w.startsWith('-')) {
       // PowerShell parameters take values in ways not worth guessing at; `-` alone reads stdin.
       if (cmd === 'get-content' || cmd === 'gc' || w === '-') return null;
-      if (VALUE_OPTIONS.test(w)) { i++; continue; }
+      const counts = cmd === 'head' || cmd === 'tail';
+      // Only head and tail take a count as the next word: `wc -c a b` reads both.
+      if (counts && VALUE_OPTIONS.test(w)) { i++; continue; }
       if (w.startsWith('--')) {
-        if (/^--(lines|bytes)=/.test(w)) continue;
+        if (counts && /^--(lines|bytes)=/.test(w)) continue;
         return null;
       }
-      if (WIDER_OPTIONS[cmd]?.test(w.slice(1))) return null;
+      if (!SHORT_OPTIONS[cmd]?.test(w)) return null;
       continue;
     }
     const abs = path.resolve(cwd, w);
@@ -672,6 +685,11 @@ export class RunMemory {
     // Something that may change things, and finished (or failed part way): anything
     // stored before it is stale, here and in every other run in this workspace.
     if (!callReadsOnly(tool, input)) { this.epoch += 1; this.changing = Math.max(0, this.changing - 1); this.changes.bump(); started?.leave?.(); }
+    // The files a read read are files this worker now has in its prompt, as they
+    // were when it started (a change while it ran is one it didn't see). Before
+    // the gate below: a local-only worker is told of changes too, though what it
+    // found and got stays off the board.
+    for (const [abs, was] of started?.reads ?? []) this.noteRead(by, abs, was ?? undefined);
     if (!how.publish) return;
     const where = this.cwd(input);
     const { learnt, unlearnt } = factsFrom(tool, input, output, this.label(where), how.failed);
@@ -690,9 +708,6 @@ export class RunMemory {
       if (isNew && this.keep()) this.persist(() => this.db?.upsertFact(ENTITY, f.relation, f.value, `run:${by}`, undefined, []));
     }
     const key = this.reusable(tool, input);
-    // The files a read read are files this worker now has in its prompt.
-    // As they were when it started: a change while it ran is one it didn't see.
-    for (const [abs, was] of started?.reads ?? []) this.noteRead(by, abs, was ?? undefined);
     if (!key || how.failed || !started || this.changes.busy() || output.length > MAX_RESULT_CHARS) return;
     let stored: { output: string; by: string; epoch: number; mark: string; at: number; reads?: Array<[string, Snapshot]> } | null = null;
     if (started.reads) {
