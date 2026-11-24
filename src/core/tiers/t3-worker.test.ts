@@ -2362,6 +2362,29 @@ describe('workers share what they find (run-memory.ts)', () => {
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  // A workspace on the user's machine (src/workspace/): the board watches this machine.
+  it("a tool that runs on another machine is never answered from the board, nor stored on it", async () => {
+    const { RunMemory } = await import('../knowledge/run-memory.js');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-share-'));
+    try {
+      const memory = new RunMemory(root);
+      // What the server's own `ls` once gave.
+      memory.observe('shell', { command: 'ls' }, 'server-file.txt', 'T3-other', memory.begin('shell', { command: 'ls' }), { failed: false, publish: true });
+      const execute = vi.fn(async () => 'machine-file.txt');
+      const registry = makeToolRegistry({
+        getToolDefinitions: () => [{ name: 'shell', description: 'Run a command', inputSchema: {} }],
+        getTool: () => ({ remote: true }),
+        getWorkspaceRoot: () => root,
+        execute,
+      } as unknown as Partial<ToolRegistry>);
+      const router = scripted([makeResult('', [{ id: 'l', name: 'shell', input: { command: 'ls' } }], 'tool_use'), makeResult('done')], { getRunMemory: () => memory });
+      await new T3Worker(router, registry, 't2-r').execute(makeAssignment({ subtaskId: 's-r' }), 'task-share');
+      expect(execute).toHaveBeenCalledTimes(1);
+      // The machine's answer was not kept as this machine's.
+      expect(memory.reuse('shell', { command: 'ls' })?.output).toBe('server-file.txt');
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   // Codex on 3e1e80c: file_edit shows only the lines it replaced.
   it('its partial edit of a file someone else changed since it read it still brings the note', async () => {
     const { RunMemory } = await import('../knowledge/run-memory.js');

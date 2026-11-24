@@ -1441,7 +1441,10 @@ export class T3Worker extends BaseTier {
     // nothing changed since, is answered from there instead of run again. A
     // local-only subtask reads nothing from it and adds nothing to it, but what
     // it changes still has to make the others' stored answers stale.
-    const board = this.router.getRunMemory?.(this.artifactRoot());
+    // A tool that runs on another machine (a workspace the user serves: src/workspace/)
+    // is kept off the board: it watches files and checks facts on this machine, which
+    // say nothing of that one.
+    const board = this.toolRegistry.getTool?.(tc.name)?.remote ? undefined : this.router.getRunMemory?.(this.artifactRoot());
     const reused = this.localOnlyMatch ? null : board?.reuse(tc.name, tc.input, this.id);
     if (reused) {
       // Read as surely as if it had run: what this worker learns from it has the same

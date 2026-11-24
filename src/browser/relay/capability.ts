@@ -19,9 +19,7 @@ import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, ran
 import type { KeyObject } from 'node:crypto';
 import { POLICY_VERSION } from './command-policy.js';
 
-const GRANT_DOMAIN = 'cascade.relay.grant.v1';
 const HELLO_DOMAIN = 'cascade.relay.hello.v1';
-const APPROVAL_DOMAIN = 'cascade.relay.approval.v1';
 /** The longest any grant or approval may live. */
 export const MAX_LIFETIME_MS = 30 * 60_000;
 const CLOCK_SKEW_MS = 30_000;
@@ -30,15 +28,50 @@ export interface GrantPayload {
   iss: string; aud: string; userId: string; deviceId: string; runId: string;
   iat: number; exp: number; nonce: string; policyVersion: number;
 }
-export interface ApprovalPayload {
-  grantHash: string; iss: string; aud: string; tabTargetId: string;
-  allowedOrigins: string[]; privateOrigins: string[];
+/** What every approval carries, whatever it approves. */
+export interface ApprovalBase {
+  grantHash: string; iss: string; aud: string;
   iat: number; exp: number; nonce: string; policyVersion: number;
 }
+/** What a browser lease approves: one tab, these origins. */
+export interface ApprovedScope { tabTargetId: string; allowedOrigins: string[]; privateOrigins: string[] }
+export type ApprovalPayload = ApprovalBase & ApprovedScope;
 export interface Signed<T> { payload: T; sig: string }
 
+/**
+ * One kind of thing a device can serve a run: a browser, or a workspace (see
+ * src/workspace/). Each signs under its own domains, so an approval given for one
+ * can never be passed off as an approval for the other, and carries its own
+ * scope fields and policy version.
+ */
+export interface CapabilityFamily<S extends object> {
+  readonly grantDomain: string;
+  readonly approvalDomain: string;
+  readonly policyVersion: number;
+  /** The scope's fields, sorted: an approval carries exactly these besides the base. */
+  readonly scopeFields: readonly string[];
+  /** A copy the caller can't change afterwards. */
+  freeze(scope: S): S;
+}
+
 const GRANT_FIELDS = ['aud', 'deviceId', 'exp', 'iat', 'iss', 'nonce', 'policyVersion', 'runId', 'userId'];
-const APPROVAL_FIELDS = ['allowedOrigins', 'aud', 'exp', 'grantHash', 'iat', 'iss', 'nonce', 'policyVersion', 'privateOrigins', 'tabTargetId'];
+const APPROVAL_BASE_FIELDS = ['aud', 'exp', 'grantHash', 'iat', 'iss', 'nonce', 'policyVersion'];
+
+export const BROWSER_FAMILY: CapabilityFamily<ApprovedScope> = Object.freeze({
+  grantDomain: 'cascade.relay.grant.v1',
+  approvalDomain: 'cascade.relay.approval.v1',
+  policyVersion: POLICY_VERSION,
+  scopeFields: ['allowedOrigins', 'privateOrigins', 'tabTargetId'],
+  freeze: (scope: ApprovedScope): ApprovedScope => Object.freeze({
+    tabTargetId: scope.tabTargetId,
+    allowedOrigins: Object.freeze([...scope.allowedOrigins]) as string[],
+    privateOrigins: Object.freeze([...scope.privateOrigins]) as string[],
+  }),
+});
+
+const approvalFields = (family: CapabilityFamily<object>): string[] => [...APPROVAL_BASE_FIELDS, ...family.scopeFields].sort();
+const scopeOf = <S extends object>(family: CapabilityFamily<S>, payload: object): S =>
+  Object.fromEntries(family.scopeFields.map((k) => [k, (payload as Record<string, unknown>)[k]])) as S;
 
 /** RFC 8785 for the values these payloads hold: strings, safe integers, arrays and objects. */
 export function canonicalJson(value: unknown): string {
@@ -114,8 +147,8 @@ function verifySig(domain: string, signed: Signed<object>, key: KeyObject): bool
   try { return edVerify(null, toSign(domain, signed.payload), key, Buffer.from(signed.sig, 'base64url')); } catch { return false; }
 }
 
-export function grantHash(grant: Signed<GrantPayload>): string {
-  return createHash('sha256').update(toSign(GRANT_DOMAIN, grant.payload)).digest('base64url');
+export function grantHash(grant: Signed<GrantPayload>, family: CapabilityFamily<object> = BROWSER_FAMILY): string {
+  return createHash('sha256').update(toSign(family.grantDomain, grant.payload)).digest('base64url');
 }
 
 const hasExactly = (o: object, fields: readonly string[]): boolean => {
@@ -127,8 +160,8 @@ export type Check = { ok: true } | { ok: false; reason: string };
 const no = (reason: string): Check => ({ ok: false, reason });
 const YES: Check = { ok: true };
 
-function checkTimes(p: { iat: number; exp: number; policyVersion: number }, now: number): Check {
-  if (p.policyVersion !== POLICY_VERSION) return no('policy version mismatch');
+function checkTimes(p: { iat: number; exp: number; policyVersion: number }, now: number, policyVersion: number): Check {
+  if (p.policyVersion !== policyVersion) return no('policy version mismatch');
   if (!Number.isSafeInteger(p.iat) || !Number.isSafeInteger(p.exp)) return no('malformed times');
   if (p.exp - p.iat > MAX_LIFETIME_MS) return no('lifetime too long');
   if (p.iat > now + CLOCK_SKEW_MS) return no('issued in the future');
@@ -140,30 +173,32 @@ function checkTimes(p: { iat: number; exp: number; policyVersion: number }, now:
 export function issueGrant(
   server: Identity,
   fields: { userId: string; deviceId: string; runId: string; ttlMs: number; now: number },
+  family: CapabilityFamily<object> = BROWSER_FAMILY,
 ): Signed<GrantPayload> {
   const payload: GrantPayload = {
     iss: server.id, aud: fields.deviceId, userId: fields.userId, deviceId: fields.deviceId, runId: fields.runId,
     iat: fields.now, exp: fields.now + Math.min(fields.ttlMs, MAX_LIFETIME_MS),
-    nonce: randomBytes(18).toString('base64url'), policyVersion: POLICY_VERSION,
+    nonce: randomBytes(18).toString('base64url'), policyVersion: family.policyVersion,
   };
-  return { payload, sig: server.sign(toSign(GRANT_DOMAIN, payload)) };
+  return { payload, sig: server.sign(toSign(family.grantDomain, payload)) };
 }
 
 /** Checked by the device, before asking the user, and again by the server. */
-export function verifyGrant(grant: Signed<GrantPayload>, serverKey: KeyObject, expect: { serverId: string; deviceId: string }, now: number): Check {
+export function verifyGrant(
+  grant: Signed<GrantPayload>, serverKey: KeyObject, expect: { serverId: string; deviceId: string }, now: number,
+  family: CapabilityFamily<object> = BROWSER_FAMILY,
+): Check {
   if (!grant?.payload || !hasExactly(grant.payload, GRANT_FIELDS)) return no('malformed grant');
-  if (!verifySig(GRANT_DOMAIN, grant, serverKey)) return no('bad grant signature');
+  if (!verifySig(family.grantDomain, grant, serverKey)) return no('bad grant signature');
   const p = grant.payload;
   if (p.iss !== expect.serverId) return no('grant from another server');
   if (p.aud !== expect.deviceId || p.deviceId !== expect.deviceId) return no('grant for another device');
-  return checkTimes(p, now);
+  return checkTimes(p, now, family.policyVersion);
 }
 
-export interface ApprovedScope { tabTargetId: string; allowedOrigins: string[]; privateOrigins: string[] }
-
-function verifyApprovalSignature(approval: Signed<ApprovalPayload>, deviceKey: KeyObject): Check {
-  if (!approval?.payload || !hasExactly(approval.payload, APPROVAL_FIELDS)) return no('malformed approval');
-  if (!verifySig(APPROVAL_DOMAIN, approval, deviceKey)) return no('bad approval signature');
+function verifyApprovalSignature(approval: Signed<object>, deviceKey: KeyObject, family: CapabilityFamily<object>): Check {
+  if (!approval?.payload || !hasExactly(approval.payload, approvalFields(family))) return no('malformed approval');
+  if (!verifySig(family.approvalDomain, approval, deviceKey)) return no('bad approval signature');
   return YES;
 }
 
@@ -216,7 +251,9 @@ export async function claimAtServer(opts: {
   server: Identity;
   store: NonceStore;
   grant: Signed<GrantPayload>;
-  approval: Signed<ApprovalPayload>;
+  approval: Signed<ApprovalBase>;
+  /** What the grant and approval are for: a browser unless said. */
+  family?: CapabilityFamily<object>;
   /** The key registered for this device, or null if there's none. */
   deviceKey: (deviceId: string) => KeyObject | null;
   issued: (grantNonce: string) => IssuedRun | null;
@@ -224,23 +261,24 @@ export async function claimAtServer(opts: {
 }): Promise<ClaimResult> {
   const refused = (reason: string): ClaimResult => ({ outcome: 'refused', reason });
   const { grant, approval, server, now } = opts;
+  const family = opts.family ?? BROWSER_FAMILY;
   const deviceId = grant?.payload?.deviceId;
   if (typeof deviceId !== 'string') return refused('malformed grant');
-  const g = verifyGrant(grant, server.publicKey, { serverId: server.id, deviceId }, now);
+  const g = verifyGrant(grant, server.publicKey, { serverId: server.id, deviceId }, now, family);
   if (!g.ok) return refused(g.reason);
   const run = opts.issued(grant.payload.nonce);
   if (!run) return refused('grant was not issued here');
   if (run.userId !== grant.payload.userId || run.deviceId !== deviceId || run.runId !== grant.payload.runId) return refused('grant does not match the issued run');
   const key = opts.deviceKey(deviceId);
   if (!key) return refused('device is not registered');
-  const a = verifyApprovalSignature(approval, key);
+  const a = verifyApprovalSignature(approval, key, family);
   if (!a.ok) return refused(a.reason);
   const p = approval.payload;
-  if (p.grantHash !== grantHash(grant)) return refused('approval is for another grant');
+  if (p.grantHash !== grantHash(grant, family)) return refused('approval is for another grant');
   if (p.iss !== deviceId) return refused('approval from another device');
   if (p.aud !== server.id) return refused('approval for another server');
   if (p.exp > grant.payload.exp) return refused('approval outlives its grant');
-  const t = checkTimes(p, now);
+  const t = checkTimes(p, now, family.policyVersion);
   if (!t.ok) return refused(t.reason);
   try {
     // Keyed by the grant: each grant yields one lease, however many approvals exist.
@@ -252,49 +290,46 @@ export async function claimAtServer(opts: {
 
 // ── The device's side ────────────────────────────────────────────────────────
 
-export interface DeviceApprovals {
+export interface DeviceApprovals<S extends object = ApprovedScope> {
   /** Call only after the user has approved. Verifies the grant first. */
-  approve(grant: Signed<GrantPayload>, scope: ApprovedScope, ttlMs: number): Signed<ApprovalPayload> | { refused: string };
+  approve(grant: Signed<GrantPayload>, scope: S, ttlMs: number): Signed<ApprovalBase & S> | { refused: string };
   /** The device's own record of an approval, if it may still be used. */
-  admit(approval: Signed<ApprovalPayload>): { ok: true; scope: ApprovedScope; exp: number } | { ok: false; reason: string };
+  admit(approval: Signed<ApprovalBase>): { ok: true; scope: S; exp: number } | { ok: false; reason: string };
   /** Marks an approval used for good. */
   burn(nonce: string): void;
 }
 
-function frozenScope(scope: ApprovedScope): ApprovedScope {
-  return Object.freeze({
-    tabTargetId: scope.tabTargetId,
-    allowedOrigins: Object.freeze([...scope.allowedOrigins]) as string[],
-    privateOrigins: Object.freeze([...scope.privateOrigins]) as string[],
-  });
-}
-
-export function createDeviceApprovals(opts: {
+export function createDeviceApprovals<S extends object = ApprovedScope>(opts: {
   device: Identity; serverId: string; serverKey: KeyObject; now: () => number;
-}): DeviceApprovals {
+  /** What is approved: a browser unless said. */
+  family?: CapabilityFamily<S>;
+}): DeviceApprovals<S> {
   const { device, serverId, serverKey, now } = opts;
-  const records = new Map<string, { scope: ApprovedScope; exp: number; used: boolean }>();
+  const family = (opts.family ?? BROWSER_FAMILY) as CapabilityFamily<S>;
+  const records = new Map<string, { scope: S; exp: number; used: boolean }>();
   return {
     approve(grant, scope, ttlMs) {
       const t = now();
-      const g = verifyGrant(grant, serverKey, { serverId, deviceId: device.id }, t);
+      const g = verifyGrant(grant, serverKey, { serverId, deviceId: device.id }, t, family);
       if (!g.ok) return { refused: g.reason };
-      const payload: ApprovalPayload = {
-        grantHash: grantHash(grant), iss: device.id, aud: serverId, tabTargetId: scope.tabTargetId,
-        allowedOrigins: [...scope.allowedOrigins], privateOrigins: [...scope.privateOrigins],
+      const frozen = family.freeze(scope);
+      const payload = {
+        grantHash: grantHash(grant, family), iss: device.id, aud: serverId,
+        // Copies of the scope's own fields, and nothing else of what the caller passed.
+        ...(JSON.parse(JSON.stringify(scopeOf(family, frozen))) as S),
         iat: t, exp: Math.min(t + ttlMs, grant.payload.exp),
-        nonce: randomBytes(18).toString('base64url'), policyVersion: POLICY_VERSION,
-      };
+        nonce: randomBytes(18).toString('base64url'), policyVersion: family.policyVersion,
+      } as ApprovalBase & S;
       // The device's own copy, which nothing the caller holds can change.
-      records.set(payload.nonce, { scope: frozenScope(scope), exp: payload.exp, used: false });
-      return { payload, sig: device.sign(toSign(APPROVAL_DOMAIN, payload)) };
+      records.set(payload.nonce, { scope: frozen, exp: payload.exp, used: false });
+      return { payload, sig: device.sign(toSign(family.approvalDomain, payload)) };
     },
     admit(approval) {
       const r = records.get(approval?.payload?.nonce);
       if (!r) return { ok: false, reason: 'not an approval this device gave' };
       if (r.used) return { ok: false, reason: 'approval already used' };
       if (now() >= r.exp) return { ok: false, reason: 'approval expired' };
-      return { ok: true, scope: frozenScope(r.scope), exp: r.exp };
+      return { ok: true, scope: family.freeze(r.scope), exp: r.exp };
     },
     burn(nonce) {
       const r = records.get(nonce);
@@ -304,6 +339,6 @@ export function createDeviceApprovals(opts: {
 }
 
 /** Verifies an approval's own signature, for a party holding the device's public key. */
-export function approvalIsSigned(approval: Signed<ApprovalPayload>, deviceKey: KeyObject): boolean {
-  return verifyApprovalSignature(approval, deviceKey).ok;
+export function approvalIsSigned(approval: Signed<ApprovalBase>, deviceKey: KeyObject, family: CapabilityFamily<object> = BROWSER_FAMILY): boolean {
+  return verifyApprovalSignature(approval, deviceKey, family).ok;
 }
