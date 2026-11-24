@@ -2362,6 +2362,49 @@ describe('workers share what they find (run-memory.ts)', () => {
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  // Codex on 3e1e80c: file_edit shows only the lines it replaced.
+  it('its partial edit of a file someone else changed since it read it still brings the note', async () => {
+    const { RunMemory } = await import('../knowledge/run-memory.js');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-share-'));
+    try {
+      const abs = path.join(root, 'notes.md');
+      fs.writeFileSync(abs, 'one\ntwo\n');
+      const memory = new RunMemory(root);
+      const notes: string[][] = [];
+      const queue = [
+        makeResult('', [{ id: 'r', name: 'file_read', input: { path: 'notes.md' } }], 'tool_use'),
+        makeResult('', [{ id: 'e', name: 'file_edit', input: { path: 'notes.md', old: 'one', new: 'ONE' } }], 'tool_use'),
+        makeResult('done'),
+      ];
+      const router = {
+        generate: vi.fn(async (_tier: string, options: { messages: Array<{ content: unknown }> }) => {
+          notes.push(options.messages.map((m) => m.content).filter((c): c is string => typeof c === 'string' && c.startsWith('FILES CHANGED SINCE YOU READ THEM')));
+          // After this call was told what changed, before its edit runs: another
+          // worker changes line two.
+          if (notes.length === 2) fs.writeFileSync(abs, 'one\ntwo, changed by another worker\n');
+          return queue.shift() ?? makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }),
+        getModelForTier: () => undefined,
+        getRunMemory: () => memory,
+      } as unknown as CascadeRouter;
+      const execute = vi.fn(async (name: string, _input: Record<string, unknown>, opts: { noteRead?: (abs: string) => void }) => {
+        if (name === 'file_read') { opts.noteRead?.(abs); return fs.readFileSync(abs, 'utf8'); }
+        fs.writeFileSync(abs, fs.readFileSync(abs, 'utf8').replace('one', 'ONE'));
+        return 'Replaced 1 occurrence.';
+      });
+      const registry = makeToolRegistry({
+        getToolDefinitions: () => [
+          { name: 'file_read', description: 'Read a file', inputSchema: {} },
+          { name: 'file_edit', description: 'Edit a file', inputSchema: {} },
+        ],
+        getWorkspaceRoot: () => root,
+        execute,
+      } as unknown as Partial<ToolRegistry>);
+      await new T3Worker(router, registry, 't2-e').execute(makeAssignment({ subtaskId: 's-e' }), 'task-share');
+      expect(notes[2]?.some((n) => n.includes('- notes.md'))).toBe(true);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   // The user's question: a worker read a file, then another worker (or a command,
   // or an edit outside Cascade) changed it. Its next model call says so.
   it('a file it read and someone else changed is named before its next model call; its own write is not', async () => {

@@ -887,6 +887,40 @@ describe('Codex on 27f8481', () => {
   });
 });
 
+describe('Codex on 3e1e80c', () => {
+  it('a partial edit of a file changed under the worker leaves that change to be told', () => {
+    const abs = path.join(root, 'a.txt');
+    fs.writeFileSync(abs, 'line one\nline two\n');
+    const mem = new RunMemory(root);
+    mem.noteRead('T3-a', abs);
+    // Another worker changes line two; then T3-a edits line one.
+    fs.writeFileSync(abs, 'line one\nline two, changed by b\n');
+    const wasCurrent = mem.heldCurrent('T3-a', abs);
+    expect(wasCurrent).toBe(false);
+    fs.writeFileSync(abs, 'line ONE\nline two, changed by b\n');
+    mem.noteWritten('T3-a', abs, wasCurrent);
+    expect(mem.changedFor('T3-a')).toEqual([{ path: 'a.txt', gone: false }]);
+    // Control: an edit of a file it held current is no news.
+    expect(mem.heldCurrent('T3-a', abs)).toBe(true);
+    fs.writeFileSync(abs, 'line ONE!\nline two, changed by b\n');
+    mem.noteWritten('T3-a', abs, true);
+    expect(mem.changedFor('T3-a')).toEqual([]);
+  });
+
+  it('a file first noted after a call that began before its last change is held as out of date', () => {
+    const abs = path.join(root, 'a.txt');
+    fs.writeFileSync(abs, 'v2');
+    const mem = new RunMemory(root);
+    // The search began before the file's last change, and noted it once done.
+    mem.noteRead('T3-a', abs, undefined, Date.now() - 60_000);
+    expect(mem.changedFor('T3-a')).toEqual([{ path: 'a.txt', gone: false }]);
+    expect(mem.changedFor('T3-a')).toEqual([]);
+    // Control: a call that began after the file's last change.
+    mem.noteRead('T3-b', abs, undefined, Date.now() + 60_000);
+    expect(mem.changedFor('T3-b')).toEqual([]);
+  });
+});
+
 describe('facts checked against the machine', () => {
   let saved: string | undefined;
   beforeEach(() => { saved = process.env['PATH']; });

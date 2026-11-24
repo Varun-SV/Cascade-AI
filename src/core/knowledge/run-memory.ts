@@ -835,9 +835,13 @@ export class RunMemory {
    * `worker` has read this file into its prompt: it is told if the file changes.
    * `as` is the file as it was read, when that was earlier than now.
    */
-  noteRead(worker: string, abs: string, as?: Snapshot): void {
-    const snap = as ?? snapshot(abs);
+  noteRead(worker: string, abs: string, as?: Snapshot, since?: number): void {
+    let snap = as ?? snapshot(abs);
     if (!snap) return;
+    // Noted after the tool read it (grep notes its hits once the search is done):
+    // one changed since the call began may have been read before that change.
+    // Held as already out of date, so the worker is told; at worst once needlessly.
+    if (!as && since !== undefined && Math.max(snap.mtimeMs, snap.ctimeMs) >= since) snap = { ...snap, mtimeMs: -1 };
     let reads = this.readsBy.get(worker);
     if (!reads) { reads = new Map(); this.readsBy.set(worker, reads); }
     // One already held is kept, not replaced: a change since it was taken hasn't
@@ -851,10 +855,23 @@ export class RunMemory {
     if (reads.size > MAX_TRACKED_READS) reads.delete(reads.keys().next().value!);
   }
 
-  /** `worker` wrote this file itself (file_write, file_edit): no news to it. */
-  noteWritten(worker: string, abs: string): void {
+  /** Whether what `worker` holds of this file is what it holds now (true if it holds nothing of it). */
+  heldCurrent(worker: string, abs: string): boolean {
+    const held = this.readsBy.get(worker)?.get(abs);
+    return !held || sameSnapshot(held, snapshot(abs));
+  }
+
+  /**
+   * `worker` wrote this file itself (file_write, file_edit): no news to it.
+   * `wasCurrent`: what it held of the file was current just before (heldCurrent);
+   * a partial edit of a file changed under it leaves that change to be told.
+   */
+  noteWritten(worker: string, abs: string, wasCurrent = true): void {
     const reads = this.readsBy.get(worker);
     if (!reads?.has(abs)) return;
+    // A partial edit of a file someone else had changed since the worker read it:
+    // the edit shows it only the lines it replaced, so that change is still news.
+    if (!wasCurrent) return;
     const snap = snapshot(abs);
     if (snap) reads.set(abs, snap);
     else reads.delete(abs);
