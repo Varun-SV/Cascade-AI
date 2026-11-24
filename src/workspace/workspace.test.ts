@@ -623,6 +623,23 @@ describe('the machine tells each worker which files it read have changed', () =>
     expect(await a('file_list', { path: '.' })).not.toMatch(NOTE);
   });
 
+  it("a whole read longer than the worker's context keeps is no refresh: a change in the middle still reaches it", async () => {
+    const w = await world();
+    const dir = folder();
+    const mid = path.join(dir, 'mid.txt');
+    const lines = Array.from({ length: 2000 }, (_, i) => `line ${i}`);
+    fs.writeFileSync(mid, lines.join('\n'));
+    await machine(w, dir, { answer: { tools: ['file_read', 'file_list'], label: 'p' } });
+    const { ws } = await runWorkspace(w);
+    const a = as(ws, 'worker-a');
+    await a('file_read', { path: 'mid.txt' });
+    lines[1000] = 'line 1000, changed by the user';
+    fs.writeFileSync(mid, lines.join('\n'));
+    // Sent whole, but the worker's context keeps only its head and tail: still news.
+    expect((await a('file_read', { path: 'mid.txt' })).match(NOTE)?.[1]).toBe('mid.txt');
+    expect(await a('file_list', { path: '.' })).not.toMatch(NOTE);
+  });
+
   it('a listing or a search naming a file it read is no change of its own: a later edit still reaches it', async () => {
     const w = await world();
     const dir = folder();
