@@ -135,7 +135,7 @@ export function createWorkspaceExecutor(opts: WorkspaceExecutorOptions): Workspa
    * paths that changed since, once each. Never a local-only file's name, and never
    * more than the protocol allows.
    */
-  const trackReads = (worker: string, tool: string, input: Record<string, unknown>): string[] => {
+  const trackReads = (worker: string, tool: string, input: Record<string, unknown>, heldWasCurrent = true): string[] => {
     let mine = reads.get(worker);
     const given = typeof input['path'] === 'string' ? path.resolve(root, input['path']) : null;
     if (given && tool === 'file_read' && inFolder(given) !== null && mayRead(given)) {
@@ -150,8 +150,10 @@ export function createWorkspaceExecutor(opts: WorkspaceExecutorOptions): Workspa
         mine.set(given, now);
         if (mine.size > MAX_TRACKED_FILES) mine.delete(mine.keys().next().value as string);
       }
-    } else if (given && mine?.has(given) && SELF_CHANGES.has(tool)) {
+    } else if (given && mine?.has(given) && SELF_CHANGES.has(tool) && (heldWasCurrent || tool !== 'file_edit')) {
       // Its own write, edit or delete: it knows. (A listing or a search changes nothing.)
+      // Not an edit of a copy that was already stale: an edit shows only the lines it
+      // replaced, so what else changed is still news, and the check below reports it.
       const now = tool === 'file_delete' ? null : stat(given);
       if (now) mine.set(given, now); else mine.delete(given);
     }
@@ -190,11 +192,21 @@ export function createWorkspaceExecutor(opts: WorkspaceExecutorOptions): Workspa
     async run(tool, input, call) {
       // Never rejects: whatever fails (an unreadable privacy record, say) is a refused call.
       try {
+        // Whether what the worker last read is still what's on disk, before its edit changes it.
+        let heldWasCurrent = true;
+        if (tool === 'file_edit' && call.worker && typeof input['path'] === 'string') {
+          try {
+            const abs = path.resolve(root, input['path']);
+            const was = reads.get(call.worker)?.get(abs);
+            const now = was ? stat(abs) : null;
+            heldWasCurrent = !was || (!!now && now.mtimeMs === was.mtimeMs && now.size === was.size);
+          } catch { /* best effort */ }
+        }
         const outcome = await runCall(tool, input, call);
         if (!outcome.ok || !call.worker) return outcome;
         // Best effort: a failure to look at the disk is no failure of the call.
         try {
-          const changed = trackReads(call.worker, tool, input);
+          const changed = trackReads(call.worker, tool, input, heldWasCurrent);
           return changed.length ? { ...outcome, changed } : outcome;
         } catch { return outcome; }
       } catch (e) {

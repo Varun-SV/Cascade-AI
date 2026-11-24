@@ -137,6 +137,9 @@ export function readChanged(value: unknown): string[] {
   return out;
 }
 
+/** The note capResult ends a cut result with: what follows it was never sent. */
+export const CUT_NOTE = /\n\n\[output cut: \d+ more characters were not sent from the workspace\]$/;
+
 /** A result cut to MAX_RESULT_CHARS, saying it was. */
 export function capResult(output: string): string {
   if (output.length <= MAX_RESULT_CHARS) return output;
