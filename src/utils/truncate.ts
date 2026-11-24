@@ -12,7 +12,10 @@
  * and a slice of the tail (where errors and exit summaries land), with an
  * explicit marker so the model knows content was elided.
  */
-export function truncateForContext(text: string, maxChars = 12_000): string {
+/** The most of one tool result a worker's context keeps whole (truncateForContext's default). */
+export const CONTEXT_LIMIT_CHARS = 12_000;
+
+export function truncateForContext(text: string, maxChars = CONTEXT_LIMIT_CHARS): string {
   const kept = contextParts(text, maxChars);
   if (!kept) return text;
   const elided = text.length - kept.head.length - kept.tail.length;
@@ -23,7 +26,7 @@ export function truncateForContext(text: string, maxChars = 12_000): string {
  * The two parts of `text` that `truncateForContext` keeps, or undefined when
  * it keeps the whole. For whatever must know exactly what the model was shown.
  */
-export function contextParts(text: string, maxChars = 12_000): { head: string; tail: string } | undefined {
+export function contextParts(text: string, maxChars = CONTEXT_LIMIT_CHARS): { head: string; tail: string } | undefined {
   if (text.length <= maxChars) return undefined;
   const headLen = Math.floor(maxChars * 0.75);
   return { head: text.slice(0, headLen), tail: text.slice(-(maxChars - headLen)) };
