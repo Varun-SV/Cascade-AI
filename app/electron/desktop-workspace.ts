@@ -113,6 +113,9 @@ export interface DesktopWorkspaceStatus {
 
 export type WorkspaceAnswer = { folder: string; tools: string[]; labelMode?: LabelMode };
 
+/** The run a service has the folder open for, until it has finished. */
+interface ServedRun { runId: string; label: string; folder: string; allowAll: boolean; live: boolean; store: CheckpointStore | null; cp: { n: number } | null; owner: AbortController | null }
+
 interface Ask { id: number; runId: string; resolve(c: WorkspaceAnswer | null): void; payload: Record<string, unknown> | null }
 interface CallAsk { id: number; resolve(yes: boolean): void; payload: Record<string, unknown> | null }
 
@@ -142,7 +145,7 @@ export function createDesktopWorkspace(deps: DesktopWorkspaceDeps) {
   /** The folder each run's consent chose, until its executor is opened: never sent anywhere. */
   const chosen = new Map<string, { folder: string; label: string }>();
   /** The run being served, and what its checkpoint was. */
-  let current: { runId: string; label: string; folder: string; allowAll: boolean; live: boolean; store: CheckpointStore | null; cp: { n: number } | null; owner: AbortController | null } | null = null;
+  let current: ServedRun | null = null;
   let last: (WorkspaceRunSummary & { folder: string; n: number | null }) | null = null;
 
   const ownerSignedIn = (d: StoredDesktopDevice): boolean => {
@@ -255,6 +258,9 @@ export function createDesktopWorkspace(deps: DesktopWorkspaceDeps) {
     // An undo is putting files back and rewriting the checkpoint list: a run working in
     // the folder now would have its changes and its checkpoint overwritten.
     if (undoing) throw new Error('an undo of the last run is still putting files back on this computer; try again in a moment');
+    // A run (perhaps a service's turned off since) is still finishing: its last calls and
+    // its checkpoint aren't done, and another run's checkpoint would take them in.
+    if (current) throw new Error('the previous run is still finishing on this computer; try again in a moment');
     // The folder may have changed since it was chosen.
     const v = validateFolder(c.folder, folderFs);
     if ('error' in v) throw new Error(v.error);
@@ -266,6 +272,7 @@ export function createDesktopWorkspace(deps: DesktopWorkspaceDeps) {
     // service no longer serves, and must not replace a newer run's state.
     if (owner && serving !== owner) { try { mgr.getStore?.()?.close?.(); } catch { /* nothing to release */ } throw new Error('serving was turned off'); }
     if (undoing) { try { mgr.getStore?.()?.close?.(); } catch { /* nothing to release */ } throw new Error('an undo of the last run is still putting files back on this computer; try again in a moment'); }
+    if (current) { try { mgr.getStore?.()?.close?.(); } catch { /* nothing to release */ } throw new Error('the previous run is still finishing on this computer; try again in a moment'); }
     const cfg = mgr.getConfig();
     try { mgr.getStore?.()?.close?.(); } catch { /* nothing to release */ }
     const registry = new core.ToolRegistry({ ...(cfg.tools ?? {}), enabledTools: consent.tools, browserEnabled: false }, v.folder);
@@ -276,7 +283,7 @@ export function createDesktopWorkspace(deps: DesktopWorkspaceDeps) {
     registry.setSecretValues(() => core.secretValuesIn(cfg));
     const privacy = new core.PrivacyPaths(cfg.privacy?.paths ?? [], { workspaceRoot: v.folder });
     const store = new core.Checkpoints(v.folder, core.statePath(v.folder, core.STATE.checkpoints));
-    const run_: NonNullable<typeof current> = { runId: run.runId, label: consent.label, folder: v.folder, allowAll: false, live: false, store, cp: null, owner };
+    const run_: ServedRun = { runId: run.runId, label: consent.label, folder: v.folder, allowAll: false, live: false, store, cp: null, owner };
     current = run_;
     const checkpoints = {
       begin: async (label: string) => { const cp = await store.begin(label); if (cp) run_.cp = { n: cp.n }; return cp; },
