@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## 0.99.7 - 2026-11-24
 
 ### Added
-- **The desktop Code view opens images, PDFs, audio and video.** Pictures (PNG, JPG, GIF, WebP, SVG, BMP, ICO, AVIF) are shown to fit the pane, with their pixel size and file size underneath. PDFs open in the built-in PDF viewer. Audio and video files get a normal player. Any other binary file, such as a Word document, spreadsheet or zip, now shows "Open in default app" and "Show in folder" buttons instead of garbled text. Previews are read-only, so they never show as unsaved and Ctrl+S ignores them. Very large files (over 50 MB, or 100 MB for video) are not previewed.
+- **The desktop Code view opens images, PDFs, audio and video.** Pictures (PNG, JPG, GIF, WebP, SVG, BMP, ICO, AVIF) are shown to fit the pane, with their pixel size and file size underneath. PDFs open in the built-in PDF viewer. Audio and video files get a normal player. Any other binary file, such as a Word document, spreadsheet or zip, now shows "Open in default app" and "Show in folder" buttons instead of garbled text. Previews are read-only, so they never show as unsaved and Ctrl+S ignores them. Very large files (over 50 MB, or 100 MB for video) are not previewed. "Open in default app" and "Show in folder" work only for files inside the open workspace, and a program or script is never opened from there (opening it would run it); it is only shown in its folder.
 
 ## 0.99.6 - 2026-11-24
 
