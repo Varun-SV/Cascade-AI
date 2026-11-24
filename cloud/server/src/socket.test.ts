@@ -1452,12 +1452,15 @@ describe('rememberForReplay / replaySupervision — what a reload gets back', ()
     expect(emitted.filter((x) => x.event.startsWith('workspace:')).map((x) => [x.event, x.payload])).toEqual(events);
   });
 
-  it('keeps a bounded workspace log, oldest out first', () => {
+  it('keeps a bounded workspace log, oldest out first, but never loses what the view is built on', () => {
     const run = freshRun();
+    rememberForReplay(run, 'workspace:attached', { conversationId: 'c1', runId: 'r1', label: 'proj', device: { id: 'd', name: 'PC' } });
     for (let i = 0; i < 600; i++) rememberForReplay(run, 'workspace:result', { conversationId: 'c1', runId: 'r1', id: `k${i}`, tool: 'file_read', ok: true });
     const { emitted, socket } = recorder();
     replayAdopted([run], socket);
-    const ids = emitted.map((x) => (x.payload as { id: string }).id);
+    // The attachment first, however long the run: the client drops everything before it.
+    expect(emitted[0]!.event).toBe('workspace:attached');
+    const ids = emitted.slice(1).map((x) => (x.payload as { id: string }).id);
     expect(ids).toHaveLength(500);
     expect(ids[0]).toBe('k100');
     expect(ids.at(-1)).toBe('k599');

@@ -331,6 +331,12 @@ export interface LiveRun {
    */
   workspaceLog?: Array<{ event: string; payload: unknown; size: number }>;
   workspaceLogSize?: number;
+  /**
+   * The run's `workspace:attached`, kept apart from the log and replayed first: the
+   * client builds its view on it, and drops every later event until it has it, so it
+   * must outlast whatever the log's bound evicts.
+   */
+  workspaceAttached?: unknown;
   terminal?: { conversationId?: string; error?: string };
 }
 
@@ -367,6 +373,10 @@ const MAX_WORKSPACE_LOG_CHARS = 4_000_000;
 
 export function rememberForReplay(run: LiveRun, event: string, payload: unknown): void {
   const p = (payload ?? {}) as Record<string, unknown>;
+  if (event === 'workspace:attached') {
+    run.workspaceAttached = payload;
+    return;
+  }
   if (event.startsWith('workspace:')) {
     let size = 0;
     try { size = JSON.stringify(payload ?? null).length; } catch { return; }
@@ -632,6 +642,7 @@ function replayRunState(run: LiveRun, socket: Pick<Socket, 'emit'>): void {
   if (run.contextApprovalClosed) socket.emit('context:approval-closed', run.contextApprovalClosed);
   if (run.contextApproval) socket.emit('context:approval-required', run.contextApproval);
   // In the order they happened: a result after its call, a wait before what answered it.
+  if (run.workspaceAttached) socket.emit('workspace:attached', run.workspaceAttached);
   for (const { event, payload } of run.workspaceLog ?? []) socket.emit(event, payload);
 }
 
