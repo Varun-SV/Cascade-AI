@@ -2557,6 +2557,35 @@ describe('workers share what they find (run-memory.ts)', () => {
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  // Codex on 5bce363: the change note must survive the context limit.
+  it("a workspace's change note reaches the model whole, however long the tool's result", async () => {
+    const { changedNote } = await import('../../workspace/remote.js');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-share-'));
+    try {
+      const paths = Array.from({ length: 50 }, (_, i) => `src/module-${i}/${'deep/'.repeat(14)}file-${i}.ts`);
+      const note = changedNote(paths);
+      const seen: string[] = [];
+      const queue = [makeResult('', [{ id: 'g', name: 'grep', input: { pattern: 'x' } }], 'tool_use'), makeResult('done')];
+      const router = {
+        generate: vi.fn(async (_tier: string, options: { messages: Array<{ role: string; content: unknown }> }) => {
+          for (const m of options.messages) if (m.role === 'tool' && typeof m.content === 'string') seen.push(m.content);
+          return queue.shift() ?? makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }),
+        getModelForTier: () => undefined,
+      } as unknown as CascadeRouter;
+      const registry = makeToolRegistry({
+        getToolDefinitions: () => [{ name: 'grep', description: 'Search', inputSchema: {} }],
+        getTool: () => ({ remote: true }),
+        getWorkspaceRoot: () => root,
+        execute: vi.fn(async () => `${'match line\n'.repeat(3000)}\n\n${note}`),
+      } as unknown as Partial<ToolRegistry>);
+      await new T3Worker(router, registry, 't2-n').execute(makeAssignment({ subtaskId: 's-n' }), 'task-n').catch(() => undefined);
+      const shown = seen.find((c) => c.includes('characters elided'));
+      expect(shown).toBeDefined();
+      expect(shown).toContain(note);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   // Codex on 3e1e80c: file_edit shows only the lines it replaced.
   it('its partial edit of a file someone else changed since it read it still brings the note', async () => {
     const { RunMemory } = await import('../knowledge/run-memory.js');

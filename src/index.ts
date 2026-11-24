@@ -2,7 +2,7 @@
 //  Cascade AI — Package Exports
 // ─────────────────────────────────────────────
 
-export { Cascade } from './core/cascade.js';
+export { Cascade, secretValuesIn } from './core/cascade.js';
 export { CascadeRouter } from './core/router/index.js';
 export { T1Administrator } from './core/tiers/t1-administrator.js';
 export { T2Manager } from './core/tiers/t2-manager.js';

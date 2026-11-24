@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────
 
 import { CUT_NOTE } from '../../workspace/protocol.js';
+import { splitChangedNote } from '../../workspace/remote.js';
 import { formatChangedFiles, formatRunFacts } from '../knowledge/run-memory.js';
 import { resolveInWorkspace } from '../../tools/utils/workspace-path.js';
 import { assessRisk } from '../permissions/risk.js';
@@ -1285,9 +1286,12 @@ export class T3Worker extends BaseTier {
         // Bound what enters the context: the WHOLE history is re-sent on every
         // remaining iteration, so an unbounded tool result (big file read,
         // chatty command) multiplies into a token bomb across the loop.
+        // A workspace's change note is kept whole however long the result: the
+        // machine counts those files as reported and won't name them again.
+        const { rest, note } = splitChangedNote(toolResult);
         await this.context.addMessage({
           role: 'tool',
-          content: truncateForContext(toolResult),
+          content: note ? `${truncateForContext(rest)}\n\n${note}` : truncateForContext(toolResult),
           toolCallId: tc.id,
         });
       }
