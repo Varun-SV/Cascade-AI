@@ -330,20 +330,28 @@ describe('a served run', () => {
     expect(await h.ws.undoLastRun()).toMatchObject({ ok: true });
   });
 
-  it('a service turned off and on again: the old one finishing late never ends the new run, nor opens one', async () => {
+  it('a service turned off and on again: no new run opens until the old one has finished, and the old one opens none', async () => {
     const h = harness();
     const first = await opened(h);
     first.s.onServing!({ runId: 'run-1', userId: 'u', expiresAt: 1, label: 'l' });
-    // Turned off while a call drains, and on again; the new service opens a run.
+    // Turned off while a call drains, and on again; a new run is asked for.
     h.ws.disable();
-    const second = await opened(h);
-    expect(second.s).not.toBe(first.s);
-    second.s.onServing!({ runId: 'run-1', userId: 'u', expiresAt: 1, label: 'l' });
-    expect(h.ws.status().serving).not.toBeNull();
-    // The old service finishes now: the new run is untouched, and Stop still reaches it.
-    first.s.onServing!(null);
-    expect(h.ws.status().serving).not.toBeNull();
+    h.ws.enable();
+    const next = h.served.at(-1)!;
+    expect(next).not.toBe(first.s);
+    const p = next.askUser(run({ runId: 'run-2' }));
+    h.ws.answer(h.last('workspace:ask').id, { folder: PROJ, tools: ['file_read'] });
+    const consent = (await p)!;
+    // The old run's last calls and checkpoint aren't done: the new run waits.
+    await expect(next.open(consent, run({ runId: 'run-2' }))).rejects.toThrow(/still finishing/);
     await expect(first.s.open(first.consent, run())).rejects.toThrow(/turned off/);
+    // The old run finishes: now it opens, and Stop reaches it.
+    first.s.onServing!(null);
+    const p2 = next.askUser(run({ runId: 'run-3' }));
+    h.ws.answer(h.last('workspace:ask').id, { folder: PROJ, tools: ['file_read'] });
+    await expect(next.open((await p2)!, run({ runId: 'run-3' }))).resolves.toBeDefined();
+    next.onServing!({ runId: 'run-3', userId: 'u', expiresAt: 1, label: 'l' });
+    expect(h.ws.status().serving).not.toBeNull();
     expect(h.ws.stop()).toEqual({ ok: true });
   });
 

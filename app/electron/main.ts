@@ -926,7 +926,9 @@ function createWindow(): void {
     mainWindow.loadURL('app://./index.html');
   }
 
-  mainWindow.on('closed', () => { mainWindow = null; });
+  // Only this window's closing clears it: an older one closing later never forgets a newer one.
+  const win = mainWindow;
+  win.on('closed', () => { if (mainWindow === win) mainWindow = null; });
 }
 
 // Title-bar overlay (Windows/Linux native window controls) colors for the
@@ -1026,7 +1028,8 @@ app.whenReady().then(async () => {
   buildAppMenu();
   registerIPC();
   await startBackend();
-  createWindow();
+  // A workspace question during startup may have opened it already.
+  if (!mainWindow) createWindow();
   createTray();
 
   setupAutoUpdate();
