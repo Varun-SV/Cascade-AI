@@ -83,6 +83,15 @@ export function CodeView({ socket }: { socket: Socket | null }) {
       keptModels.current.delete(path);
     }
   }, [openFiles]);
+  useEffect(() => () => {
+    // Leaving the Code view (for Chat or Cockpit) drops its tabs: release every
+    // model it kept, after the editor itself has gone (next tick).
+    const monaco = monacoRef.current;
+    const paths = [...keptModels.current];
+    keptModels.current.clear();
+    if (!monaco || paths.length === 0) return;
+    setTimeout(() => { for (const path of paths) monaco.editor.getModel(monaco.Uri.parse(path))?.dispose(); }, 0);
+  }, []);
 
   const openFile = async (filePath: string): Promise<void> => {
     if (!window.cascade) return;
