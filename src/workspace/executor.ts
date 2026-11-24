@@ -25,6 +25,7 @@ import path from 'node:path';
 import type { PrivacyPaths } from '../core/privacy/paths.js';
 import { assessRisk, type Risk } from '../core/permissions/risk.js';
 import type { ToolDefinition, ToolExecuteOptions } from '../types.js';
+import { CONTEXT_LIMIT_CHARS } from '../utils/truncate.js';
 import { CUT_NOTE, MAX_CHANGED, MAX_CHANGED_PATH_CHARS, capResult, isWorkspaceTool } from './protocol.js';
 
 /** Files remembered per worker, and workers remembered: bounds on what the machine keeps. */
@@ -210,7 +211,10 @@ export function createWorkspaceExecutor(opts: WorkspaceExecutorOptions): Workspa
         if (!outcome.ok || !call.worker) return outcome;
         // Best effort: a failure to look at the disk is no failure of the call.
         try {
-          const changed = trackReads(call.worker, tool, input, heldWasCurrent, !CUT_NOTE.test(outcome.output));
+          // Complete only if the worker sees all of it: neither cut by the result cap here,
+          // nor longer than the part of a result its context keeps whole.
+          const complete = !CUT_NOTE.test(outcome.output) && outcome.output.length <= CONTEXT_LIMIT_CHARS;
+          const changed = trackReads(call.worker, tool, input, heldWasCurrent, complete);
           return changed.length ? { ...outcome, changed } : outcome;
         } catch { return outcome; }
       } catch (e) {
