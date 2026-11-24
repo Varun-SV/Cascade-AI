@@ -35,6 +35,18 @@ describe('CodeSearchTool', () => {
     expect(out).toContain('function a()');
   });
 
+  // Codex on 87aeac4: the caller holds these snippets, and is told if the files change.
+  it('notes each file whose lines it returns as read, and only those', async () => {
+    const noted: string[] = [];
+    const big = 'x'.repeat(9_000);
+    const tool = new CodeSearchTool(stubIndex([hit('src/a.ts', big), hit('src/b.ts', big), hit('src/c.ts', 'never shown')]));
+    await tool.execute({ query: 'fn' }, { noteRead: (abs: string) => noted.push(abs) } as never);
+    expect(noted.length).toBeGreaterThan(0);
+    expect(noted.every((n) => n.startsWith('/w') || /^[A-Z]:\\w/.test(n))).toBe(true);
+    expect(noted.some((n) => n.endsWith('a.ts'))).toBe(true);
+    expect(noted.some((n) => n.endsWith('c.ts'))).toBe(false);
+  });
+
   it('surfaces a search error instead of throwing', async () => {
     const bad = { search: async () => { throw new Error('index locked'); }, getRoot: () => '/w' } as unknown as WorkspaceIndex;
     const tool = new CodeSearchTool(bad);

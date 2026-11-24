@@ -62,6 +62,9 @@ export class CodeSearchTool extends BaseTool {
       const block = `# ${h.sourceId}\n${h.text}\n`;
       if (out.length + block.length > MAX_CHARS) break;
       out += (out ? '\n---\n\n' : '') + block;
+      // A file whose lines the result carries: the caller holds a copy of part of
+      // it now, and is told if it changes (as grep does).
+      options.noteRead?.(path.resolve(root, h.sourceId));
     }
     return out;
   }
