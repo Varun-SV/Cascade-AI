@@ -190,6 +190,25 @@ contextBridge.exposeInMainWorld('cascade', {
     },
   },
 
+  // A folder on this computer as a cloud run's workspace (workspace-ipc.ts).
+  workspace: {
+    status: () => ipcRenderer.invoke('workspace:status'),
+    enable: () => ipcRenderer.invoke('workspace:enable'),
+    disable: () => ipcRenderer.invoke('workspace:disable'),
+    clearDefaults: () => ipcRenderer.invoke('workspace:clear-defaults'),
+    pickFolder: () => ipcRenderer.invoke('workspace:pick-folder'),
+    answer: (id: number, a: { folder: string; tools: string[]; labelMode: 'device' | 'folder' } | null) => ipcRenderer.invoke('workspace:answer', id, a),
+    answerCall: (id: number, answer: 'allow' | 'deny' | 'all') => ipcRenderer.invoke('workspace:call-answer', id, answer),
+    stop: () => ipcRenderer.invoke('workspace:stop'),
+    undo: () => ipcRenderer.invoke('workspace:undo'),
+    dismissLast: () => ipcRenderer.invoke('workspace:dismiss-last'),
+    onAsk: (cb: (a: unknown) => void) => { ipcRenderer.on('workspace:ask', (_e, a) => cb(a)); },
+    onAskClosed: (cb: (a: { id: number }) => void) => { ipcRenderer.on('workspace:ask-closed', (_e, a) => cb(a)); },
+    onCallAsk: (cb: (a: unknown) => void) => { ipcRenderer.on('workspace:call-ask', (_e, a) => cb(a)); },
+    onCallAskClosed: (cb: (a: { id: number }) => void) => { ipcRenderer.on('workspace:call-ask-closed', (_e, a) => cb(a)); },
+    onStatus: (cb: (s: unknown) => void) => { ipcRenderer.on('workspace:status', (_e, s) => cb(s)); },
+  },
+
   // Cascade Cloud account: optional sign-in (loopback OAuth, tokens encrypted at
   // rest in the main process) + browsing the chats you started on the web.
   cloud: {

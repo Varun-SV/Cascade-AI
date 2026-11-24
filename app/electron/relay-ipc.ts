@@ -15,6 +15,8 @@ export function registerRelayIpc(opts: {
   loadCore: () => unknown;
   cloudAuth: () => CloudAuthHandle | null;
   mainWindow: () => BrowserWindow | null;
+  /** The pairing was removed: what serves with its key must stop. */
+  onForgotten?: () => void;
 }): DesktopRelay {
   const path = join(app.getPath('userData'), FILE);
   const electron: ElectronDeps = {
@@ -62,7 +64,7 @@ export function registerRelayIpc(opts: {
   ipcMain.handle('relay:status', () => relay.status());
   ipcMain.handle('relay:enable', () => wrap(() => relay.enable()));
   ipcMain.handle('relay:disable', () => wrap(() => relay.disable()));
-  ipcMain.handle('relay:forget', () => wrap(() => relay.forget()));
+  ipcMain.handle('relay:forget', () => wrap(async () => { const r = await relay.forget(); opts.onForgotten?.(); return r; }));
   ipcMain.handle('relay:take-over', () => relay.takeOver());
   ipcMain.handle('relay:hand-back', () => relay.handBack());
   ipcMain.handle('relay:answer', (_e, id: unknown, sites: unknown, anyPublic: unknown, screenshots: unknown, maxTabs: unknown) => {

@@ -5,6 +5,11 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.99.10 - 2026-11-24
+
+### Added
+- **The desktop app can now let a Cascade Cloud run work in a folder on this computer.** Turn it on in Settings → Workspaces (it uses the same pairing as Cloud runs, and is off by default). When a run asks, the app asks you which folder it may use and which tools it may have: read only, read and edit files, or everything, or any mix. Risky actions ask again before they run. A checkpoint is taken before the run's first change, so you can undo the run's changes afterwards. A "Serving a Cloud run" banner with a Stop button is always visible while a run is working, and Stop ends its access at once. The folder's location never leaves your computer: the run is told only a name.
+
 ## 0.99.9 - 2026-11-24
 
 ### Added
