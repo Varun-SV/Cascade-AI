@@ -595,6 +595,19 @@ describe('the machine tells each worker which files it read have changed', () =>
     expect(await a('file_edit', { path: 'notes.md', old_string: 'ONE', new_string: 'One' })).not.toMatch(NOTE);
   });
 
+  it('a read of part of a file it read is no refresh of the rest: a change elsewhere still reaches it', async () => {
+    const w = await world();
+    const dir = folder();
+    fs.writeFileSync(path.join(dir, 'notes.md'), 'one\ntwo\nthree\n');
+    await machine(w, dir, { answer: { tools: ['file_read', 'file_list'], label: 'p' } });
+    const { ws } = await runWorkspace(w);
+    const a = as(ws, 'worker-a');
+    await a('file_read', { path: 'notes.md' });
+    fs.writeFileSync(path.join(dir, 'notes.md'), 'one\ntwo\nthree, changed by the user\n');
+    expect((await a('file_read', { path: 'notes.md', offset: 1, limit: 1 })).match(NOTE)?.[1]).toBe('notes.md');
+    expect(await a('file_list', { path: '.' })).not.toMatch(NOTE);
+  });
+
   it('a listing or a search naming a file it read is no change of its own: a later edit still reaches it', async () => {
     const w = await world();
     const dir = folder();
