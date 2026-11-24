@@ -128,24 +128,64 @@ async function readPool(file: string, setAside = false): Promise<Pool> {
   }
 }
 
-/** Holds `${file}.lock` while `fn` runs, so writers in other processes (CLI, desktop) take turns. */
-async function withFileLock<T>(file: string, fn: () => Promise<T>): Promise<T> {
-  const lock = `${file}.lock`;
-  const deadline = Date.now() + LOCK_WAIT_MS;
-  for (;;) {
-    try {
-      const h = await fs.open(lock, 'wx');
-      await h.close();
-      break;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException)?.code !== 'EEXIST') throw e;
-      const age = await fs.stat(lock).then((st) => Date.now() - st.mtimeMs, () => 0);
-      if (age > LOCK_STALE_MS) { await fs.rm(lock, { force: true }); continue; }
-      if (Date.now() > deadline) throw new Error('model-perf pool is locked');
-      await new Promise((r) => setTimeout(r, 25 + Math.random() * 50));
-    }
+/** Creates `file` holding `token`, or returns false if it exists. */
+async function create(file: string, token: string): Promise<boolean> {
+  try {
+    const h = await fs.open(file, 'wx');
+    try { await h.writeFile(token); } finally { await h.close(); }
+    return true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === 'EEXIST') return false;
+    throw e;
   }
-  try { return await fn(); } finally { await fs.rm(lock, { force: true }).catch(() => {}); }
+}
+
+const ageOf = (st: { mtimeMs: number }): number => Date.now() - st.mtimeMs;
+
+/**
+ * Removes `lock` if it is still the stale lock it was found to be.
+ *
+ * Two writers can find the same stale lock. If each simply removed it, the
+ * second could remove the lock the first had just taken in its place, and both
+ * would write at once. So a stale lock is only removed under a second, briefly
+ * held lock (`<lock>.takeover`), after checking again, under it, that it is the
+ * same file (inode) and still stale. The takeover lock is held for two system
+ * calls; one left by a writer that died holding it is cleared after a while.
+ */
+async function removeIfStale(lock: string, seen: { ino: number }, token: string): Promise<void> {
+  const takeover = `${lock}.takeover`;
+  if (!(await create(takeover, token))) {
+    const st = await fs.stat(takeover).catch(() => null);
+    if (st && ageOf(st) > LOCK_STALE_MS) await fs.rm(takeover, { force: true });
+    return;
+  }
+  try {
+    const now = await fs.stat(lock).catch(() => null);
+    if (now && now.ino === seen.ino && ageOf(now) > LOCK_STALE_MS) await fs.rm(lock, { force: true });
+  } finally {
+    await fs.rm(takeover, { force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Holds `<file>.lock` while `fn` runs, so writers in other processes (CLI,
+ * desktop) take turns. Exported for tests.
+ */
+export async function withFileLock<T>(file: string, fn: () => Promise<T>, opts: { waitMs?: number } = {}): Promise<T> {
+  const lock = `${file}.lock`;
+  const token = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+  const deadline = Date.now() + (opts.waitMs ?? LOCK_WAIT_MS);
+  while (!(await create(lock, token))) {
+    const st = await fs.stat(lock).catch(() => null);
+    if (st && ageOf(st) > LOCK_STALE_MS) { await removeIfStale(lock, st, token); continue; }
+    if (Date.now() > deadline) throw new Error('model-perf pool is locked');
+    await new Promise((r) => setTimeout(r, 25 + Math.random() * 50));
+  }
+  try { return await fn(); } finally {
+    // Only our own: had this run past the stale age, the lock may now be someone else's.
+    const held = await fs.readFile(lock, 'utf-8').catch(() => null);
+    if (held === token) await fs.rm(lock, { force: true }).catch(() => {});
+  }
 }
 
 export class ModelPerformanceTracker {

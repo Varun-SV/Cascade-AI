@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { ModelPerformanceTracker } from './model-performance-tracker.js';
+import { ModelPerformanceTracker, withFileLock } from './model-performance-tracker.js';
 
 let dir: string;
 let file: string;
@@ -138,5 +138,49 @@ describe('model-perf pool: a save adds, never replaces', () => {
     await t.save();
     expect(Object.keys((await read()).models)).toEqual(['old-model:code']);
     expect(t.sampleCountFor('old-model', 'code')).toBe(3);
+  });
+});
+
+describe('model-perf pool lock', () => {
+  const staleLock = async () => {
+    await fs.writeFile(`${file}.lock`, 'dead-writer');
+    const old = new Date(Date.now() - 60_000);
+    await fs.utimes(`${file}.lock`, old, old);
+  };
+  /** A read, a pause, a write: two writers inside at once lose a count. */
+  const increment = () => withFileLock(file, async () => {
+    const n = Number(await fs.readFile(path.join(dir, 'n'), 'utf-8').catch(() => '0'));
+    await new Promise((r) => setTimeout(r, 40));
+    await fs.writeFile(path.join(dir, 'n'), String(n + 1));
+  }, { waitMs: 20_000 });
+
+  it('lets one writer in at a time, even when they all find the same stale lock', async () => {
+    await staleLock();
+    // Every contender stats the stale lock before any of them removes it.
+    const realStat = fs.stat;
+    let gate!: () => void;
+    const allSeen = new Promise<void>((r) => { gate = r; });
+    let seen = 0;
+    vi.spyOn(fs, 'stat').mockImplementation(async (...args: Parameters<typeof fs.stat>) => {
+      const st = await realStat(...args);
+      if (String(args[0]).endsWith('.lock') && seen < 12) {
+        const order = ++seen;
+        if (order === 12) gate();
+        await allSeen;
+        // Staggered: a later contender acts after an earlier one has taken the lock anew.
+        await new Promise((r) => setTimeout(r, order * 5));
+      }
+      return st;
+    });
+    await Promise.all(Array.from({ length: 12 }, increment));
+    expect(await fs.readFile(path.join(dir, 'n'), 'utf-8')).toBe('12');
+    await expect(fs.stat(`${file}.lock`)).rejects.toThrow();
+  });
+
+  it('does not remove a lock that is no longer its own', async () => {
+    await withFileLock(file, async () => {
+      await fs.writeFile(`${file}.lock`, 'someone-else'); // taken over meanwhile
+    });
+    expect(await fs.readFile(`${file}.lock`, 'utf-8')).toBe('someone-else');
   });
 });
