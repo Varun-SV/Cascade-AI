@@ -16,7 +16,7 @@ import { PrivacyPaths } from '../core/privacy/paths.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { type WorkspaceConsent, type WorkspaceDeviceClient, connectWorkspaceDevice } from './device.js';
 import { type WorkspaceCheckpoints, type WorkspaceQuestion, createWorkspaceExecutor } from './executor.js';
-import { MAX_RESULT_CHARS, WORKSPACE_FAMILY, WORKSPACE_TOOLS, readDeviceFrame } from './protocol.js';
+import { MAX_IN_FLIGHT, MAX_RESULT_CHARS, WORKSPACE_FAMILY, WORKSPACE_TOOLS, readDeviceFrame } from './protocol.js';
 import { openRemoteWorkspace } from './remote.js';
 
 const closers: (() => void | Promise<void>)[] = [];
@@ -288,6 +288,101 @@ describe('a cloud run working in a folder on the user\'s machine', () => {
     const out = await tool('file_read')({ path: 'big.txt' });
     expect(out.length).toBeLessThan(MAX_RESULT_CHARS + 500);
     expect(out).toMatch(/output cut/);
+  });
+});
+
+describe('Codex on 596e50e', () => {
+  it('a command can\'t read a local-only file: with the process jail off, commands are refused for the cloud run', async () => {
+    const w = await world();
+    const dir = folder();
+    fs.mkdirSync(path.join(dir, 'secret'));
+    fs.writeFileSync(path.join(dir, 'secret', 'keys.txt'), 'sk-live-123');
+    const privacy = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }], { workspaceRoot: dir });
+    await machine(w, dir, { privacy, ask: async () => true });
+    const { tool } = await runWorkspace(w);
+    const out = await tool('shell')({ command: 'cat secret/keys.txt' }).then((o) => o, (e: Error) => e.message);
+    expect(out).not.toContain('sk-live-123');
+    expect(out).toMatch(/local-only files.*process jail off/);
+  });
+
+  it('the folder\'s privacy rules reach the registry\'s process jail, which hides local-only paths from commands', async () => {
+    const privacy = new PrivacyPaths([{ pattern: 'secret/**', policy: 'local-only' }]);
+    const given: unknown[] = [];
+    const registry = {
+      getWorkspaceRoot: () => '/w', getToolDefinitions: () => [],
+      execute: async () => 'ran',
+      setPrivacyPaths: (p: unknown) => { given.push(p); },
+      processJailMode: () => 'auto',
+    };
+    const ex = createWorkspaceExecutor({ registry, tools: ['shell'], ask: async () => true, privacy: () => privacy, checkpoints: { begin: async () => ({ n: 1 }), end: async () => undefined } });
+    expect(await ex.run('shell', { command: 'ls' }, { signal: new AbortController().signal })).toEqual({ ok: true, output: 'ran' });
+    expect(given).toEqual([privacy]);
+  });
+
+  it('a write the checkpoint doesn\'t record is asked about, since undo couldn\'t put it back', async () => {
+    const w = await world();
+    const dir = folder();
+    let covered = false;
+    const m = await machine(w, dir, { checkpoints: { begin: async () => ({ n: 1 }), end: async () => undefined, covers: async () => covered } });
+    const { tool } = await runWorkspace(w);
+    await expect(tool('file_write')({ path: 'data.db', content: 'x' })).rejects.toThrow(/Declined on the machine: file_write changes data\.db in the project, a file the checkpoint doesn't record/);
+    expect(fs.existsSync(path.join(dir, 'data.db'))).toBe(false);
+    covered = true;
+    await tool('file_write')({ path: 'data.db', content: 'x' });
+    expect(m.questions).toHaveLength(1);
+  });
+
+  it('an error never names the folder\'s path', async () => {
+    const w = await world();
+    const dir = folder();
+    await machine(w, dir);
+    const { tool } = await runWorkspace(w);
+    const err = await tool('file_read')({ path: 'missing.txt' }).then(() => '', (e: Error) => e.message);
+    expect(err).toMatch(/missing\.txt/);
+    expect(err).not.toContain(dir);
+    expect(err).not.toContain(fs.realpathSync(dir));
+  });
+
+  it('cancelling a call whose question is still open frees its slot', async () => {
+    const w = await world();
+    const dir = folder();
+    await machine(w, dir, { ask: () => new Promise(() => {}) });
+    const { tool } = await runWorkspace(w);
+    for (let i = 0; i < MAX_IN_FLIGHT; i++) {
+      const ac = new AbortController();
+      const call = tool('file_delete')({ path: 'README.md' }, ac.signal);
+      ac.abort();
+      await expect(call).rejects.toThrow(/cancelled/);
+    }
+    // Every slot would be taken by a question nobody answers.
+    await vi.waitFor(async () => expect(await tool('file_read')({ path: 'README.md' })).toContain('hello'));
+  });
+
+  it('the checkpoint closes after a call still running when the session ends', async () => {
+    const w = await world();
+    const id = w.register('user-1', 'dev-1');
+    const events: string[] = [];
+    let release!: () => void;
+    const client = connectWorkspaceDevice({
+      controlUrl: `${w.base}/control`, runUrl: `${w.base}/run`, device: id, serverId: w.server.id, serverKey: w.server.publicKey,
+      askUser: async () => ({ tools: ['file_write'], label: 'p' }),
+      open: async () => ({
+        definitions: () => [{ name: 'file_write', description: 'Write a file', inputSchema: {} }],
+        run: () => new Promise((resolve) => { release = () => { events.push('write landed'); resolve({ ok: true, output: 'ok' }); }; }),
+        finish: async () => { events.push('checkpoint closed'); },
+      }),
+    });
+    closers.push(() => client.close());
+    await client.ready;
+    await vi.waitFor(() => expect(w.hub.deviceOnline('user-1', 'dev-1')).toBe(true));
+    const { tool } = await runWorkspace(w);
+    void tool('file_write')({ path: 'a', content: 'b' }).catch(() => undefined);
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    client.stop();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(events).toEqual([]);
+    release();
+    await vi.waitFor(() => expect(events).toEqual(['write landed', 'checkpoint closed']));
   });
 });
 

@@ -230,6 +230,11 @@ export class ToolRegistry extends EventEmitter {
     this.registerDefaults();
   }
 
+  /** How commands are confined: "off" is the user's choice to run them as they are. */
+  processJailMode(): string {
+    return this.config.processJail ?? 'auto';
+  }
+
   /** The privacy policies the process jail hides local-only paths by. */
   setPrivacyPaths(paths: PrivacyPaths | undefined): void {
     this.privacyPaths = paths;

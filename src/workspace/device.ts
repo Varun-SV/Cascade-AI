@@ -32,6 +32,8 @@ import {
 const CLAIM_REPLY_TIMEOUT_MS = 15_000;
 /** Frames the run may send before serving starts: none are expected before `ready`. */
 const HELD_FRAMES_MAX = 64;
+/** How long a session's end waits for calls still running (a write, a command) to settle. */
+const DRAIN_MAX_MS = 30_000;
 const OPEN = 1;
 
 /** What the user agreed to for one run. */
@@ -146,6 +148,8 @@ export function connectWorkspaceDevice(opts: WorkspaceDeviceOptions): WorkspaceD
   const serve = (s: Session, socket: WebSocket, held: string[], executor: WorkspaceExecutor, label: string): Promise<void> =>
     new Promise((resolve) => {
       const inFlight = new Map<string, AbortController>();
+      /** Every call still running, cancelled or not: the checkpoint closes after them. */
+      const running = new Set<Promise<unknown>>();
       const send = (frame: DeviceRunFrame): void => { if (socket.readyState === OPEN) socket.send(JSON.stringify(frame)); };
       let over = false;
       const end = (reason: string): void => {
@@ -155,7 +159,13 @@ export function connectWorkspaceDevice(opts: WorkspaceDeviceOptions): WorkspaceD
         inFlight.clear();
         try { socket.close(1000, reason.slice(0, 100)); } catch { /* already closing */ }
         log(`workspace session over: ${reason}`);
-        void executor.finish().finally(() => resolve());
+        // A cancelled write or command may still be finishing: the checkpoint closes
+        // once they have, so what they changed is in it (and undoable).
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        void Promise.race([
+          Promise.allSettled([...running]),
+          new Promise<void>((r) => { timer = setTimeout(r, DRAIN_MAX_MS); }),
+        ]).then(() => { clearTimeout(timer); return executor.finish(); }).finally(() => resolve());
       };
       s.end = end;
       const onFrame = (raw: string): void => {
@@ -167,10 +177,13 @@ export function connectWorkspaceDevice(opts: WorkspaceDeviceOptions): WorkspaceD
         if (inFlight.size >= MAX_IN_FLIGHT) { send({ v: WORKSPACE_PROTOCOL, t: 'result', id: f.id, ok: false, error: 'too many calls at once on this workspace' }); return; }
         const ac = new AbortController();
         inFlight.set(f.id, ac);
-        void executor.run(f.tool, f.input, {
+        const call = executor.run(f.tool, f.input, {
           signal: ac.signal,
           waiting: () => send({ v: WORKSPACE_PROTOCOL, t: 'status', id: f.id, waiting: 'approval' }),
-        }).then((outcome) => {
+        });
+        running.add(call);
+        void call.finally(() => running.delete(call));
+        void call.then((outcome) => {
           if (inFlight.get(f.id) !== ac) return;
           inFlight.delete(f.id);
           send(outcome.ok
