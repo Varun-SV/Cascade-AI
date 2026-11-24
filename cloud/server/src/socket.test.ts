@@ -1438,6 +1438,31 @@ describe('rememberForReplay / replaySupervision — what a reload gets back', ()
     };
   }
 
+  it("replays a run's workspace events in order, so a reconnect loses no file change and no wait", () => {
+    const run = freshRun();
+    const events: Array<[string, object]> = [
+      ['workspace:attached', { conversationId: 'c1', runId: 'r1', label: 'proj', device: { id: 'd', name: 'PC' } }],
+      ['workspace:call', { conversationId: 'c1', runId: 'r1', id: 'k1', tool: 'file_write', change: { kind: 'write', path: 'a.txt', content: 'x' } }],
+      ['workspace:waiting', { conversationId: 'c1', runId: 'r1', tool: 'shell', worker: 'T3-1' }],
+      ['workspace:result', { conversationId: 'c1', runId: 'r1', id: 'k1', tool: 'file_write', ok: true }],
+    ];
+    for (const [e, p] of events) rememberForReplay(run, e, p);
+    const { emitted, socket } = recorder();
+    replayAdopted([run], socket);
+    expect(emitted.filter((x) => x.event.startsWith('workspace:')).map((x) => [x.event, x.payload])).toEqual(events);
+  });
+
+  it('keeps a bounded workspace log, oldest out first', () => {
+    const run = freshRun();
+    for (let i = 0; i < 600; i++) rememberForReplay(run, 'workspace:result', { conversationId: 'c1', runId: 'r1', id: `k${i}`, tool: 'file_read', ok: true });
+    const { emitted, socket } = recorder();
+    replayAdopted([run], socket);
+    const ids = emitted.map((x) => (x.payload as { id: string }).id);
+    expect(ids).toHaveLength(500);
+    expect(ids[0]).toBe('k100');
+    expect(ids.at(-1)).toBe('k599');
+  });
+
   it('replays a browser refusal the reconnecting page missed', () => {
     // Said once per run — the bridge suppresses repeats — so a page that
     // reconnected across it never saw that the run was going on without one.

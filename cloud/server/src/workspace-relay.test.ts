@@ -395,20 +395,23 @@ describe('a run started with workspaceDeviceId', () => {
     const stub = await startStubOpenAIServer({ delayMs: 3000 });
     cleanup.push(() => stub.close());
     const original = Cascade.prototype.addRemoteTools;
-    let run: InstanceType<typeof Cascade> | undefined;
-    const spy = vi.spyOn(Cascade.prototype, 'addRemoteTools').mockImplementation(function (this: InstanceType<typeof Cascade>, t) { run = this; return original.call(this, t); });
+    let tools: Parameters<typeof original>[0] | undefined;
+    const spy = vi.spyOn(Cascade.prototype, 'addRemoteTools').mockImplementation(function (this: InstanceType<typeof Cascade>, t) { tools = t; return original.call(this, t); });
     cleanup.push(() => spy.mockRestore());
     const stop = new AbortController();
     const { socket, result } = await runTurn(w, alice.id, m.device.id, { stub, signal: stop.signal });
-    await vi.waitFor(() => expect(run).toBeDefined(), { timeout: 10_000 });
-    run!.emit('tool:call', { id: 'c1', tierId: 't', toolName: 'file_write', input: { path: 'notes.md', content: 'hello' } });
-    run!.emit('tool:call', { id: 'c2', tierId: 't', toolName: 'shell', input: { command: 'cat secret' } });
-    run!.emit('tool:result', { id: 'c1', tierId: 't', toolName: 'file_write', output: 'TOP SECRET OUTPUT', durationMs: 1 });
+    await vi.waitFor(() => expect(tools).toBeDefined(), { timeout: 10_000 });
+    const opts = { tierId: 'T3:1', sessionId: 's', requireApproval: false };
+    // Called the way the registry calls it, as a worker's fallback does too: no model tool event at all.
+    void tools!.find((t) => t.name === 'file_write')!.execute({ path: 'notes.md', content: 'hello' }, opts).catch(() => undefined);
     expect(socket.named('workspace:call')).toHaveLength(1);
-    expect(socket.named('workspace:call')[0]).toMatchObject({ runId: 'client-run-1', id: 'c1', change: { kind: 'write', path: 'notes.md', content: 'hello' } });
-    expect(socket.named('workspace:result')[0]).toMatchObject({ id: 'c1', tool: 'file_write', ok: true });
+    expect(socket.named('workspace:call')[0]).toMatchObject({ runId: 'client-run-1', tool: 'file_write', change: { kind: 'write', path: 'notes.md', content: 'hello' } });
+    fs.writeFileSync(path.join(m.dir, 'secret.txt'), 'TOP SECRET OUTPUT');
+    await tools!.find((t) => t.name === 'file_read')!.execute({ path: 'secret.txt' }, opts);
+    // A read changes nothing: no call event, and its result says only that it was answered.
+    expect(socket.named('workspace:call')).toHaveLength(1);
+    expect(socket.named('workspace:result').at(-1)).toMatchObject({ tool: 'file_read', ok: true, worker: 'T3_1' });
     expect(JSON.stringify(socket.events)).not.toContain('TOP SECRET');
-    expect(JSON.stringify(socket.events)).not.toContain('cat secret');
     stop.abort();
     await result.catch(() => undefined);
   }, 30_000);

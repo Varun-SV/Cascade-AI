@@ -22,9 +22,16 @@ export function useWorkspaceRun(socket: Socket | null, enabled: boolean, convers
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
   const [choices, setChoices] = useState<Record<string, string>>({});
+  const choicesRef = useRef(choices);
+  choicesRef.current = choices;
   const [views, setViews] = useState<Record<string, WorkspaceRunView | undefined>>({});
-  /** Whether the run now going has had its workspace attached: false means the computer is still being asked. */
-  const [attachedThisRun, setAttachedThisRun] = useState(false);
+  /**
+   * The run now going, as it was sent: its conversation (the blank chat's '' until the
+   * server names it) and the desktop it asked for. The consent notice is about this run
+   * only, wherever the user looks meanwhile; `attached` is whether its computer answered.
+   */
+  const [run, setRun] = useState<{ key: string; deviceId: string | undefined; attached: boolean } | null>(null);
+
   const keyRef = useRef(key);
   keyRef.current = key;
 
@@ -47,6 +54,7 @@ export function useWorkspaceRun(socket: Socket | null, enabled: boolean, convers
    * opening another chat while the first run starts carries nothing there.
    */
   const adoptFirstTurn = useCallback((conversationId: string, deviceId: string | undefined) => {
+    setRun((r) => (r && r.key === '' ? { ...r, key: conversationId } : r));
     setChoices((c) => {
       const { '': _blank, ...rest } = c;
       if (rest[conversationId] !== undefined || !deviceId) return c[''] === undefined ? c : rest;
@@ -54,9 +62,17 @@ export function useWorkspaceRun(socket: Socket | null, enabled: boolean, convers
     });
   }, []);
 
+  // A run starts: what it was sent with is what the composer shows now, the moment of the send.
+  const wasBusy = useRef(busy);
+  useEffect(() => {
+    const started = busy && !wasBusy.current;
+    wasBusy.current = busy;
+    if (started) setRun({ key: keyRef.current, deviceId: enabled ? choicesRef.current[keyRef.current] : undefined, attached: false });
+  }, [busy, enabled]);
+
   useEffect(() => {
     if (busy) return;
-    setAttachedThisRun(false);
+    setRun(null);
     // A run that is over is not waiting on anyone.
     setViews((v) => {
       let changed = false;
@@ -76,7 +92,8 @@ export function useWorkspaceRun(socket: Socket | null, enabled: boolean, convers
       const parsed = parseWorkspaceEvent(type, raw);
       if (!parsed) return;
       const k = parsed.conversationId ?? keyRef.current;
-      if (parsed.event.type === 'attached') setAttachedThisRun(true);
+      // Its own run's computer answered (a first turn's id may not be adopted yet).
+      if (parsed.event.type === 'attached') setRun((r) => (r && (r.key === k || r.key === '') ? { ...r, attached: true } : r));
       setViews((v) => {
         const next = applyWorkspaceEvent(v[k], parsed.event);
         return next === v[k] ? v : { ...v, [k]: next };
@@ -96,7 +113,8 @@ export function useWorkspaceRun(socket: Socket | null, enabled: boolean, convers
     });
   }, []);
 
-  const deviceName = selected ? devices?.find((d) => d.id === selected)?.name : undefined;
+  const askedDevice = run?.deviceId;
+  const deviceName = askedDevice ? devices?.find((d) => d.id === askedDevice)?.name : undefined;
   return {
     enabled,
     devices: devices ?? [],
@@ -112,7 +130,7 @@ export function useWorkspaceRun(socket: Socket | null, enabled: boolean, convers
     /** For useChatSession's onFirstTurnConversation. */
     adoptFirstTurn,
     /** This run asked for a workspace and its computer has not answered yet. */
-    awaitingConsent: enabled && busy && selected !== undefined && !attachedThisRun,
+    awaitingConsent: enabled && busy && !!run && run.deviceId !== undefined && !run.attached && run.key === key,
     awaitingDeviceName: deviceName ?? 'your computer',
     view: enabled ? views[key] : undefined,
   };

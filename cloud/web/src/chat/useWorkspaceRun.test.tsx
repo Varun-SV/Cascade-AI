@@ -101,6 +101,31 @@ describe('useWorkspaceRun', () => {
     expect(result.current.view?.waitingTool).toBeUndefined();
   });
 
+  it("the consent notice belongs to the run's own chat and computer, not to whichever chat is open", async () => {
+    const fake = fakeSocket();
+    const { result, rerender } = renderHook(({ c, busy }) => useWorkspaceRun(fake.socket, true, c, busy), { initialProps: { c: 'A' as string, busy: false } });
+    await waitFor(() => expect(result.current.devicesKnown).toBe(true));
+    // B is set to a desktop; A's run goes to Cloud.
+    rerender({ c: 'B', busy: false });
+    act(() => result.current.select('d1'));
+    rerender({ c: 'A', busy: false });
+    rerender({ c: 'A', busy: true });
+    expect(result.current.awaitingConsent).toBe(false);
+    // Looking at B while A's run goes: B's computer was never asked.
+    rerender({ c: 'B', busy: true });
+    expect(result.current.awaitingConsent).toBe(false);
+    rerender({ c: 'B', busy: false });
+    // Now B's run asks d1, and the notice stays with B.
+    rerender({ c: 'B', busy: true });
+    expect(result.current.awaitingConsent).toBe(true);
+    expect(result.current.awaitingDeviceName).toBe('Work PC');
+    rerender({ c: 'A', busy: true });
+    expect(result.current.awaitingConsent).toBe(false);
+    rerender({ c: 'B', busy: true });
+    act(() => fake.fire('workspace:attached', { conversationId: 'B', runId: 'r2', label: 'proj', device: { id: 'd1', name: 'Work PC' }, tools: ['file_read'] }));
+    expect(result.current.awaitingConsent).toBe(false);
+  });
+
   it('stops listening when unmounted', async () => {
     const fake = fakeSocket();
     const { result, unmount } = renderHook(() => useWorkspaceRun(fake.socket, true, 'c1', true));

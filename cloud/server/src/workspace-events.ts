@@ -7,6 +7,7 @@
 // for every tool the workspace serves. Outputs are never forwarded, except the one line
 // the machine adds when files changed since the run read them. Nothing here is logged.
 
+import { randomUUID } from 'node:crypto';
 import { workspaceWorkerId } from '#cascade-ai';
 
 export const CHANGE_TOOLS = ['file_write', 'file_edit', 'file_delete'] as const;
@@ -60,4 +61,40 @@ export function workspaceResultEvent(e: { id?: unknown; toolName?: unknown; outp
   // The worker as `workspace:waiting` names it, so the web app clears the right notice.
   const worker = workspaceWorkerId(e.tierId);
   return { id: e.id, tool: e.toolName, ok: e.error === undefined || e.error === null, ...(note ? { note } : {}), ...(worker ? { worker } : {}) };
+}
+
+/** A tool the run calls: what `observeWorkspaceTools` wraps. */
+export interface ObservedTool {
+  readonly name: string;
+  // The SDK's ToolExecuteOptions; only `tierId` is read here.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  execute(input: Record<string, unknown>, options: any): Promise<string>;
+}
+
+/**
+ * Every call to these tools, as `workspace:call` / `workspace:result`, however it reached
+ * them: by the model's own tool call, or by a recovery path that runs the registered tool
+ * under another name (the T3 worker's fallback for a name it was never given). Watching
+ * the tools rather than the run's tool events is what catches both.
+ */
+export function observeWorkspaceTools(tools: readonly ObservedTool[], emit: (event: 'workspace:call' | 'workspace:result', payload: object) => void): void {
+  const served = new Set(tools.map((t) => t.name));
+  for (const tool of tools) {
+    const run = tool.execute.bind(tool);
+    (tool as { execute: ObservedTool['execute'] }).execute = async (input, options) => {
+      const id = randomUUID();
+      const call = workspaceCallEvent({ id, toolName: tool.name, input }, served);
+      if (call) emit('workspace:call', call);
+      try {
+        const output = await run(input, options);
+        const result = workspaceResultEvent({ id, toolName: tool.name, output, tierId: options?.tierId }, served);
+        if (result) emit('workspace:result', result);
+        return output;
+      } catch (e) {
+        const result = workspaceResultEvent({ id, toolName: tool.name, error: true, tierId: options?.tierId }, served);
+        if (result) emit('workspace:result', result);
+        throw e;
+      }
+    };
+  }
 }

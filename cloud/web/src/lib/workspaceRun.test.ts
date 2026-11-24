@@ -98,6 +98,14 @@ describe('the changed-files list', () => {
     expect(changedSinceReadFiles(note)).toEqual(['a.txt', 'b/c.ts']);
   });
   it('returns nothing for no view', () => { expect(collectChangedFiles(undefined)).toEqual([]); });
+  it('a wait replayed after a reconnect is the one already held, not a second', () => {
+    let v = start();
+    v = applyWorkspaceEvent(v, { type: 'waiting', runId: 'r1', tool: 'shell', worker: 'T3-a' })!;
+    v = applyWorkspaceEvent(v, { type: 'waiting', runId: 'r1', tool: 'shell', worker: 'T3-a' })!;
+    expect(v.waiting).toHaveLength(1);
+    v = applyWorkspaceEvent(v, { type: 'result', runId: 'r1', id: 'y', tool: 'shell', ok: true, worker: 'T3-a' })!;
+    expect(v.waitingTool).toBeUndefined();
+  });
   it("clears only the wait of the call that finished: another worker's result leaves it showing", () => {
     let v = start();
     v = applyWorkspaceEvent(v, { type: 'waiting', runId: 'r1', tool: 'shell', worker: 'T3-a' })!;

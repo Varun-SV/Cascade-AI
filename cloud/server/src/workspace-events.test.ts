@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { MAX_CHANGE_TEXT, workspaceCallEvent, workspaceResultEvent } from './workspace-events.js';
+import { MAX_CHANGE_TEXT, observeWorkspaceTools, workspaceCallEvent, workspaceResultEvent } from './workspace-events.js';
 
 const served = new Set(['file_read', 'file_write', 'file_edit', 'file_delete']);
 
@@ -36,5 +36,25 @@ describe('workspaceResultEvent', () => {
     expect(workspaceResultEvent({ id: 'c', toolName: 'web_search', output: 'x' }, new Set(['file_read']))).toBeNull();
     // The worker as the machine's waiting notice names it, so the web app clears the right one.
     expect(workspaceResultEvent({ id: 'c', toolName: 'file_write', tierId: 'T3:sub/1' }, served)?.worker).toBe('T3_sub_1');
+  });
+});
+
+describe('observeWorkspaceTools', () => {
+  it("sees every call to the tools, however it reaches them (a worker's fallback calls the tool directly)", async () => {
+    const write = { name: 'file_write', execute: async () => 'Wrote a.txt' };
+    const del = { name: 'file_delete', execute: async () => { throw new Error('Declined on the machine'); } };
+    const seen: Array<[string, Record<string, unknown>]> = [];
+    observeWorkspaceTools([write, del], (event, payload) => seen.push([event, payload as Record<string, unknown>]));
+    // Called as the registry calls it, under no model-side tool event at all.
+    expect(await write.execute({ path: 'a.txt', content: 'hi' }, { tierId: 'T3:1' })).toBe('Wrote a.txt');
+    await expect(del.execute({ path: 'b.txt' }, { tierId: 'T3:1' })).rejects.toThrow(/Declined/);
+    expect(seen.map(([e, p]) => [e, p['tool'], p['ok']])).toEqual([
+      ['workspace:call', 'file_write', undefined],
+      ['workspace:result', 'file_write', true],
+      ['workspace:call', 'file_delete', undefined],
+      ['workspace:result', 'file_delete', false],
+    ]);
+    expect(seen[0]![1]['id']).toBe(seen[1]![1]['id']);
+    expect(seen[1]![1]['worker']).toBe('T3_1');
   });
 });

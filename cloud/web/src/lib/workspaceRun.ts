@@ -168,6 +168,9 @@ export function applyWorkspaceEvent(view: WorkspaceRunView | undefined, e: Works
   switch (e.type) {
     case 'waiting': {
       if (view.status !== 'attached') return view;
+      // A worker waits on one call at a time: the same worker's wait again (a replay after
+      // a reconnect) is the one already held.
+      if (e.worker && (view.waiting ?? []).some((w) => w.worker === e.worker)) return view;
       return withWaiting(view, [...(view.waiting ?? []), { tool: e.tool, ...(e.worker ? { worker: e.worker } : {}) }]);
     }
     case 'detached': {
