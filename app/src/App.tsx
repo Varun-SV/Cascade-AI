@@ -143,7 +143,7 @@ declare global {
         fileInfo(path: string): Promise<{ size: number; head: Uint8Array }>;
         readFileDataUrl(path: string, mime: string): Promise<{ ok: true; url: string } | { ok: false; error: string; limit?: number }>;
         openPath(path: string): Promise<{ ok: boolean; error?: string }>;
-        showInFolder(path: string): Promise<{ ok: boolean }>;
+        showInFolder(path: string): Promise<{ ok: boolean; error?: string }>;
       };
       relay?: {
         status(): Promise<RelayStatus>;

@@ -20,6 +20,12 @@ export function FilePreview({ path, kind, mime, size }: Props) {
   const [src, setSrc] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dims, setDims] = useState<{ w: number; h: number } | null>(null);
+  // Why Open or Show in folder was refused (outside the workspace, or a program).
+  const [actionError, setActionError] = useState<string | null>(null);
+  const act = (run: () => Promise<{ ok: boolean; error?: string }> | undefined) => {
+    setActionError(null);
+    void run()?.then((r) => { if (!r.ok) setActionError(r.error ?? 'That did not work.'); }).catch((e: unknown) => setActionError(String(e)));
+  };
   const name = baseName(path);
   const showable = kind !== 'binary' && mime !== null;
 
@@ -27,7 +33,7 @@ export function FilePreview({ path, kind, mime, size }: Props) {
     if (!showable || !window.cascade) return;
     let cancelled = false;
     let blobUrl: string | null = null;
-    setSrc(null); setError(null); setDims(null);
+    setSrc(null); setError(null); setDims(null); setActionError(null);
     (async () => {
       try {
         const res = await window.cascade!.fs.readFileDataUrl(path, mime!);
@@ -57,9 +63,10 @@ export function FilePreview({ path, kind, mime, size }: Props) {
       <div>{name} · {formatBytes(size)}</div>
       {message && <div style={{ maxWidth: 380, lineHeight: 1.5 }}>{message}</div>}
       <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-        <button style={btn} onClick={() => { void window.cascade?.fs.openPath(path); }}>Open in default app</button>
-        <button style={btn} onClick={() => { void window.cascade?.fs.showInFolder(path); }}>Show in folder</button>
+        <button style={btn} onClick={() => act(() => window.cascade?.fs.openPath(path))}>Open in default app</button>
+        <button style={btn} onClick={() => act(() => window.cascade?.fs.showInFolder(path))}>Show in folder</button>
       </div>
+      {actionError && <div role="alert" style={{ color: 'var(--danger)', fontSize: 12 }}>{actionError}</div>}
     </div>
   );
 

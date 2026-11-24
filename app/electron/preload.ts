@@ -320,6 +320,6 @@ contextBridge.exposeInMainWorld('cascade', {
     fileInfo: (filePath: string) => ipcRenderer.invoke('fs:fileInfo', filePath) as Promise<{ size: number; head: Uint8Array }>,
     readFileDataUrl: (filePath: string, mime: string) => ipcRenderer.invoke('fs:readFileDataUrl', filePath, mime) as Promise<{ ok: true; url: string } | { ok: false; error: string; limit?: number }>,
     openPath: (filePath: string) => ipcRenderer.invoke('fs:openPath', filePath) as Promise<{ ok: boolean; error?: string }>,
-    showInFolder: (filePath: string) => ipcRenderer.invoke('fs:showInFolder', filePath) as Promise<{ ok: boolean }>,
+    showInFolder: (filePath: string) => ipcRenderer.invoke('fs:showInFolder', filePath) as Promise<{ ok: boolean; error?: string }>,
   },
 });

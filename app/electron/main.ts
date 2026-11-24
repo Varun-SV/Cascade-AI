@@ -15,6 +15,7 @@ import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
 import { registerCloudAuthIpc, type CloudAuthHandle } from './cloudAuth';
 import { registerRelayIpc } from './relay-ipc';
+import { insideWorkspace, isRunnable } from './file-access';
 import { registerBrowserHandlers, readCurrentPage, actOnCurrentPage, setAgentControlEnabled, resumeAgentControl, agentRunEnded, agentActorEnded, setApprovalWaitCeiling, setLifecycleReleaseWired, approvalWaitCeilingFor } from './browser';
 
 const isDev = process.env.ELECTRON_DEV === '1';
@@ -400,10 +401,13 @@ function registerIPC(): void {
     const { readFile } = require('node:fs/promises');
     return readFile(filePath, 'utf8');
   });
-  // File previews. Same access as fs:readFile (any path the renderer names).
+  // File previews (Code view). Reading has the same reach as fs:readFile.
+  // Handing a file to the OS is new, so that is limited to the open workspace,
+  // and a program or script is never opened that way (file-access.ts).
   // The classifier lives in the renderer (app/src/lib/file-kind.ts; the main
   // process build cannot import from app/src), so fileInfo returns the first
   // bytes for it to sniff.
+  const inWorkspace = (filePath: string) => insideWorkspace(getWorkspacePath(), filePath);
   ipcMain.handle('fs:fileInfo', async (_e, filePath: string) => {
     const { open, stat } = require('node:fs/promises');
     const size: number = (await stat(filePath)).size;
@@ -425,11 +429,14 @@ function registerIPC(): void {
     return { ok: true, url: `data:${mime};base64,${data.toString('base64')}` };
   });
   ipcMain.handle('fs:openPath', async (_e, filePath: string) => {
+    if (!(await inWorkspace(filePath))) return { ok: false, error: 'Only files in the workspace can be opened from here.' };
+    if (isRunnable(filePath)) return { ok: false, error: 'Programs and scripts are not opened from here. Use Show in folder.' };
     const { shell } = require('electron');
     const error: string = await shell.openPath(filePath);
     return error ? { ok: false, error } : { ok: true };
   });
-  ipcMain.handle('fs:showInFolder', (_e, filePath: string) => {
+  ipcMain.handle('fs:showInFolder', async (_e, filePath: string) => {
+    if (!(await inWorkspace(filePath))) return { ok: false, error: 'Only files in the workspace can be shown from here.' };
     const { shell } = require('electron');
     shell.showItemInFolder(filePath);
     return { ok: true };
