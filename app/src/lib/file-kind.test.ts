@@ -50,4 +50,9 @@ describe('content sniffing for unknown extensions', () => {
     b[8500] = 0;
     expect(looksBinary(b)).toBe(false);
   });
+  it('an extension that names an Object property is not media', () => {
+    for (const name of ['notes.constructor', 'notes.__proto__', 'notes.toString', 'notes.hasOwnProperty']) {
+      expect(fileKind(name, ascii('plain text')), name).toEqual({ kind: 'text', mime: null });
+    }
+  });
 });

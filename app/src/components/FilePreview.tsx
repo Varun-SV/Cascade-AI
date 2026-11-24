@@ -98,7 +98,8 @@ export function FilePreview({ path, kind, mime, size }: Props) {
     return (
       <div style={center}>
         <div style={{ color: 'var(--text)', fontWeight: 600 }}>{name}</div>
-        <audio src={src} controls style={{ width: 'min(480px, 90%)' }} />
+        <audio src={src} controls style={{ width: 'min(480px, 90%)' }}
+          onError={() => setError("This audio format isn't supported by the built-in player.")} />
         <div style={{ fontSize: 11 }}>{formatBytes(size)}</div>
       </div>
     );

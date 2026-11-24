@@ -56,7 +56,8 @@ export function looksBinary(bytes: Uint8Array, sampleSize = 8192): boolean {
 
 export function fileKind(name: string, firstBytes?: Uint8Array): FileKindInfo {
   const ext = extensionOf(name);
-  const media = MEDIA[ext];
+  // Own entries only: "x.constructor" or "x.__proto__" is not a media type.
+  const media = Object.prototype.hasOwnProperty.call(MEDIA, ext) ? MEDIA[ext] : undefined;
   if (media) return { kind: media.kind, mime: media.mime };
   if (BINARY_EXT.has(ext)) return { kind: 'binary', mime: null };
   if (firstBytes && looksBinary(firstBytes)) return { kind: 'binary', mime: null };
