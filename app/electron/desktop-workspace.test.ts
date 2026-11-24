@@ -391,7 +391,7 @@ describe('a served run', () => {
     expect(h.ws.status().lastRun).toMatchObject({ canUndo: false, note: expect.stringMatching(/incomplete/) });
   });
 
-  it("an undo still working when a newer run ends marks only its own run undone", async () => {
+  it("an undo still working updates only the summary it was started for", async () => {
     const h = harness();
     const a = await opened(h);
     a.s.onServing!({ runId: 'run-1', userId: 'u', expiresAt: 1, label: 'proj' });
@@ -402,16 +402,45 @@ describe('a served run', () => {
     h.checkpoints.undo.mockReturnValueOnce(new Promise((r) => { finish = r; }) as never);
     const undoing = h.ws.undoLastRun();
     expect(await h.ws.undoLastRun()).toMatchObject({ error: expect.stringMatching(/already running/) });
-    // Another run starts and ends while the undo works.
-    const b = await opened(h);
-    b.s.onServing!({ runId: 'run-1', userId: 'u', expiresAt: 1, label: 'proj' });
-    h.checkpoints.begin.mockResolvedValueOnce({ n: 4 });
-    await b.exec.checkpoints.begin('run');
-    h.checkpoints.list.mockReturnValue([{ n: 3, changed: 2, after: 's' }, { n: 4, changed: 4, after: 's' }]);
-    b.s.onServing!(null);
+    // The banner is dismissed while the undo works: it doesn't come back as "undone".
+    h.ws.dismissLastRun();
     finish({ restored: ['a'], removed: [], skipped: [] });
     expect(await undoing).toMatchObject({ ok: true });
-    expect(h.ws.status().lastRun).toMatchObject({ undone: false, canUndo: true, changed: 4 });
+    expect(h.ws.status().lastRun).toBeNull();
+  });
+
+  it('no run opens the folder while an undo is putting files back, not even one whose config was still loading', async () => {
+    const h = harness();
+    const a = await opened(h);
+    a.s.onServing!({ runId: 'run-1', userId: 'u', expiresAt: 1, label: 'proj' });
+    await a.exec.checkpoints.begin('run');
+    h.checkpoints.list.mockReturnValue([{ n: 3, changed: 2, after: 's' }]);
+    a.s.onServing!(null);
+    // A run already loading the folder's config when the undo starts.
+    h.ws.enable();
+    const s = h.served.at(-1)!;
+    const p1 = s.askUser(run());
+    h.ws.answer(h.last('workspace:ask').id, { folder: PROJ, tools: ['file_read'] });
+    const c1 = (await p1)!;
+    let release!: () => void;
+    h.loadGate.wait = new Promise<void>((r) => { release = r; });
+    const loading = s.open(c1, run());
+    let finish!: (v: { restored: string[]; removed: string[]; skipped: string[] }) => void;
+    h.checkpoints.undo.mockReturnValueOnce(new Promise((r) => { finish = r; }) as never);
+    const undoing = h.ws.undoLastRun();
+    release();
+    await expect(loading).rejects.toThrow(/undo/);
+    // And one asked for while the undo runs.
+    h.loadGate.wait = Promise.resolve();
+    const p2 = s.askUser(run({ runId: 'run-2' }));
+    h.ws.answer(h.last('workspace:ask').id, { folder: PROJ, tools: ['file_read'] });
+    await expect(s.open((await p2)!, run({ runId: 'run-2' }))).rejects.toThrow(/undo/);
+    finish({ restored: ['a'], removed: [], skipped: [] });
+    expect(await undoing).toMatchObject({ ok: true });
+    // Once it is done, runs open again.
+    const p3 = s.askUser(run({ runId: 'run-3' }));
+    h.ws.answer(h.last('workspace:ask').id, { folder: PROJ, tools: ['file_read'] });
+    await expect(s.open((await p3)!, run({ runId: 'run-3' }))).resolves.toBeDefined();
   });
 
   it('keeps open questions for a window that opens later, and drops them once answered or closed', async () => {

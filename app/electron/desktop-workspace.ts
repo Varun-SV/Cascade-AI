@@ -252,6 +252,9 @@ export function createDesktopWorkspace(deps: DesktopWorkspaceDeps) {
     const c = chosen.get(run.runId);
     chosen.delete(run.runId);
     if (!c) throw new Error('no folder was chosen for this run');
+    // An undo is putting files back and rewriting the checkpoint list: a run working in
+    // the folder now would have its changes and its checkpoint overwritten.
+    if (undoing) throw new Error('an undo of the last run is still putting files back on this computer; try again in a moment');
     // The folder may have changed since it was chosen.
     const v = validateFolder(c.folder, folderFs);
     if ('error' in v) throw new Error(v.error);
@@ -262,6 +265,7 @@ export function createDesktopWorkspace(deps: DesktopWorkspaceDeps) {
     // Turned off (and maybe on again) while the folder's config loaded: this
     // service no longer serves, and must not replace a newer run's state.
     if (owner && serving !== owner) { try { mgr.getStore?.()?.close?.(); } catch { /* nothing to release */ } throw new Error('serving was turned off'); }
+    if (undoing) { try { mgr.getStore?.()?.close?.(); } catch { /* nothing to release */ } throw new Error('an undo of the last run is still putting files back on this computer; try again in a moment'); }
     const cfg = mgr.getConfig();
     try { mgr.getStore?.()?.close?.(); } catch { /* nothing to release */ }
     const registry = new core.ToolRegistry({ ...(cfg.tools ?? {}), enabledTools: consent.tools, browserEnabled: false }, v.folder);
