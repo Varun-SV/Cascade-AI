@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { mermaidConfig, renderMermaid } from '../lib/mermaid-render';
 
 let seq = 0;
 
@@ -26,8 +27,9 @@ export function MermaidBlock({ code, fallback }: { code: string; fallback: React
     (async () => {
       try {
         const mermaid = (await import('mermaid')).default;
-        mermaid.initialize({ startOnLoad: false, theme: isDarkTheme() ? 'dark' : 'default', securityLevel: 'strict' });
-        const { svg: rendered } = await mermaid.render(`cascade-mmd-${++seq}`, code);
+        mermaid.initialize(mermaidConfig(isDarkTheme() ? 'dark' : 'default'));
+        // Parses first, and never leaves mermaid's own error graphic on the page.
+        const rendered = await renderMermaid(mermaid, `cascade-mmd-${++seq}`, code);
         if (!cancelled) setSvg(rendered);
       } catch {
         if (!cancelled) { setSvg(null); setFailed(true); }
