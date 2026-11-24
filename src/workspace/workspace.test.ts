@@ -608,6 +608,21 @@ describe('the machine tells each worker which files it read have changed', () =>
     expect(await a('file_list', { path: '.' })).not.toMatch(NOTE);
   });
 
+  it('a whole read the result cap cut short is no refresh either: a change past the cut still reaches it', async () => {
+    const w = await world();
+    const dir = folder();
+    const big = path.join(dir, 'big.log');
+    fs.writeFileSync(big, 'line\n'.repeat(80_000));
+    await machine(w, dir, { answer: { tools: ['file_read', 'file_list'], label: 'p' } });
+    const { ws } = await runWorkspace(w);
+    const a = as(ws, 'worker-a');
+    await a('file_read', { path: 'big.log' });
+    fs.appendFileSync(big, 'a new line far past the cut\n');
+    // Read whole again, but sent cut: the change is still news.
+    expect((await a('file_read', { path: 'big.log' })).match(NOTE)?.[1]).toBe('big.log');
+    expect(await a('file_list', { path: '.' })).not.toMatch(NOTE);
+  });
+
   it('a listing or a search naming a file it read is no change of its own: a later edit still reaches it', async () => {
     const w = await world();
     const dir = folder();
