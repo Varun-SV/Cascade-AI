@@ -1171,6 +1171,9 @@ export class CascadeRouter extends EventEmitter {
 
     // ── Apply per-tier token + temperature limits ──────────────
     options = applyTierLimits(options, tier, this.config?.tierLimits);
+    // The run's thinking level, for every call it makes (a call that set its own keeps it).
+    const thinking = this.config?.thinking;
+    if (thinking && thinking !== 'auto' && options.thinking === undefined) options = { ...options, thinking };
     // Inject the run's abort signal so the provider can abort the in-flight
     // request the moment a cancel fires (instant cancellation).
     if (runSignal && !options.signal) {

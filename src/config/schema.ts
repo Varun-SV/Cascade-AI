@@ -338,6 +338,7 @@ export const CascadeConfigSchema = z.object({
    *   - 'cost': pick the cheapest model that clears a per-task quality floor.
    */
   autoBias: z.enum(['balanced', 'quality', 'cost']).default('balanced'),
+  thinking: z.enum(['auto', 'off', 'low', 'medium', 'high']).optional(),
   /**
    * Public-benchmark data source for Cascade Auto. All fields have safe
    * defaults so zero config "just works" — live data is fetched in the

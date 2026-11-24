@@ -4,7 +4,7 @@ import type { ProviderConfig, WhyReport } from '../lib/types.js';
 import { getMessages, selectBranch as apiSelectBranch, deleteMessage as apiDeleteMessage, fetchFeedback } from '../lib/api.js';
 import { estimateConversationTokens, contextWindowFor } from '../lib/tokens.js';
 import {
-  localModelEnabled, fastAnswerModel, tierParams, extendedContext, shareLearning,
+  localModelEnabled, fastAnswerModel, tierParams, extendedContext, shareLearning, thinkingLevel,
   maxTokensPerRun, maxCostPerRunUsd, rememberSessions, defaultRoutingBias, defaultWebSearch,
 } from '../lib/prefs.js';
 import { refreshPendingMedia } from '../lib/pendingMedia.js';
@@ -2834,6 +2834,8 @@ export function useChatSession(
             // Advanced per-tier generation params (omitted when none are set,
             // and moot for a fast answer, which is a single direct call).
             tierParams: fast ? undefined : (() => { const tp = tierParams(); return Object.keys(tp).length ? tp : undefined; })(),
+            // The run's thinking level ('auto' is the server's default, so it isn't sent).
+            thinking: thinkingLevel() !== 'auto' ? thinkingLevel() : undefined,
             // Extended context: only sent when enabled and not a fast answer.
             extendedContext: fast ? undefined : (() => { const e = extendedContext(); return e.enabled ? e : undefined; })(),
             // Contribute to shared learning (Pro can opt out; server gates by plan).

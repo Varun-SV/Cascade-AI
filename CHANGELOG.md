@@ -5,6 +5,34 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.99.5 - 2026-11-24
+
+### Added
+- **A thinking setting for each run, in the web and desktop apps.** Choose
+  Auto, Off, Low, Medium or High in the composer: the web app's mode menu, or
+  the desktop chat's Thinking list. It applies to every model call of the run
+  and is kept for your next visit. The web app shows a chip while it isn't Auto.
+  Each provider gets it in the form its models take:
+  - Claude: adaptive thinking and effort on current models, a token budget on
+    older ones. Models that can't turn thinking off (Fable, Mythos, Opus 5.5)
+    think as little as they can for "Off".
+  - OpenAI: reasoning effort, for reasoning models.
+  - Gemini: a thinking level on Gemini 3, a budget on 2.5.
+  - Azure deployments are never sent it (they reject it), so with only Azure set
+    up the setting is shown as unavailable. Ollama and OpenAI-compatible
+    endpoints don't get it either.
+
+  SDK and CLI: `thinking` in config (`"auto"`, `"off"`, `"low"`, `"medium"`,
+  `"high"`).
+
+### Fixed
+- **Requests to current Claude models no longer carry settings they reject.**
+  Opus 4.7 and later, Sonnet 5 and later and Haiku 5.5 reject a temperature,
+  and Opus 4.7 and 4.8 reject a thinking token budget. Cascade sent both.
+  These requests now send only what each model accepts.
+- **Azure deployments are no longer sent `reasoning_effort`.** A GPT-6 Luna or
+  Sol deployment was sent the `none` that OpenAI's own API needs for tool calls.
+
 ## 0.99.2 - 2026-11-24
 
 ### Added

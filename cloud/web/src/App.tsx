@@ -413,6 +413,7 @@ export default function App() {
             error={chat.error}
             status={chat.status}
             hasProviders={providers.length > 0}
+            thinkingUnavailable={providers.length > 0 && providers.every((p) => p.type === 'azure')}
             skills={skills}
             skillId={skillId}
             onSkillChange={setSkillId}

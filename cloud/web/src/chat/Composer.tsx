@@ -3,11 +3,12 @@ import { browserChip, CHECKING, type BrowserAllowanceView } from './browserAllow
 import clsx from 'clsx';
 import {
   ArrowUp, Paperclip, X, Loader2, Globe, Square, Zap, FileText, MonitorPlay, Plus, SlidersHorizontal,
-  ChevronDown, Sparkles, Settings2, Plug,
+  ChevronDown, Sparkles, Settings2, Plug, Brain,
 } from 'lucide-react';
 import Menu, { type MenuItem } from '../components/Menu.js';
 import { fetchMcpServers, setMcpServerEnabled, uploadImage, uploadDocument, uploadUrl, type McpServer } from '../lib/api.js';
 import type { Skill } from '../lib/types.js';
+import { THINKING_LEVELS, setThinkingLevel, thinkingLevel, type ThinkingLevel } from '../lib/prefs.js';
 import type { ChatAttachment, ForceTier, RoutingMode, SendInput } from './useChatSession.js';
 
 const ALLOWED = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
@@ -90,14 +91,25 @@ interface Props {
   onManageConnectors?: () => void;
   /** A suggestion from the empty state, placed in the box for the user to send or edit. */
   draftRequest?: { text: string; seq: number } | null;
+  /** Every provider is an Azure deployment, which takes no thinking setting. */
+  thinkingUnavailable?: boolean;
 }
+
+/** The thinking levels, as the menu offers them. */
+const THINKING_OPTIONS: Record<ThinkingLevel, { label: string; sub: string }> = {
+  auto: { label: 'Auto', sub: "Each model's default" },
+  off: { label: 'Off', sub: 'As little as each model allows' },
+  low: { label: 'Low', sub: 'Quick, light reasoning' },
+  medium: { label: 'Medium', sub: 'Balanced' },
+  high: { label: 'High', sub: 'Thinks longest; slower, costs more' },
+};
 
 type MenuKey = 'plus' | 'tools' | 'mode';
 
 export default function Composer({
   skills, skillId, onSkillChange, hasProviders, busy, onSend, onStop,
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange,
-  browserMode, onBrowserModeChange, browserAvailable, browserOwnOnly = false, browserAllowance,
+  browserMode, onBrowserModeChange, browserAvailable, browserOwnOnly = false, browserAllowance, thinkingUnavailable = false,
   onManageSkills, onManageConnectors, draftRequest,
 }: Props) {
   const chip = browserChip(browserAllowance ?? null);
@@ -108,6 +120,9 @@ export default function Composer({
   const [uploadError, setUploadError] = useState<string | null>(null);
   // Fast answer applies to the next message only, like the prototype's toggle.
   const [fastNext, setFastNext] = useState(false);
+  // The run's thinking level: kept between visits, sent with every message.
+  const [thinking, setThinkingState] = useState<ThinkingLevel>(() => thinkingLevel());
+  const chooseThinking = (level: ThinkingLevel) => { setThinkingLevel(level); setThinkingState(level); };
   const [menu, setMenu] = useState<{ key: MenuKey; anchor: HTMLElement } | null>(null);
   const [servers, setServers] = useState<McpServer[] | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -269,6 +284,16 @@ export default function Composer({
       { kind: 'label', label: 'Tier' },
       ...FORCE_TIERS.map<MenuItem>((t) => ({ kind: 'radio', label: t === 'auto' ? 'Let Cascade decide' : `${t} only`, checked: forceTier === t, onSelect: () => onForceTierChange(t) })),
       { kind: 'separator' },
+      { kind: 'label', label: 'Thinking' },
+      ...THINKING_LEVELS.map<MenuItem>((level) => ({
+        kind: 'radio', label: THINKING_OPTIONS[level].label, sub: THINKING_OPTIONS[level].sub,
+        checked: (thinkingUnavailable ? 'auto' : thinking) === level, onSelect: () => chooseThinking(level), disabled: thinkingUnavailable,
+      })),
+      {
+        kind: 'custom', key: 'thinking-azure',
+        render: <p className="m-0 px-[9px] py-1 text-[12px] text-ink-500">{thinkingUnavailable ? "Not available: Azure deployments don't take a thinking setting." : 'Not sent to Azure deployments.'}</p>,
+      },
+      { kind: 'separator' },
       { kind: 'toggle', label: 'Fast answer', sub: 'Next message skips orchestration', icon: <Zap size={15} />, checked: fastNext, onToggle: () => setFastNext((f) => !f) },
     ];
   }
@@ -277,6 +302,7 @@ export default function Composer({
   // a billed capability like the browser is never on without saying so.
   const tokens: Array<{ key: string; icon: ReactNode; label: string; off: () => void }> = [];
   if (fastNext) tokens.push({ key: 'fast', icon: <Zap size={14} />, label: 'Fast answer', off: () => setFastNext(false) });
+  if (thinking !== 'auto' && !thinkingUnavailable) tokens.push({ key: 'thinking', icon: <Brain size={14} />, label: `Thinking: ${THINKING_OPTIONS[thinking].label}`, off: () => chooseThinking('auto') });
   if (webSearch) tokens.push({ key: 'web', icon: <Globe size={14} />, label: 'Web', off: () => onWebSearchChange(false) });
   if (browserMode) tokens.push({ key: 'browser', icon: <MonitorPlay size={14} />, label: 'Browser', off: () => onBrowserModeChange(false) });
   if (skillId && skillId !== 'general' && skillName) tokens.push({ key: 'skill', icon: <Sparkles size={14} />, label: skillName, off: () => onSkillChange('general') });

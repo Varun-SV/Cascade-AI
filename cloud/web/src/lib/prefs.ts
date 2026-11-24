@@ -217,3 +217,24 @@ export function setFastAnswerModel(v: string): void {
     else localStorage.removeItem(FAST_MODEL_KEY);
   } catch { /* storage unavailable */ }
 }
+
+// ── Thinking level ──────────────────────────────────────────────────────────
+// How much the run's models think: one setting per run, sent with each message.
+// 'auto' leaves every model at its own default. Azure deployments never get it.
+
+export type ThinkingLevel = 'auto' | 'off' | 'low' | 'medium' | 'high';
+export const THINKING_LEVELS: readonly ThinkingLevel[] = ['auto', 'off', 'low', 'medium', 'high'];
+const THINKING_KEY = 'cascade-cloud-thinking-level';
+
+export function thinkingLevel(): ThinkingLevel {
+  try {
+    const v = localStorage.getItem(THINKING_KEY);
+    return (THINKING_LEVELS as readonly string[]).includes(v ?? '') ? v as ThinkingLevel : 'auto';
+  } catch { return 'auto'; }
+}
+export function setThinkingLevel(level: ThinkingLevel): void {
+  try {
+    if (level === 'auto') localStorage.removeItem(THINKING_KEY);
+    else localStorage.setItem(THINKING_KEY, level);
+  } catch { /* storage unavailable */ }
+}

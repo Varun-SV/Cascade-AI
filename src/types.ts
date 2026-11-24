@@ -134,8 +134,19 @@ export interface TokenUsage {
  */
 export type TaskType = 'code' | 'analysis' | 'creative' | 'data' | 'mixed';
 
+/**
+ * How much a run's models think before answering: one setting for the whole
+ * run. 'auto' leaves each model at its own default. Each provider turns it into
+ * what its models accept (src/providers/thinking.ts); a provider whose models
+ * take no such setting, or a deployment that rejects it (Azure), ignores it.
+ */
+export type ThinkingLevel = 'auto' | 'off' | 'low' | 'medium' | 'high';
+export const THINKING_LEVELS: readonly ThinkingLevel[] = ['auto', 'off', 'low', 'medium', 'high'];
+
 export interface GenerateOptions {
   messages: ConversationMessage[];
+  /** How much the model thinks first. Unset or 'auto': its default. */
+  thinking?: ThinkingLevel;
   systemPrompt?: string;
   maxTokens?: number;
   temperature?: number;
@@ -816,6 +827,8 @@ export interface CascadeConfig {
   cascadeAuto?: boolean;
   /** Cascade Auto trade-off bias when picking a model. Default: 'balanced'. */
   autoBias?: 'balanced' | 'quality' | 'cost';
+  /** How much the run's models think, for every call of the run. Default: 'auto'. */
+  thinking?: ThinkingLevel;
   /** Public-benchmark data source settings for Cascade Auto. */
   benchmarks?: BenchmarksConfig;
   enableToolCreation?: boolean;

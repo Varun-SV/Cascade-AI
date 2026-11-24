@@ -337,7 +337,7 @@ export class DashboardServer {
       return { refused, snapshot: settingsSnapshot(this.config) };
     });
 
-    this.socket.onCascadeRun(async (prompt, model, socketId, requestedSessionId, forceTier, attachmentIds = []) => {
+    this.socket.onCascadeRun(async (prompt, model, socketId, requestedSessionId, forceTier, attachmentIds = [], thinking) => {
       const sessionId = requestedSessionId ?? randomUUID();
       const abortController = new AbortController();
       this.activeControllers.set(sessionId, abortController);
@@ -353,6 +353,8 @@ export class DashboardServer {
         : this.config;
       // Per-run manual tier override from the Cockpit selector.
       if (forceTier) cfg = { ...cfg, routing: { ...cfg.routing, forceTier: forceTier as 'T1' | 'T2' | 'T3' } };
+      // The run's thinking level, from the composer.
+      if (thinking) cfg = { ...cfg, thinking };
       const cascade = new Cascade(cfg, this.workspacePath, this.store);
       this.activeSessions.set(sessionId, cascade);
       if (this.currentPageProvider) cascade.setCurrentPageProvider(this.currentPageProvider);

@@ -25,6 +25,8 @@ interface Props {
   error: string | null;
   status: string | null;
   hasProviders: boolean;
+  /** Every provider is an Azure deployment, which takes no thinking setting. */
+  thinkingUnavailable?: boolean;
   skills: Skill[];
   skillId: string;
   onSkillChange: (id: string) => void;
@@ -111,7 +113,7 @@ interface Props {
 }
 
 export default function ChatPanel({
-  messages, busy, error, status, hasProviders, skills, skillId, onSkillChange, onSend, onStop, onRegenerate,
+  messages, busy, error, status, hasProviders, thinkingUnavailable, skills, skillId, onSkillChange, onSend, onStop, onRegenerate,
   onEditMessage, onDeleteMessage, onSelectSibling,
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange,
   clarifications, onAnswerClarification,
@@ -360,6 +362,7 @@ export default function ChatPanel({
             skillId={skillId}
             onSkillChange={onSkillChange}
             hasProviders={hasProviders}
+            thinkingUnavailable={thinkingUnavailable}
             busy={busy}
             onSend={onSend}
             onStop={onStop}

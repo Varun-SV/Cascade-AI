@@ -369,6 +369,7 @@ The file is strict JSON — no comments.
 - `tools.mcpTrusted` names the MCP servers allowed to start; an untrusted one is refused.
 - `"codeIndex": { "enabled": true }` turns on the `code_search` tool; build its index with `cascade index`.
 - `autoBias` sets Auto's trade-off: `"balanced"`, `"quality"` or `"cost"`.
+- `thinking` sets how much a run's models think: `"auto"` (each model's default), `"off"`, `"low"`, `"medium"` or `"high"`. Each provider gets it in the form its models take; where a model can't turn thinking off, `"off"` is the least it does. Azure deployments, Ollama and OpenAI-compatible endpoints are never sent it. The web and desktop apps set it per run from the composer.
 - `planApproval: "always"` pauses Complex runs in the **boardroom**: approve T1's proposed sections, worker counts, and estimated cost before any T2 manager spawns. Headless/SDK runs auto-approve.
 - `altScreen: true` (or the `--alt-screen` flag) renders the TUI in the terminal's alternate screen buffer — vim-style, flicker-proof, shell restored on exit. History scrolls in-app with PgUp/PgDn since the alt screen has no native scrollback.
 

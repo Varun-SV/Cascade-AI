@@ -20,16 +20,7 @@ import { withResolvedPricing } from '../core/router/pricing.js';
 import { isChatModel } from './model-filter.js';
 import { clientApiRoot, fetchSameOrigin, stripTrailingSlashes } from '../utils/net.js';
 import { isSubscriptionToken } from '../config/revoked-credentials.js';
-
-// Anthropic extended thinking — only the 4.x reasoning models (Opus 4 / Sonnet 4)
-// support it. budget_tokens must be >= 1024 and < max_tokens; we cap well under
-// the cap. Returns {} for unsupported models so their requests are unchanged.
-function anthropicThinkingParam(modelId: string, maxTokens: number): { thinking?: { type: 'enabled'; budget_tokens: number } } {
-  if (!/claude-(opus|sonnet)-4/i.test(modelId)) return {};
-  const budget = Math.min(8000, maxTokens - 1024);
-  if (budget < 1024) return {};
-  return { thinking: { type: 'enabled', budget_tokens: budget } };
-}
+import { anthropicThinkingParams } from './thinking.js';
 
 /**
  * Tool definitions in the shape this provider actually submits.
@@ -232,17 +223,15 @@ export class AnthropicProvider extends BaseProvider {
     let outputTokens = 0;
 
     const maxTokens = options.maxTokens ?? this.model.maxOutputTokens;
-    const thinkParam = anthropicThinkingParam(this.model.id, maxTokens);
-    const useThinking = !!thinkParam.thinking;
+    // Thinking, effort and temperature, as this model takes them (src/providers/thinking.ts).
+    const thinkParams = anthropicThinkingParams(this.model.id, options.thinking, maxTokens, options.temperature);
     const stream = this.client.messages.stream({
       model: this.model.id,
       max_tokens: maxTokens,
-      // Extended thinking requires temperature = 1; otherwise honor the request.
-      temperature: useThinking ? 1 : (options.temperature ?? 0.7),
       system: options.systemPrompt,
       messages,
       tools: tools?.length ? tools : undefined,
-      ...thinkParam,
+      ...thinkParams,
     }, { signal: options.signal });
 
     let isThinking = false;

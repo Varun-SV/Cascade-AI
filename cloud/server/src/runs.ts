@@ -238,6 +238,10 @@ const ChatRunPayloadSchema = z.object({
   // starts from this — its heuristic floors + escalation still apply as
   // guardrails. Ignored when a tier is pinned via forceTier.
   complexityHint: z.enum(['Simple', 'Moderate', 'Complex']).optional(),
+  // How much the run's models think: one setting for the whole run. 'auto' (or
+  // unset) leaves each model at its default. Never sent to Azure deployments,
+  // which reject it (src/providers/thinking.ts).
+  thinking: z.enum(['auto', 'off', 'low', 'medium', 'high']).optional(),
   // Contribute this run's anonymous model-outcome stats to the shared learning
   // pool. Only a Pro user's `false` opts out; free users always contribute
   // (enforced server-side against the user's plan).
@@ -401,6 +405,8 @@ export interface RunControls {
   tierParams?: { t1?: TierParam; t2?: TierParam; t3?: TierParam };
   /** Extended context: compact oversized history/input to fit the model window. */
   extendedContext?: { enabled?: boolean; maxMultiplier?: number };
+  /** How much the run's models think. */
+  thinking?: 'auto' | 'off' | 'low' | 'medium' | 'high';
   /** Where the shared model-performance stats live (→ the persistent volume). */
   perfStatsPath?: string;
   /** When false, read shared scores but don't record this run's outcomes. */
@@ -704,6 +710,7 @@ export function buildCloudConfig(
     },
     ...(tierLimits && Object.keys(tierLimits).length ? { tierLimits } : {}),
     ...(ec?.enabled ? { extendedContext: { enabled: true, maxMultiplier: ec.maxMultiplier ?? 2 } } : {}),
+    ...(controls.thinking && controls.thinking !== 'auto' ? { thinking: controls.thinking } : {}),
     // Cascade Auto already fetches live public benchmark scores (benchmarks.live
     // defaults on); pointing the cache at the volume makes those scores persist
     // across requests + redeploys instead of re-fetching on every fresh Cascade.
@@ -2027,6 +2034,7 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
     webSearchConfig: payload.webSearchConfig,
     tierParams: payload.tierParams,
     extendedContext: payload.extendedContext,
+    thinking: payload.thinking,
     perfStatsPath,
     learnFromOutcomes,
     benchmarksCacheFile,
