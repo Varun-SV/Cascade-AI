@@ -21,8 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Windows) on files named outright keep their answer until one of those
   files changes, however long ago the command ran and whatever else has run
   since. A file edited outside Cascade counts as a change too. This applies
-  to a single command with plain file names and display-only options: no
-  globs, quoting, symbolic links, or options that read other files. Folder
+  to a single command with plain file names inside the project and
+  display-only options: no globs, quoting, symbolic links, or options that
+  read other files. Folder
   listings, searches and `stat` keep the stricter rule.
 - **Facts are checked against the machine.** "Not a git repository" and
   "command not available" are dropped once they stop being true, even when

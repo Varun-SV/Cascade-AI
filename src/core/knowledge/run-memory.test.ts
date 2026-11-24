@@ -844,6 +844,35 @@ describe('Codex on 87abb45', () => {
   });
 });
 
+describe('Codex on 9d49e32', () => {
+  const write = (rel: string, text: string) => { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), text); };
+
+  it('not a relative cwd, which the shell takes against its own folder, not the project', () => {
+    write('src/a.txt', 'a');
+    const mem = new RunMemory(root);
+    run(mem, 'shell', { command: 'cat a.txt', cwd: 'src' }, 'a', 'T3-a');
+    // Kept only by the bounded rule: a change anywhere clears it.
+    run(mem, 'file_write', { path: 'other.txt' }, 'written', 'T3-b');
+    expect(mem.reuse('shell', { command: 'cat a.txt', cwd: 'src' })).toBeNull();
+    // Control: an absolute cwd is where the shell runs too.
+    run(mem, 'shell', { command: 'cat a.txt', cwd: path.join(root, 'src') }, 'a', 'T3-a');
+    run(mem, 'file_write', { path: 'third.txt' }, 'written', 'T3-b');
+    expect(mem.reuse('shell', { command: 'cat a.txt', cwd: path.join(root, 'src') })).not.toBeNull();
+  });
+
+  it('only files in the project: not /proc and the like, whose contents change unseen', () => {
+    write('a.txt', 'a');
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-outside-'));
+    try {
+      fs.writeFileSync(path.join(outside, 'meminfo'), 'x');
+      expect(readsOf(`cat ${path.join(outside, 'meminfo')}`, root, root)).toBeNull();
+      expect(readsOf('cat ../x', root, root)).toBeNull();
+      expect(readsOf('cat a.txt', root, root)).toEqual([path.join(root, 'a.txt')]);
+      if (fs.existsSync('/proc/meminfo')) expect(readsOf('cat /proc/meminfo', root, root)).toBeNull();
+    } finally { fs.rmSync(outside, { recursive: true, force: true }); }
+  });
+});
+
 describe('facts checked against the machine', () => {
   let saved: string | undefined;
   beforeEach(() => { saved = process.env['PATH']; });

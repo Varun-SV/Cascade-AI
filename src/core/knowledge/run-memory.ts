@@ -474,7 +474,7 @@ const SHORT_OPTIONS: Record<string, RegExp> = {
  * `ls`, `rg`, `find` and the like depend on what is in a folder, not on files
  * that can be named, and keep the coarser rule.
  */
-export function readsOf(command: string, cwd: string): string[] | null {
+export function readsOf(command: string, cwd: string, within?: string): string[] | null {
   if (/&&|\|\||;|\||&|\n|[*?[\]]/.test(command)) return null;
   // Quoting, escapes, expansions and redirects change which words the shell
   // sees; rather than track the wrong files, none of these are taken. (A
@@ -500,6 +500,12 @@ export function readsOf(command: string, cwd: string): string[] | null {
       continue;
     }
     const abs = path.resolve(cwd, w);
+    // Only the project's own files: /proc, /sys and the like look like regular
+    // files whose contents change with no change to what a snapshot sees.
+    if (within) {
+      const rel = path.relative(within, abs);
+      if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return null;
+    }
     if (!snapshot(abs)) return null;
     // A link: `file link` describes the link, which a snapshot (of its target) can't see change.
     try { if (fs.lstatSync(abs).isSymbolicLink()) return null; } catch { return null; }
@@ -675,7 +681,12 @@ export class RunMemory {
     let leave: (() => void) | undefined;
     if (!callReadsOnly(tool, input)) { this.changing += 1; leave = this.changes.enter(); this.changes.bump(); }
     const ticket = this.nextTicket++;
-    const files = tool === 'shell' && this.reusable(tool, input) ? readsOf(String(input['command'] ?? ''), this.cwd(input)) : null;
+    // Only where the shell runs in the folder the board thinks it does: with no
+    // cwd (the project) or an absolute one. A relative cwd is taken by the shell
+    // as given, against the process's own folder, not the project's.
+    const rawCwd = input['cwd'];
+    const sameDir = rawCwd === undefined || (typeof rawCwd === 'string' && path.isAbsolute(rawCwd));
+    const files = tool === 'shell' && sameDir && this.reusable(tool, input) ? readsOf(String(input['command'] ?? ''), this.cwd(input), this.root) : null;
     this.started.set(ticket, { epoch: this.epoch, mark: this.changes.current(), leave, ...(files ? { reads: files.map((f) => [f, snapshot(f)] as [string, Snapshot | null]) } : {}) });
     return ticket;
   }
