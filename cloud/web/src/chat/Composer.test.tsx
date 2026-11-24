@@ -177,17 +177,16 @@ describe('attachments', () => {
 });
 
 describe('the thinking level', () => {
-  afterEach(() => { localStorage.clear(); });
-
-  it('is chosen in the mode menu, kept for the next visit, and shown as a chip', () => {
-    renderComposer();
+  it('is chosen in the mode menu and shown as a chip that turns it back to Auto', () => {
+    const onThinkingChange = vi.fn();
+    const { rerender, ...props } = renderComposer({ onThinkingChange });
     fireEvent.click(screen.getByRole('button', { name: /^Auto/ }));
     fireEvent.click(screen.getByRole('menuitemradio', { name: /^High/ }));
-    expect(localStorage.getItem('cascade-cloud-thinking-level')).toBe('high');
-    expect(screen.getByRole('button', { name: 'Remove Thinking: High' })).toBeInTheDocument();
-    // Its chip turns it back to Auto, which is not stored.
+    expect(onThinkingChange).toHaveBeenLastCalledWith('high');
+    rerender(<Composer {...props} onThinkingChange={onThinkingChange} thinking="high" />);
     fireEvent.click(screen.getByRole('button', { name: 'Remove Thinking: High' }));
-    expect(localStorage.getItem('cascade-cloud-thinking-level')).toBeNull();
+    expect(onThinkingChange).toHaveBeenLastCalledWith('auto');
+    rerender(<Composer {...props} onThinkingChange={onThinkingChange} thinking="auto" />);
     expect(screen.queryByRole('button', { name: /Remove Thinking/ })).toBeNull();
   });
 
@@ -198,8 +197,7 @@ describe('the thinking level', () => {
   });
 
   it('is unavailable when every provider is an Azure deployment', () => {
-    localStorage.setItem('cascade-cloud-thinking-level', 'high');
-    renderComposer({ thinkingUnavailable: true });
+    renderComposer({ thinkingUnavailable: true, thinking: 'high' });
     expect(screen.queryByRole('button', { name: /Remove Thinking/ })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /^Auto/ }));
     expect(screen.getByText("Not available: Azure deployments don't take a thinking setting.")).toBeInTheDocument();

@@ -37,6 +37,17 @@ describe("the run's thinking level", () => {
     expect(lastRun(fake)?.['thinking']).toBe('low');
   });
 
+  it('is the one this tab chose, even after another tab saves a different one', async () => {
+    const fake = fakeSocket();
+    const view = renderHook(() => useChatSession(fake.socket, [], 'general'));
+    act(() => { view.result.current.setThinking('off'); });
+    expect(localStorage.getItem('cascade-cloud-thinking-level')).toBe('off'); // kept for the next visit
+    localStorage.setItem('cascade-cloud-thinking-level', 'high'); // another tab
+    act(() => { view.result.current.send({ prompt: 'quick question' }); });
+    await waitFor(() => expect(lastRun(fake)).toBeDefined());
+    expect(lastRun(fake)?.['thinking']).toBe('off');
+  });
+
   it('is left out for auto, the server default', async () => {
     const fake = fakeSocket();
     const view = renderHook(() => useChatSession(fake.socket, [], 'general'));

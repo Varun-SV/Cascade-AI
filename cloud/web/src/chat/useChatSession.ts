@@ -4,7 +4,7 @@ import type { ProviderConfig, WhyReport } from '../lib/types.js';
 import { getMessages, selectBranch as apiSelectBranch, deleteMessage as apiDeleteMessage, fetchFeedback } from '../lib/api.js';
 import { estimateConversationTokens, contextWindowFor } from '../lib/tokens.js';
 import {
-  localModelEnabled, fastAnswerModel, tierParams, extendedContext, shareLearning, thinkingLevel,
+  localModelEnabled, fastAnswerModel, tierParams, extendedContext, shareLearning, thinkingLevel, setThinkingLevel, type ThinkingLevel,
   maxTokensPerRun, maxCostPerRunUsd, rememberSessions, defaultRoutingBias, defaultWebSearch,
 } from '../lib/prefs.js';
 import { refreshPendingMedia } from '../lib/pendingMedia.js';
@@ -1067,6 +1067,10 @@ export function useChatSession(
   // defaults (Settings → Chat); they stay sticky across sends within the session.
   const [routingMode, setRoutingMode] = useState<RoutingMode>(() => defaultRoutingBias());
   const [forceTier, setForceTier] = useState<ForceTier>('auto');
+  // The run's thinking level, as this tab's composer shows it. Saved for the
+  // next visit, but sent from here, so another tab's choice never changes it.
+  const [thinking, setThinkingState] = useState<ThinkingLevel>(() => thinkingLevel());
+  const setThinking = useCallback((level: ThinkingLevel) => { setThinkingLevel(level); setThinkingState(level); }, []);
   // The boardroom plan for the in-flight run, if Cascade produced one. Shown
   // read-only; cleared when the next run starts or the current one settles.
   const [approval, setApproval] = useState<PlanApproval | null>(null);
@@ -2835,7 +2839,7 @@ export function useChatSession(
             // and moot for a fast answer, which is a single direct call).
             tierParams: fast ? undefined : (() => { const tp = tierParams(); return Object.keys(tp).length ? tp : undefined; })(),
             // The run's thinking level ('auto' is the server's default, so it isn't sent).
-            thinking: thinkingLevel() !== 'auto' ? thinkingLevel() : undefined,
+            thinking: thinking !== 'auto' ? thinking : undefined,
             // Extended context: only sent when enabled and not a fast answer.
             extendedContext: fast ? undefined : (() => { const e = extendedContext(); return e.enabled ? e : undefined; })(),
             // Contribute to shared learning (Pro can opt out; server gates by plan).
@@ -3036,7 +3040,7 @@ export function useChatSession(
         emitRun();
       }
     },
-    [socket, busy, conversationId, providers, skillId, routingMode, forceTier, webSearch, browserMode, webSearchConfig, messages, reloadActivePath, cancelPendingSend],
+    [socket, busy, conversationId, providers, skillId, routingMode, forceTier, thinking, webSearch, browserMode, webSearchConfig, messages, reloadActivePath, cancelPendingSend],
   );
 
   const send = useCallback((input: SendInput) => runChat(input.prompt, input.attachments, true, input.fast), [runChat]);
@@ -3282,7 +3286,7 @@ export function useChatSession(
     busy, error, status, lastTokens, lastSaved, conversationId, loadMessages, runningConversationIds,
     setConversationId: selectConversation,
     contextTokens, contextWindow,
-    routingMode, setRoutingMode, forceTier, setForceTier, webSearch, setWebSearch, browserMode, setBrowserMode, approval,
+    routingMode, setRoutingMode, forceTier, setForceTier, thinking, setThinking, webSearch, setWebSearch, browserMode, setBrowserMode, approval,
     escalation, escalations, escalationQueued: escalations.length, resolveEscalation, clearEscalation,
     skipAllEscalations,
     contextApproval, contextApprovals, resolveContextApproval, compactionNotice, providerNotice, knowledgeNotice, browserRefusedNotice, activity,

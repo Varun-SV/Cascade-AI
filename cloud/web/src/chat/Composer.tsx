@@ -8,7 +8,7 @@ import {
 import Menu, { type MenuItem } from '../components/Menu.js';
 import { fetchMcpServers, setMcpServerEnabled, uploadImage, uploadDocument, uploadUrl, type McpServer } from '../lib/api.js';
 import type { Skill } from '../lib/types.js';
-import { THINKING_LEVELS, setThinkingLevel, thinkingLevel, type ThinkingLevel } from '../lib/prefs.js';
+import { THINKING_LEVELS, type ThinkingLevel } from '../lib/prefs.js';
 import type { ChatAttachment, ForceTier, RoutingMode, SendInput } from './useChatSession.js';
 
 const ALLOWED = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
@@ -93,6 +93,9 @@ interface Props {
   draftRequest?: { text: string; seq: number } | null;
   /** Every provider is an Azure deployment, which takes no thinking setting. */
   thinkingUnavailable?: boolean;
+  /** The run's thinking level, and how to change it (the chat session owns it). */
+  thinking?: ThinkingLevel;
+  onThinkingChange?: (level: ThinkingLevel) => void;
 }
 
 /** The thinking levels, as the menu offers them. */
@@ -109,7 +112,7 @@ type MenuKey = 'plus' | 'tools' | 'mode';
 export default function Composer({
   skills, skillId, onSkillChange, hasProviders, busy, onSend, onStop,
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange,
-  browserMode, onBrowserModeChange, browserAvailable, browserOwnOnly = false, browserAllowance, thinkingUnavailable = false,
+  browserMode, onBrowserModeChange, browserAvailable, browserOwnOnly = false, browserAllowance, thinkingUnavailable = false, thinking = 'auto', onThinkingChange,
   onManageSkills, onManageConnectors, draftRequest,
 }: Props) {
   const chip = browserChip(browserAllowance ?? null);
@@ -120,9 +123,7 @@ export default function Composer({
   const [uploadError, setUploadError] = useState<string | null>(null);
   // Fast answer applies to the next message only, like the prototype's toggle.
   const [fastNext, setFastNext] = useState(false);
-  // The run's thinking level: kept between visits, sent with every message.
-  const [thinking, setThinkingState] = useState<ThinkingLevel>(() => thinkingLevel());
-  const chooseThinking = (level: ThinkingLevel) => { setThinkingLevel(level); setThinkingState(level); };
+  const chooseThinking = (level: ThinkingLevel) => onThinkingChange?.(level);
   const [menu, setMenu] = useState<{ key: MenuKey; anchor: HTMLElement } | null>(null);
   const [servers, setServers] = useState<McpServer[] | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);

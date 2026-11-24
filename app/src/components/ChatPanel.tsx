@@ -201,13 +201,16 @@ export function ChatPanel({ socket, compact }: Props) {
   // The run's thinking level: kept between launches, sent with every message.
   const [thinking, setThinking] = useState<ThinkingLevel>(() => loadThinkingLevel());
   const [noThinking, setNoThinking] = useState(false);
+  // Settings is an overlay over this panel: read the providers again each time it closes.
+  const showSettings = useAppSelector((s) => s.app.showSettings);
   useEffect(() => {
     // With only Azure deployments set up, the setting would do nothing: they reject it.
+    if (showSettings) return;
     let live = true;
     const api = (window as unknown as { cascade?: { getSettings?: () => Promise<{ providersWithKey?: string[] }> } }).cascade;
     void api?.getSettings?.().then((s) => { if (live) setNoThinking(thinkingUnavailable(s.providersWithKey)); }).catch(() => {});
     return () => { live = false; };
-  }, []);
+  }, [showSettings]);
   const [input, setInput] = useState('');
   const [focused, setFocused] = useState(false);
   // Files for the next message: uploaded to the local backend as they're added.
