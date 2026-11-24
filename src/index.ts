@@ -101,6 +101,8 @@ export type { WorkspaceScope, WorkspaceTool } from './workspace/protocol.js';
 export { connectWorkspaceDevice, serveWorkspaceDevice } from './workspace/device.js';
 export type { WorkspaceConsent, WorkspaceDeviceClient, WorkspaceDeviceOptions, WorkspaceRunInfo, PairedWorkspaceKey } from './workspace/device.js';
 export { createWorkspaceExecutor } from './workspace/executor.js';
+export { Checkpoints } from './core/checkpoints.js';
+export { PrivacyPaths } from './core/privacy/paths.js';
 export type { WorkspaceExecutor, WorkspaceExecutorOptions, WorkspaceQuestion, WorkspaceCheckpoints, WorkspaceRegistry } from './workspace/executor.js';
 export { openRemoteWorkspace, WorkspaceUnavailable } from './workspace/remote.js';
 export type { RemoteWorkspace, WorkspaceSocket } from './workspace/remote.js';

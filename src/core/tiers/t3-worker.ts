@@ -2,6 +2,7 @@
 //  Cascade AI — T3 Worker
 // ─────────────────────────────────────────────
 
+import { CUT_NOTE } from '../../workspace/protocol.js';
 import { formatChangedFiles, formatRunFacts } from '../knowledge/run-memory.js';
 import { resolveInWorkspace } from '../../tools/utils/workspace-path.js';
 import { assessRisk } from '../permissions/risk.js';
@@ -1959,11 +1960,11 @@ ${assignment.expectedOutput}`;
     if (!this.toolRegistry.getTool?.('file_read')?.remote) return { ok: true, issues: [] };
     const issues: string[] = [];
     for (const artifactPath of this.extractArtifactPaths(assignment)) {
-      const text = await this.readRemote(artifactPath);
+      const got = await this.readRemote(artifactPath);
       // Refused on the machine (protected, or local-only): not this check's to judge.
-      if (text === null) continue;
-      if (text === MISSING) issues.push(`Expected artifact not found in the workspace: ${artifactPath}`);
-      else if (!text.trim()) issues.push(`Artifact is empty: ${artifactPath}`);
+      if (got === null) continue;
+      if (got === MISSING) issues.push(`Expected artifact not found in the workspace: ${artifactPath}`);
+      else if (!got.cut && !got.text.trim()) issues.push(`Artifact is empty: ${artifactPath}`);
     }
     return { ok: issues.length === 0, issues };
   }
@@ -1977,16 +1978,19 @@ ${assignment.expectedOutput}`;
    * A file in the remote workspace, read through its own file_read, which applies
    * that machine's rules (protected and local-only files are refused there).
    * MISSING when it isn't there; null when it can't be read for another reason.
+   * `cut` when the machine sent only the start of it (a result has a size cap).
    */
-  private async readRemote(target: string): Promise<string | typeof MISSING | null> {
+  private async readRemote(target: string): Promise<{ text: string; cut: boolean } | typeof MISSING | null> {
     try {
       const out = await this.toolRegistry.execute('file_read', { path: target }, {
         // No tier id: a check is no worker, so the machine keeps no reads for it and
         // reports no changes to it (they're the worker's to hear about).
         tierId: '', sessionId: this.taskId, requireApproval: false, ...(this.signal ? { signal: this.signal } : {}),
       });
+      const cut = CUT_NOTE.test(out);
       // file_read numbers every line (`1\t…`): an empty file still comes back as "1\t".
-      return out.split('\n').map((line) => line.replace(/^\d+\t/, '')).join('\n');
+      const text = out.replace(CUT_NOTE, '').split('\n').map((line) => line.replace(/^\d+\t/, '')).join('\n');
+      return { text, cut };
     } catch (e) {
       return /ENOENT|no such file/i.test(e instanceof Error ? e.message : String(e)) ? MISSING : null;
     }
@@ -2219,12 +2223,15 @@ ${current}`,
         // Refused on the machine: deferred to output review, never "does not exist".
         allowed: async (target) => (await readOnce(target)) !== null,
         stat: async (target) => {
-          const text = await readOnce(target);
-          return text === null || text === MISSING ? null : { size: Buffer.byteLength(text, 'utf-8') };
+          const got = await readOnce(target);
+          // A cut file is at least the cap long, so never empty.
+          return got === null || got === MISSING ? null : { size: Math.max(got.cut ? 1 : 0, Buffer.byteLength(got.text, 'utf-8')) };
         },
         read: async (target) => {
-          const text = await readOnce(target);
-          return text === null || text === MISSING || text.includes('\uFFFD') ? null : text;
+          const got = await readOnce(target);
+          if (got === null || got === MISSING || got.text.includes('\uFFFD')) return null;
+          // Only the start of it came: what it contains is not this rung's to judge.
+          return got.cut ? null : got.text;
         },
       }, { workerCanWriteFiles });
     }

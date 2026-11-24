@@ -25,6 +25,8 @@ import { SettingsView } from './views/SettingsView.js';
 import { ApprovalModal } from './components/ApprovalModal.js';
 import { RelayConsentModal } from './components/RelayConsentModal.js';
 import { RelayRunBanner } from './components/RelayRunBanner.js';
+import { WorkspaceConsentModal } from './components/WorkspaceConsentModal.js';
+import { WorkspaceServingBanner } from './components/WorkspaceServingBanner.js';
 import { PlanApprovalModal } from './components/PlanApprovalModal.js';
 import { EscalationModal } from './components/EscalationModal.js';
 import { WhyPanel } from './components/WhyPanel.js';
@@ -93,6 +95,17 @@ export interface RelayStatus {
   error: string | null;
 }
 
+/** A folder on this computer as a cloud run's workspace: see app/electron/desktop-workspace.ts. */
+export interface WorkspaceStatus {
+  paired: boolean; enabled: boolean; connected: boolean; name: string | null; server: string | null;
+  serving: { runId: string; label: string; allowAll: boolean } | null;
+  lastRun: { label: string; changed: number | null; canUndo: boolean; undone: boolean; note: string | null } | null;
+  defaults: { folder: string | null; tools: string[]; labelMode: 'device' | 'folder'; preset: string | null };
+  error: string | null;
+}
+export interface WorkspaceAsk { id: number; runId: string; expiresAt: number; chat: string | null; device: string; defaults: { folder: string | null; tools: string[]; labelMode: 'device' | 'folder' } }
+export interface WorkspaceCallAsk { id: number; tool: string; summary: string; risk: string; reason: string; label: string | null; expiresAt: number }
+
 declare global {
   interface Window {
     cascade?: {
@@ -156,6 +169,24 @@ declare global {
         onAsk(cb: (a: { id: number; runId: string; expiresAt: number; sites?: string[] }) => void): void;
         onAskClosed(cb: (a: { id: number }) => void): void;
         onStatus(cb: (s: RelayStatus) => void): void;
+      };
+      workspace?: {
+        status(): Promise<WorkspaceStatus>;
+        enable(): Promise<WorkspaceStatus | { error: string }>;
+        disable(): Promise<WorkspaceStatus | { error: string }>;
+        clearDefaults(): Promise<WorkspaceStatus | { error: string }>;
+        pickFolder(): Promise<{ canceled: true } | { ok: true; folder: string; name: string } | { error: string }>;
+        answer(id: number, a: { folder: string; tools: string[]; labelMode: 'device' | 'folder' } | null): Promise<{ ok: true } | { error: string }>;
+        answerCall(id: number, answer: 'allow' | 'deny' | 'all'): Promise<{ ok: true } | { error: string }>;
+        stop(): Promise<{ ok: true } | { error: string }>;
+        undo(): Promise<{ ok: true; restored: number; removed: number; skipped: number } | { error: string }>;
+        dismissLast(): Promise<{ ok: true }>;
+        pending(): Promise<{ asks: WorkspaceAsk[]; calls: WorkspaceCallAsk[] }>;
+        onAsk(cb: (a: WorkspaceAsk) => void): void;
+        onAskClosed(cb: (a: { id: number }) => void): void;
+        onCallAsk(cb: (a: WorkspaceCallAsk) => void): void;
+        onCallAskClosed(cb: (a: { id: number }) => void): void;
+        onStatus(cb: (s: WorkspaceStatus) => void): void;
       };
       cloud?: {
         status(): Promise<{ signedIn: boolean; user: CloudUser | null; serverUrl: string; storage: 'keychain' | 'encrypted-file' }>;
@@ -558,6 +589,8 @@ export function App() {
       <ApprovalModal socket={socketRef.current} />
       <RelayConsentModal />
       <RelayRunBanner />
+      <WorkspaceConsentModal />
+      <WorkspaceServingBanner />
       <PlanApprovalModal socket={socketRef.current} />
       <EscalationModal socket={socketRef.current} />
       <ChangesModal />

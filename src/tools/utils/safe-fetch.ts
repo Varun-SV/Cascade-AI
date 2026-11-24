@@ -338,7 +338,9 @@ export async function safeFetch(rawUrl: string, init: RequestInit = {}): Promise
     // are nominally distinct and structurally identical. Assert that one value
     // and nothing else. Nothing in this repo installs a global dispatcher, so
     // scoping one here overrides no proxy or pool configured elsewhere.
-    const request: RequestInit = {
+    // `& { dispatcher?: unknown }`: a DOM-typed build (the desktop's Electron tests
+    // compile this file too) has no `dispatcher` on RequestInit; Node's types do.
+    const request: RequestInit & { dispatcher?: unknown } = {
       ...init,
       method,
       body,
@@ -349,7 +351,7 @@ export async function safeFetch(rawUrl: string, init: RequestInit = {}): Promise
       // genuine hazard for any dispatcher that read headers lazily.
       headers: new Headers(headers),
       redirect: 'manual',
-      dispatcher: ssrfAgent as unknown as RequestInit['dispatcher'],
+      dispatcher: ssrfAgent as never,
     };
     const resp = await fetch(currentUrl, request);
 

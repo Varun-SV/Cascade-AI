@@ -15,6 +15,7 @@ import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
 import { registerCloudAuthIpc, type CloudAuthHandle } from './cloudAuth';
 import { registerRelayIpc } from './relay-ipc';
+import { registerWorkspaceIpc } from './workspace-ipc';
 import { insideWorkspace, isRunnable } from './file-access';
 import { registerBrowserHandlers, readCurrentPage, actOnCurrentPage, setAgentControlEnabled, resumeAgentControl, agentRunEnded, agentActorEnded, setApprovalWaitCeiling, setLifecycleReleaseWired, approvalWaitCeilingFor } from './browser';
 
@@ -848,7 +849,10 @@ function registerIPC(): void {
 
   registerBrowserHandlers(() => mainWindow);
   // This app as one of the user's devices, for their cloud runs: off until turned on in Settings.
-  registerRelayIpc({ loadCore, cloudAuth: () => cloudAuth, mainWindow: () => mainWindow });
+  let workspace: ReturnType<typeof registerWorkspaceIpc> | null = null;
+  registerRelayIpc({ loadCore, cloudAuth: () => cloudAuth, mainWindow: () => mainWindow, onForgotten: () => workspace?.deviceChanged() });
+  // A folder on this computer as a cloud run's workspace: serves with the same pairing; off until turned on.
+  workspace = registerWorkspaceIpc({ loadCore, cloudAuth: () => cloudAuth, mainWindow: () => mainWindow, ensureWindow: () => { if (!mainWindow && app.isReady()) createWindow(); } });
 }
 
 // ─── Desktop meta store (persistent JSON in userData) ─────────────────────────

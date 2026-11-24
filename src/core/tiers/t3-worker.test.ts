@@ -2533,6 +2533,30 @@ describe('workers share what they find (run-memory.ts)', () => {
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  // Codex on cdd1481: a result has a size cap, so a long file may come back cut.
+  it('a remote file sent cut is not graded on what it contains', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-share-'));
+    try {
+      const big = Array.from({ length: 10 }, (_, i) => `${i + 1}\tfiller line`).join('\n');
+      const registry = makeToolRegistry({
+        getToolDefinitions: () => [
+          { name: 'file_write', description: 'Write a file', inputSchema: {} },
+          { name: 'file_read', description: 'Read a file', inputSchema: {} },
+        ],
+        getTool: () => ({ remote: true }),
+        getWorkspaceRoot: () => root,
+        execute: vi.fn(async (name: string) => (name === 'file_read'
+          ? `${big}\n\n[output cut: 900000 more characters were not sent from the workspace]`
+          : 'Wrote report.md')),
+      } as unknown as Partial<ToolRegistry>);
+      const router = scripted([makeResult('', [{ id: 'w', name: 'file_write', input: { path: 'report.md', content: 'x' } }], 'tool_use'), makeResult('Report written.')]);
+      const result = await new T3Worker(router, registry, 't2-cut')
+        .execute(makeAssignment({ subtaskId: 's-cut', acceptance: ['report.md contains "Findings"', 'report.md is not empty'] }), 'task-cut');
+      expect(result.issues ?? []).not.toContainEqual(expect.stringMatching(/does not contain|is empty/));
+      expect(result.status).not.toBe('ESCALATED');
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   // Codex on 3e1e80c: file_edit shows only the lines it replaced.
   it('its partial edit of a file someone else changed since it read it still brings the note', async () => {
     const { RunMemory } = await import('../knowledge/run-memory.js');
