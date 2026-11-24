@@ -31,6 +31,9 @@ import { MAX_CHANGED, MAX_CHANGED_PATH_CHARS, capResult, isWorkspaceTool } from 
 const MAX_TRACKED_FILES = 500;
 const MAX_TRACKED_WORKERS = 64;
 
+/** The calls that change the file they name: a worker's own change is no news to it. */
+const SELF_CHANGES = new Set(['file_write', 'file_edit', 'file_delete']);
+
 /** What the executor needs of a tool registry: Cascade's ToolRegistry, rooted at the folder. */
 export interface WorkspaceRegistry {
   getWorkspaceRoot(): string;
@@ -147,9 +150,9 @@ export function createWorkspaceExecutor(opts: WorkspaceExecutorOptions): Workspa
         mine.set(given, now);
         if (mine.size > MAX_TRACKED_FILES) mine.delete(mine.keys().next().value as string);
       }
-    } else if (given && mine?.has(given)) {
-      // Its own write or delete: it knows.
-      const now = tool === 'file_write' || tool === 'file_edit' ? stat(given) : null;
+    } else if (given && mine?.has(given) && SELF_CHANGES.has(tool)) {
+      // Its own write, edit or delete: it knows. (A listing or a search changes nothing.)
+      const now = tool === 'file_delete' ? null : stat(given);
       if (now) mine.set(given, now); else mine.delete(given);
     }
     if (!mine) return [];
@@ -157,11 +160,13 @@ export function createWorkspaceExecutor(opts: WorkspaceExecutorOptions): Workspa
     for (const [abs, was] of [...mine]) {
       const now = stat(abs);
       if (now && now.mtimeMs === was.mtimeMs && now.size === was.size) continue;
-      // Reported once: a file that is gone is forgotten, one that changed is held as it is now.
-      if (now) mine.set(abs, now); else mine.delete(abs);
       const rel = inFolder(abs);
-      if (rel === null || rel.length > MAX_CHANGED_PATH_CHARS || !mayRead(abs)) continue;
-      if (changed.length < MAX_CHANGED) changed.push(rel);
+      const reportable = rel !== null && rel.length <= MAX_CHANGED_PATH_CHARS && mayRead(abs);
+      // Over the cap: held as it was, so the next call reports it.
+      if (reportable && changed.length >= MAX_CHANGED) continue;
+      // Reported once (or never reportable): a file that is gone is forgotten, one that changed is held as it is now.
+      if (now) mine.set(abs, now); else mine.delete(abs);
+      if (reportable) changed.push(rel);
     }
     return changed;
   };
