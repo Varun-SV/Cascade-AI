@@ -6,7 +6,7 @@
 // broken chat to a number three scrolls down in a settings panel.
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { tierParams, setTierParams, MAX_TIER_MAX_TOKENS } from './prefs.js';
+import { tierParams, setTierParams, MAX_TIER_MAX_TOKENS, thinkingLevel, setThinkingLevel } from './prefs.js';
 
 const KEY = 'cascade-cloud-tier-params';
 
@@ -58,5 +58,23 @@ describe('tierParams', () => {
   it('returns an empty object on corrupt JSON', () => {
     localStorage.setItem(KEY, '{not json');
     expect(tierParams()).toEqual({});
+  });
+});
+
+describe('thinkingLevel', () => {
+  beforeEach(() => localStorage.clear());
+
+  it('is auto until chosen, and keeps a chosen level', () => {
+    expect(thinkingLevel()).toBe('auto');
+    setThinkingLevel('medium');
+    expect(thinkingLevel()).toBe('medium');
+  });
+
+  it('stores nothing for auto, and reads anything unknown as auto', () => {
+    setThinkingLevel('high');
+    setThinkingLevel('auto');
+    expect(localStorage.getItem('cascade-cloud-thinking-level')).toBeNull();
+    localStorage.setItem('cascade-cloud-thinking-level', 'max');
+    expect(thinkingLevel()).toBe('auto');
   });
 });

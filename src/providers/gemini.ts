@@ -8,6 +8,7 @@ import {
   HarmCategory,
   type Content,
   type FunctionDeclaration,
+  type GenerateContentConfig,
   type Part,
 } from '@google/genai';
 import type {
@@ -27,6 +28,7 @@ import { withResolvedPricing } from '../core/router/pricing.js';
 import { isChatModel } from './model-filter.js';
 import { toGeminiParameters } from './gemini-schema.js';
 import { clientApiRoot, fetchSameOrigin } from '../utils/net.js';
+import { geminiThinkingConfig } from './thinking.js';
 
 /**
  * The version segment the Gemini client owns.
@@ -255,6 +257,8 @@ export class GeminiProvider extends BaseProvider {
     // The public host keeps the SDK. There is no proxy in that path to redirect
     // anywhere, and the SDK is the better-tested route for the case almost
     // everyone is on.
+    // The run's thinking level, as this model takes it (src/providers/thinking.ts).
+    const thinkingConfig = geminiThinkingConfig(this.model.id, options.thinking);
     const stream = this.config.baseUrl
       ? await this.streamOverRest(contents, options)
       : await this.client.models.generateContentStream({
@@ -266,6 +270,7 @@ export class GeminiProvider extends BaseProvider {
           tools: options.tools?.length
             ? [{ functionDeclarations: toGeminiTools(options.tools) }]
             : undefined,
+          ...(thinkingConfig ? { thinkingConfig: thinkingConfig as GenerateContentConfig['thinkingConfig'] } : {}),
           abortSignal: options.signal,
         },
       });
@@ -529,6 +534,7 @@ export class GeminiProvider extends BaseProvider {
         ...(options.tools?.length
           ? { tools: [{ functionDeclarations: toGeminiTools(options.tools) }] }
           : {}),
+        ...((() => { const t = geminiThinkingConfig(this.model.id, options.thinking); return t ? { generationConfig: { thinkingConfig: t } } : {}; })()),
       }),
       signal: options.signal,
     });

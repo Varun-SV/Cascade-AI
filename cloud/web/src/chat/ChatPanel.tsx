@@ -6,6 +6,7 @@ import CascadeMark from '../components/CascadeMark.js';
 import { flyDrop } from './motion.js';
 import Message from './Message.js';
 import Composer from './Composer.js';
+import type { ThinkingLevel } from '../lib/prefs.js';
 import PlanNotice from './PlanNotice.js';
 import ActivityDrawer from './ActivityDrawer.js';
 import { ReviewCard } from './ReviewCard.js';
@@ -25,6 +26,10 @@ interface Props {
   error: string | null;
   status: string | null;
   hasProviders: boolean;
+  /** Every provider is an Azure deployment, which takes no thinking setting. */
+  thinkingUnavailable?: boolean;
+  thinking?: ThinkingLevel;
+  onThinkingChange?: (level: ThinkingLevel) => void;
   skills: Skill[];
   skillId: string;
   onSkillChange: (id: string) => void;
@@ -111,7 +116,7 @@ interface Props {
 }
 
 export default function ChatPanel({
-  messages, busy, error, status, hasProviders, skills, skillId, onSkillChange, onSend, onStop, onRegenerate,
+  messages, busy, error, status, hasProviders, thinkingUnavailable, thinking, onThinkingChange, skills, skillId, onSkillChange, onSend, onStop, onRegenerate,
   onEditMessage, onDeleteMessage, onSelectSibling,
   routingMode, onRoutingModeChange, forceTier, onForceTierChange, webSearch, onWebSearchChange,
   clarifications, onAnswerClarification,
@@ -360,6 +365,9 @@ export default function ChatPanel({
             skillId={skillId}
             onSkillChange={onSkillChange}
             hasProviders={hasProviders}
+            thinkingUnavailable={thinkingUnavailable}
+            thinking={thinking}
+            onThinkingChange={onThinkingChange}
             busy={busy}
             onSend={onSend}
             onStop={onStop}

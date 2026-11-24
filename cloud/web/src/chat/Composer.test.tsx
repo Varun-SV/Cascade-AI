@@ -175,3 +175,33 @@ describe('attachments', () => {
     expect(img.getAttribute('src')).toBe('/api/uploads/img%201');
   });
 });
+
+describe('the thinking level', () => {
+  it('is chosen in the mode menu and shown as a chip that turns it back to Auto', () => {
+    const onThinkingChange = vi.fn();
+    const { rerender, ...props } = renderComposer({ onThinkingChange });
+    fireEvent.click(screen.getByRole('button', { name: /^Auto/ }));
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /^High/ }));
+    expect(onThinkingChange).toHaveBeenLastCalledWith('high');
+    rerender(<Composer {...props} onThinkingChange={onThinkingChange} thinking="high" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Remove Thinking: High' }));
+    expect(onThinkingChange).toHaveBeenLastCalledWith('auto');
+    rerender(<Composer {...props} onThinkingChange={onThinkingChange} thinking="auto" />);
+    expect(screen.queryByRole('button', { name: /Remove Thinking/ })).toBeNull();
+  });
+
+  it('says it is not sent to Azure deployments', () => {
+    renderComposer();
+    fireEvent.click(screen.getByRole('button', { name: /^Auto/ }));
+    expect(screen.getByText('Not sent to Azure deployments.')).toBeInTheDocument();
+  });
+
+  it('is unavailable when every provider is an Azure deployment', () => {
+    renderComposer({ thinkingUnavailable: true, thinking: 'high' });
+    expect(screen.queryByRole('button', { name: /Remove Thinking/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /^Auto/ }));
+    expect(screen.getByText("Not available: Azure deployments don't take a thinking setting.")).toBeInTheDocument();
+    const high = screen.getByRole('menuitemradio', { name: /^High/ }) as HTMLButtonElement;
+    expect(high.disabled).toBe(true);
+  });
+});

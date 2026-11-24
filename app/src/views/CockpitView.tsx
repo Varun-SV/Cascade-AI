@@ -5,6 +5,7 @@ import { AgentGraph } from '../components/AgentGraph.js';
 import { NodeDetailPanel } from '../components/NodeDetailPanel.js';
 import { HelpButton } from '../help/HelpButton.js';
 import { useAppDispatch, useAppSelector, appendMessage, setForceTier, setSessionId, runStarted, dismissCompletedNodes } from '../store/index.js';
+import { loadThinkingLevel, thinkingField } from '../lib/thinking.js';
 
 const TIERS: { id: string; label: string; color: string }[] = [
   { id: 'T1', label: 'Planner', color: 'var(--t1)' },
@@ -53,7 +54,8 @@ export function CockpitView({ socket }: { socket: Socket | null }) {
     // halted (session:halt needs it) and it never persists into the session list.
     let sid = sessionId;
     if (!sid) { sid = crypto.randomUUID(); dispatch(setSessionId(sid)); }
-    socket.emit('cascade:run', { prompt: text, model: 'auto', sessionId: sid, ...(forceTier !== 'auto' ? { forceTier } : {}) });
+    // The thinking level chosen in the chat composer applies here too (Azure ignores it).
+    socket.emit('cascade:run', { prompt: text, model: 'auto', sessionId: sid, ...(forceTier !== 'auto' ? { forceTier } : {}), ...thinkingField(loadThinkingLevel(), false) });
     dispatch(runStarted({ sessionId: sid }));
     setPrompt('');
   };

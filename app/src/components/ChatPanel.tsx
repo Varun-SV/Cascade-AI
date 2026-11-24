@@ -10,6 +10,7 @@ import { CHAT_REHYPE_PLUGINS, CHAT_REMARK_PLUGINS, createAnswerPreparer, usePace
 import { SessionRating } from './SessionRating.js';
 import { useAppDispatch, useAppSelector, appendMessage, finalizeLastMessage, setSessionId, loadTranscript, runStarted, clearComposerDraft, type ChatAttachmentRef } from '../store/index.js';
 import { composerStep } from '../lib/drafts.js';
+import { THINKING_LABELS, THINKING_LEVELS, loadThinkingLevel, saveThinkingLevel, thinkingField, thinkingUnavailable, type ThinkingLevel } from '../lib/thinking.js';
 import { IMAGE_TYPES, MAX_FILES, attachmentName, readImageFile, uploadAttachment, useAttachmentImage } from '../lib/attachments.js';
 import { fetchSessionTranscript } from '../utils/sessionLoad.js';
 
@@ -197,6 +198,19 @@ export function ChatPanel({ socket, compact }: Props) {
   const messages = useAppSelector((s) => s.app.messages);
   const sessionId = useAppSelector((s) => s.app.sessionId);
   const { activeModel, sessions, activeSessionId, backendPort, authToken, forceTier } = useAppSelector((s) => s.app);
+  // The run's thinking level: kept between launches, sent with every message.
+  const [thinking, setThinking] = useState<ThinkingLevel>(() => loadThinkingLevel());
+  const [noThinking, setNoThinking] = useState(false);
+  // Settings is an overlay over this panel: read the providers again each time it closes.
+  const showSettings = useAppSelector((s) => s.app.showSettings);
+  useEffect(() => {
+    // With only Azure deployments set up, the setting would do nothing: they reject it.
+    if (showSettings) return;
+    let live = true;
+    const api = (window as unknown as { cascade?: { getSettings?: () => Promise<{ providersWithKey?: string[] }> } }).cascade;
+    void api?.getSettings?.().then((s) => { if (live) setNoThinking(thinkingUnavailable(s.providersWithKey)); }).catch(() => {});
+    return () => { live = false; };
+  }, [showSettings]);
   const [input, setInput] = useState('');
   const [focused, setFocused] = useState(false);
   // Files for the next message: uploaded to the local backend as they're added.
@@ -325,6 +339,7 @@ export function ChatPanel({ socket, compact }: Props) {
     socket.emit('cascade:run', {
       prompt: input.trim(), model: activeModel.chat, sessionId: sid,
       ...(forceTier !== 'auto' ? { forceTier } : {}),
+      ...thinkingField(thinking, noThinking),
       ...(files.length ? { attachmentIds: files.map((f) => f.id) } : {}),
     });
     setInput('');
@@ -428,6 +443,16 @@ export function ChatPanel({ socket, compact }: Props) {
         >
           <Paperclip size={compact ? 14 : 16} />
         </button>
+        <select
+          aria-label="Thinking"
+          value={noThinking ? 'auto' : thinking}
+          disabled={noThinking}
+          title={noThinking ? "Not available: Azure deployments don't take a thinking setting." : 'How much the models think before answering. Not sent to Azure deployments.'}
+          onChange={(e) => { const level = e.target.value as ThinkingLevel; setThinking(level); saveThinkingLevel(level); }}
+          style={{ height: compact ? 34 : 42, flexShrink: 0, background: 'var(--bg-raised)', color: 'var(--text-muted)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', padding: '0 6px', fontSize: compact ? 11.5 : 12.5, fontFamily: 'inherit', cursor: noThinking ? 'not-allowed' : 'pointer' }}
+        >
+          {THINKING_LEVELS.map((level) => <option key={level} value={level}>{THINKING_LABELS[level]}</option>)}
+        </select>
         <textarea
           value={input}
           onPaste={(e) => {

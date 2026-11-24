@@ -18,6 +18,7 @@ import { MODELS } from '../constants.js';
 import { BaseProvider } from './base.js';
 import { withResolvedPricing } from '../core/router/pricing.js';
 import { isChatModel } from './model-filter.js';
+import { isOpenAIReasoningModel, openaiReasoningEffort } from './thinking.js';
 
 /**
  * Reasoning-family models (o1/o3/o4, gpt-5*) reject the classic `max_tokens`
@@ -27,8 +28,7 @@ import { isChatModel } from './model-filter.js';
  * first guess; the request path also LEARNS from the API's own error and adapts.
  */
 export function isReasoningModel(id: string): boolean {
-  const m = (id || '').toLowerCase();
-  return /(^o[1345]\b)|(^o[1345]-)|gpt-?[56]/.test(m);
+  return isOpenAIReasoningModel(id);
 }
 
 /**
@@ -174,6 +174,7 @@ export class OpenAIProvider extends BaseProvider {
     let finishReason: GenerateResult['finishReason'] = 'stop';
 
     const budget = options.maxTokens ?? this.model.maxOutputTokens;
+    const effort = this.reasoningEffort(modelId, options, !!tools?.length);
     // Build the request shape based on what we currently believe this model
     // accepts. Reasoning models take `max_completion_tokens` and reject a custom
     // temperature (omit it); everyone else takes classic `max_tokens`.
@@ -183,7 +184,7 @@ export class OpenAIProvider extends BaseProvider {
       ...(useCompletionTokens ? { max_completion_tokens: budget } : { max_tokens: budget }),
       ...(useCompletionTokens ? {} : { temperature: options.temperature ?? 0.7 }),
       tools: tools?.length ? tools : undefined,
-      ...(tools?.length && chatToolsNeedNoReasoning(modelId) ? { reasoning_effort: 'none' } : {}),
+      ...(effort ? { reasoning_effort: effort } : {}),
       stream: true,
       stream_options: { include_usage: true },
     });
@@ -280,6 +281,17 @@ export class OpenAIProvider extends BaseProvider {
   }
 
   /**
+   * The reasoning effort to send, or undefined for none: the run's thinking
+   * level (src/providers/thinking.ts), except that GPT-6 Luna and Sol call tools
+   * through Chat Completions only at `none`. Azure deployments override this to
+   * send none at all.
+   */
+  protected reasoningEffort(modelId: string, options: GenerateOptions, chatTools: boolean): string | undefined {
+    if (chatTools && chatToolsNeedNoReasoning(modelId)) return 'none';
+    return openaiReasoningEffort(modelId, options.thinking);
+  }
+
+  /**
    * The same contract as the Chat Completions path — streamed text, tool calls
    * with parsed input, usage, finish reason — over the Responses API, for the
    * models that only call tools there.
@@ -292,12 +304,14 @@ export class OpenAIProvider extends BaseProvider {
     options: GenerateOptions,
     onChunk: (chunk: StreamChunk) => void,
   ): Promise<GenerateResult> {
+    const responsesEffort = this.reasoningEffort(this.model.baseModelId ?? this.model.id, options, false);
     const params = {
       model: this.model.id,
       input: this.convertToResponsesInput(options.messages),
       ...(options.systemPrompt ? { instructions: options.systemPrompt } : {}),
       tools: toResponsesTools(options.tools ?? []),
       max_output_tokens: options.maxTokens ?? this.model.maxOutputTokens,
+      ...(responsesEffort ? { reasoning: { effort: responsesEffort as OpenAI.ReasoningEffort } } : {}),
       store: false,
       // Without storage, the encrypted reasoning is the only way the next
       // turn can carry this turn's reasoning forward.

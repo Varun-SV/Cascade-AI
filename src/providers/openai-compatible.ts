@@ -3,13 +3,22 @@
 // ─────────────────────────────────────────────
 
 import OpenAI from 'openai';
-import type { ModelInfo, ProviderConfig } from '../types.js';
-import { OpenAIProvider } from './openai.js';
+import type { GenerateOptions, ModelInfo, ProviderConfig } from '../types.js';
+import { OpenAIProvider, chatToolsNeedNoReasoning } from './openai.js';
 import { isChatModel } from './model-filter.js';
 import { preferIpv4Host, nodeHttpFetch, type NodeHttpFetchOptions } from '../utils/net.js';
 import { isLocalEndpoint, withResolvedPricing } from '../core/router/pricing.js';
 
 export class OpenAICompatibleProvider extends OpenAIProvider {
+  /**
+   * A gateway's models take reasoning settings in ways of their own, so a run's
+   * thinking level isn't sent; only the `none` GPT-6 Luna and Sol need for
+   * tools, as before.
+   */
+  protected override reasoningEffort(modelId: string, _options: GenerateOptions, chatTools: boolean): string | undefined {
+    return chatTools && chatToolsNeedNoReasoning(modelId) ? 'none' : undefined;
+  }
+
   constructor(config: ProviderConfig, model: ModelInfo) {
     // super() (OpenAIProvider) constructs its own `OpenAI` client from
     // `config.apiKey` directly. Most local servers (llama.cpp / LM Studio /

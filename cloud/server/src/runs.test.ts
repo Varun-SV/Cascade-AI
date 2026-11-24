@@ -231,6 +231,16 @@ describe('buildCloudConfig', () => {
     });
   });
 
+  it('passes the run\'s thinking level to the run, and leaves "auto" to the models', () => {
+    expect(buildCloudConfig([], 0.5, { thinking: 'high' }).thinking).toBe('high');
+    expect(buildCloudConfig([], 0.5, { thinking: 'off' }).thinking).toBe('off');
+    expect(buildCloudConfig([], 0.5, { thinking: 'auto' }).thinking).toBeUndefined();
+    expect(buildCloudConfig([], 0.5).thinking).toBeUndefined();
+    const base = { prompt: 'hi', providers: [{ type: 'openai', apiKey: 'k' }] };
+    expect(parseChatRunPayload({ ...base, thinking: 'medium' }).thinking).toBe('medium');
+    expect(() => parseChatRunPayload({ ...base, thinking: 'max' })).toThrow();
+  });
+
   it('wires the shared learning stats path and opt-out into routing', () => {
     const cfg = buildCloudConfig([], 0.5, { perfStatsPath: '/data/model-perf.json' });
     expect(cfg.routing?.perfStatsPath).toBe('/data/model-perf.json');

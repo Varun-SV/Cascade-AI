@@ -170,6 +170,15 @@ export class AzureOpenAIProvider extends OpenAIProvider {
     });
   }
 
+  /**
+   * Never a reasoning effort: Azure deployments reject the parameter, so a run's
+   * thinking level, and the `none` OpenAI's own GPT-6 Luna and Sol need for
+   * tools, are not sent to them.
+   */
+  protected override reasoningEffort(): string | undefined {
+    return undefined;
+  }
+
   async listModels(): Promise<ModelInfo[]> {
     const fromDeployment = azureModelForDeployment(this.config);
     return [fromDeployment ?? this.model];
