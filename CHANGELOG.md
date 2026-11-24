@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **The desktop Code view opens images, PDFs, audio and video.** Pictures (PNG, JPG, GIF, WebP, SVG, BMP, ICO, AVIF) are shown to fit the pane, with their pixel size and file size underneath. PDFs open in the built-in PDF viewer. Audio and video files get a normal player. Any other binary file, such as a Word document, spreadsheet or zip, now shows "Open in default app" and "Show in folder" buttons instead of garbled text. Previews are read-only, so they never show as unsaved and Ctrl+S ignores them. Very large files (over 50 MB, or 100 MB for video) are not previewed.
 
+## 0.99.6 - 2026-11-24
+
+### Fixed
+- **The desktop app's Comms panel shows workers' messages.** Messages workers
+  send each other (and the dotted lines between them in the graph) never
+  reached the window, because the local server sent them to an unnamed
+  session. They now go to the run's own session.
+
 ## 0.99.5 - 2026-11-24
 
 ### Added

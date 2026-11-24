@@ -1,5 +1,6 @@
 import type {
   ApprovalResponse,
+  PeerMessageEvent,
   PermissionDecisionPayload,
   RuntimeRefreshPayload,
   RuntimeScope,
@@ -31,4 +32,13 @@ export function normalizePermissionDecisionPayload(
     always: payload.always,
     decidedBy: 'USER',
   };
+}
+
+/**
+ * A worker's peer message, stamped with the session the server is running.
+ * The SDK only knows a session id when the caller passes one in, so the event
+ * can arrive with an empty id and be sent to a room nobody joined.
+ */
+export function peerEventForSession(sessionId: string, e: unknown): PeerMessageEvent {
+  return { ...(e as PeerMessageEvent), sessionId };
 }
