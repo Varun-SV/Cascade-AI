@@ -163,8 +163,9 @@ export interface GeminiThinkingConfig { thinkingLevel?: 'MINIMAL' | 'LOW' | 'MED
 
 /**
  * The `thinkingConfig` for a Gemini model at this level, or undefined to send
- * none. Gemini 3 takes a level (Pro only low or high; Flash also minimal and
- * medium); Gemini 2.5 a token budget (Pro can't go below 128; Flash can be off).
+ * none. Gemini 3 and later take a level (minimal only on Gemini 3 Flash, medium
+ * on all but the original Gemini 3 Pro); Gemini 2.5 a token budget (Pro can't go
+ * below 128; Flash can be off).
  */
 export function geminiThinkingConfig(modelId: string, level: ThinkingLevel | undefined): GeminiThinkingConfig | undefined {
   if (!level || level === 'auto') return undefined;
@@ -173,8 +174,12 @@ export function geminiThinkingConfig(modelId: string, level: ThinkingLevel | und
   const version = Number(m[1]);
   const pro = /-pro/i.test(modelId);
   if (version >= 3) {
-    if (pro) return { thinkingLevel: level === 'off' || level === 'low' ? 'LOW' : 'HIGH' };
-    return { thinkingLevel: ({ off: 'MINIMAL', low: 'LOW', medium: 'MEDIUM', high: 'HIGH' } as const)[level] };
+    // Low and high are taken by every Gemini 3 and later. Minimal only by Gemini
+    // 3 Flash (later Flash models and Gemini 4 dropped it), so 'off' is low
+    // elsewhere. Medium by all but the original Gemini 3 Pro, where it is high.
+    if (level === 'off') return { thinkingLevel: version === 3 && !pro ? 'MINIMAL' : 'LOW' };
+    if (level === 'medium') return { thinkingLevel: pro && version < 3.1 ? 'HIGH' : 'MEDIUM' };
+    return { thinkingLevel: level === 'low' ? 'LOW' : 'HIGH' };
   }
   if (version >= 2.5) {
     if (level === 'off') return { thinkingBudget: pro ? 128 : 0 };

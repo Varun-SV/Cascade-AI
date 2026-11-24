@@ -118,10 +118,16 @@ describe('OpenAI reasoning effort', () => {
 
 describe('Gemini thinking config', () => {
   it('takes a level on Gemini 3 and a budget on 2.5', () => {
-    expect(geminiThinkingConfig('gemini-3.5-flash', 'off')).toEqual({ thinkingLevel: 'MINIMAL' });
+    expect(geminiThinkingConfig('gemini-3-flash-preview', 'off')).toEqual({ thinkingLevel: 'MINIMAL' });
+    // Minimal isn't taken by later Flash models or Gemini 4: 'off' is low there.
+    for (const id of ['gemini-3.5-flash', 'gemini-3.8-flash', 'gemini-4-argon', 'gemini-3.1-pro-preview', 'gemini-3-pro-preview']) {
+      expect(geminiThinkingConfig(id, 'off'), id).toEqual({ thinkingLevel: 'LOW' });
+    }
     expect(geminiThinkingConfig('gemini-3.5-flash', 'medium')).toEqual({ thinkingLevel: 'MEDIUM' });
-    expect(geminiThinkingConfig('gemini-3.1-pro-preview', 'off')).toEqual({ thinkingLevel: 'LOW' });
-    expect(geminiThinkingConfig('gemini-3.1-pro-preview', 'medium')).toEqual({ thinkingLevel: 'HIGH' });
+    expect(geminiThinkingConfig('gemini-3.1-pro-preview', 'medium')).toEqual({ thinkingLevel: 'MEDIUM' });
+    expect(geminiThinkingConfig('gemini-4-argon', 'medium')).toEqual({ thinkingLevel: 'MEDIUM' });
+    expect(geminiThinkingConfig('gemini-3-pro-preview', 'medium')).toEqual({ thinkingLevel: 'HIGH' }); // low or high only
+    expect(geminiThinkingConfig('gemini-4-argon', 'high')).toEqual({ thinkingLevel: 'HIGH' });
     expect(geminiThinkingConfig('gemini-2.5-flash', 'off')).toEqual({ thinkingBudget: 0 });
     expect(geminiThinkingConfig('gemini-2.5-pro', 'off')).toEqual({ thinkingBudget: 128 });
     expect(geminiThinkingConfig('gemini-2.5-pro', 'high')).toEqual({ thinkingBudget: 32768 });
@@ -182,7 +188,7 @@ describe('what each provider sends', () => {
 
   it('Gemini: thinkingConfig in the request config', async () => {
     const generateContentStream = vi.fn(async () => empty());
-    const prov = new GeminiProvider({ type: 'gemini', apiKey: 'k' }, model('gemini-3.5-flash', 'gemini'));
+    const prov = new GeminiProvider({ type: 'gemini', apiKey: 'k' }, model('gemini-3-flash-preview', 'gemini'));
     (prov as unknown as { client: unknown }).client = { models: { generateContentStream } };
     await prov.generateStream({ messages: [{ role: 'user', content: 'hi' }], thinking: 'off' }, () => {});
     const req = (generateContentStream.mock.calls[0] as unknown[])[0] as { config: Record<string, unknown> };
