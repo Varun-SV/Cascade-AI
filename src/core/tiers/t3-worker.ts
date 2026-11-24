@@ -13,6 +13,7 @@ import type {
   ImageAttachment,
   ModelInfo,
   PermissionRequest,
+  ProviderType,
   ReadDestination,
   T2ToT3Assignment,
   T3Result,
@@ -34,6 +35,7 @@ import type { WorldStateDB } from '../knowledge/world-state.js';
 import {
   parseTextToolCalls,
   strayTextToolCalls,
+  isToolTemplateError,
   toToolCall,
   buildTextToolSystemPrompt,
   buildTextToolReminder,
@@ -1121,24 +1123,24 @@ export class T3Worker extends BaseTier {
       const changed = board?.changedFor(this.id, this.localOnlyMatch) ?? [];
       if (changed.length) await this.context.addMessage({ role: 'user', content: formatChangedFiles(changed) });
 
-      let textToolSuffix = '';
-      if (useTextTools) {
+      const textSuffix = (): string => {
+        if (!useTextTools) return '';
         const signature = tools.map((t) => t.name).join(',');
         if (!sentFullTextContract || signature !== textContractSignature) {
-          textToolSuffix = buildTextToolSystemPrompt(tools);
           sentFullTextContract = true;
           textContractSignature = signature;
-        } else {
-          textToolSuffix = buildTextToolReminder(tools);
+          return buildTextToolSystemPrompt(tools);
         }
-      }
+        return buildTextToolReminder(tools);
+      };
+      const textToolSuffix = textSuffix();
 
       // The screenshot rides on this request only, after the tool results it
       // belongs to. The router still drops it if the model it resolves to
       // cannot see it.
       const screenshot = this.pendingScreenshot;
       this.pendingScreenshot = undefined;
-      const options: GenerateOptions = {
+      let options: GenerateOptions = {
         messages: withScreenshot(foldOldPageViews(this.context.getMessages()), screenshot),
         systemPrompt: this.systemPromptOverride + systemPrompt
           + (this.hierarchyContext ? `\n\nHIERARCHY CONTEXT: ${this.hierarchyContext}` : '')
@@ -1157,14 +1159,29 @@ export class T3Worker extends BaseTier {
         ...(this.localOnlyMatch ? { forceLocal: true } : {}),
       };
 
-      const result = await this.generateTracked(
-        'T3',
-        options,
-        (chunk) => {
-          // A local-only subtask's words stay out of the event stream.
-          if (!this.localOnlyMatch) this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: this.isPresenter });
-        },
-      );
+      const onChunk = (chunk: { text: string }): void => {
+        // A local-only subtask's words stay out of the event stream.
+        if (!this.localOnlyMatch) this.emit('stream:token', { tierId: this.id, text: chunk.text, primary: this.isPresenter });
+      };
+      let result;
+      try {
+        result = await this.generateTracked('T3', options, onChunk);
+      } catch (err) {
+        // The server could not render this model's chat template with the tool
+        // list in it (gpt-oss on some local servers, for one), so it refused the
+        // request before the model saw it. The text tool format sends no `tools`
+        // field, which the template never has to render. Retry this step once.
+        if (useTextTools || tools.length === 0 || this.signal?.aborted || !isToolTemplateError(err)) throw err;
+        const failed = (err as { servedBy?: { provider: ProviderType; id: string } }).servedBy
+          ?? (effectiveModel ? { provider: effectiveModel.provider, id: effectiveModel.id } : undefined);
+        useTextTools = true;
+        sentFullTextContract = false;
+        if (failed) this.router.useTextTools?.(failed);
+        this.log(`${failed ? `${failed.provider}:${failed.id}` : 'The model'} could not render the tool list in its chat template; using the text tool format for it from here on.`);
+        options = { ...options, tools: undefined, systemPrompt: (options.systemPrompt ?? '') + textSuffix() };
+        this.throwIfCancelled();
+        result = await this.generateTracked('T3', options, onChunk);
+      }
       // The router can reject the actual dimensions or resolve to a model
       // that cannot see this image. Retain it until delivery is confirmed;
       // only a later browser step proving the page unchanged may restore it.

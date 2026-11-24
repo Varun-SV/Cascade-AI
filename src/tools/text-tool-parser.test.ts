@@ -3,7 +3,45 @@
 // ─────────────────────────────────────────────
 
 import { describe, expect, it } from 'vitest';
-import { parseTextToolCalls, buildTextToolSystemPrompt } from './text-tool-parser.js';
+import { parseTextToolCalls, buildTextToolSystemPrompt, isToolTemplateError } from './text-tool-parser.js';
+
+describe('isToolTemplateError', () => {
+  const gptOss = 'While executing If at line 13, column 13 in source: ...am_spec.type == "array" -%} {%- if param_spec[\'items\'] -%} ... ^ Error: Function is not a bool value';
+
+  it.each([
+    gptOss,
+    `500 ${gptOss}`,
+    `Ollama chat request failed: 500 Internal Server Error - ${gptOss}`,
+    'Error rendering prompt with jinja template: "Unknown filter"',
+    'Failed to apply chat template to messages',
+    'jinja error: unexpected token',
+    'chat template rendering failed',
+  ])('matches %s', (msg) => {
+    expect(isToolTemplateError(new Error(msg))).toBe(true);
+  });
+
+  it('looks in a response body and a cause', () => {
+    expect(isToolTemplateError({ message: '500 status code (no body)', error: { message: gptOss } })).toBe(true);
+    expect(isToolTemplateError(new Error('500', { cause: new Error(gptOss) }))).toBe(true);
+  });
+
+  it.each([
+    '500 Internal Server Error',
+    'model "gpt-oss:20b" not found',
+    'Request timed out.',
+    '429 Rate limit exceeded',
+    'CUDA out of memory',
+    'The operation was aborted',
+  ])('does not match %s', (msg) => {
+    expect(isToolTemplateError(new Error(msg))).toBe(false);
+  });
+
+  it('ignores aborts and non-errors', () => {
+    const abort = Object.assign(new Error(gptOss), { name: 'AbortError' });
+    expect(isToolTemplateError(abort)).toBe(false);
+    expect(isToolTemplateError(undefined)).toBe(false);
+  });
+});
 
 describe('parseTextToolCalls', () => {
   it('parses a proper <tool_call> block', () => {

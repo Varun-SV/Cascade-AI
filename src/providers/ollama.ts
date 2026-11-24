@@ -145,7 +145,9 @@ export class OllamaProvider extends BaseProvider {
       signal: options.signal,
     });
     if (!response.ok || !response.body) {
-      throw new Error(`Ollama chat request failed: ${response.status} ${response.statusText}`);
+      // The server's own reason (e.g. a chat-template rendering error) is in the body.
+      const detail = response.ok ? '' : (await response.text().catch(() => '')).trim().slice(0, 600);
+      throw new Error(`Ollama chat request failed: ${response.status} ${response.statusText}${detail ? ` - ${detail}` : ''}`);
     }
 
     let fullContent = '';

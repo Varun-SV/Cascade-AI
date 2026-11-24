@@ -541,6 +541,63 @@ describe('a model that lists native tools but writes its calls as text', () => {
   });
 });
 
+describe('a model whose chat template cannot render the tool list', () => {
+  const TEMPLATE_ERR = '500 While executing If at line 13, column 13 in source: ...am_spec.type == "array" -%} {%- if param_spec[\'items\'] -%} ... ^ Error: Function is not a bool value';
+
+  function harness(failure: unknown) {
+    const seen: Array<{ tools: unknown; system: string }> = [];
+    const useTextTools = vi.fn();
+    const router = {
+      generate: vi.fn(async (_tier: string, options: { messages: Array<{ content?: unknown }>; systemPrompt?: string; tools?: unknown }) => {
+        const latest = options.messages[options.messages.length - 1];
+        const content = typeof latest?.content === 'string' ? latest.content : '';
+        if (content.startsWith('Self-test this output')) {
+          return makeResult('{"completeness":"pass","correctness":"pass","compliance":"pass","notes":"ok"}');
+        }
+        seen.push({ tools: options.tools, system: String(options.systemPrompt ?? '') });
+        if (seen.length === 1) throw failure;
+        return makeResult('Final answer');
+      }),
+      getModelForTier: () => ({ id: 'gpt-oss:20b', provider: 'ollama', supportsToolUse: true }),
+      useTextTools,
+    } as unknown as CascadeRouter;
+    return { router, seen, useTextTools };
+  }
+
+  it('retries the step once in the text format and tells the router', async () => {
+    const { router, seen, useTextTools } = harness(new Error(TEMPLATE_ERR));
+    const worker = new T3Worker(router, makeToolRegistry(), 't2-parent');
+    const result = await worker.execute(makeAssignment(), 'task-template');
+
+    expect(result.status).toBe('COMPLETED');
+    expect(useTextTools).toHaveBeenCalledWith({ provider: 'ollama', id: 'gpt-oss:20b' });
+    expect(seen).toHaveLength(2);
+    expect(seen[0]!.tools).toBeDefined();
+    expect(seen[1]!.tools).toBeUndefined();
+    expect(seen[1]!.system).toContain('TOOL USE INSTRUCTIONS');
+  });
+
+  it('switches the model the router says failed, after a failover', async () => {
+    const failed = Object.assign(new Error(TEMPLATE_ERR), { servedBy: { provider: 'openai-compatible', id: 'local-fallback' } });
+    const { router, useTextTools } = harness(failed);
+    const worker = new T3Worker(router, makeToolRegistry(), 't2-parent');
+    await worker.execute(makeAssignment(), 'task-template-failover');
+    expect(useTextTools).toHaveBeenCalledWith({ provider: 'openai-compatible', id: 'local-fallback' });
+    expect(useTextTools).not.toHaveBeenCalledWith({ provider: 'ollama', id: 'gpt-oss:20b' });
+  });
+
+  it('rethrows any other error unchanged, with no retry', async () => {
+    const boom = new Error('500 Internal Server Error');
+    const { router, seen, useTextTools } = harness(boom);
+    const worker = new T3Worker(router, makeToolRegistry(), 't2-parent');
+    const result = await worker.execute(makeAssignment(), 'task-other-500');
+
+    expect(seen).toHaveLength(1);
+    expect(useTextTools).not.toHaveBeenCalled();
+    expect(result.status).not.toBe('COMPLETED');
+  });
+});
+
 describe('a worker\'s thinking', () => {
   it('is shown as tier:thinking and kept out of its output and its next turn', async () => {
     const histories: string[] = [];

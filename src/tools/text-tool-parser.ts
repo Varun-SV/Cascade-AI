@@ -398,3 +398,49 @@ Call tools with a single <tool_call>{"name": "<tool_name>", "input": { ... }}</t
 Available tools: ${tools.map(t => t.name).join(', ')}.
 When you have enough information, stop calling tools and write your final answer.`;
 }
+
+// ── Chat-template failures ──────────────────────────────────────────────────
+//
+//  A local server renders the model's own chat template to turn the tool list
+//  into a prompt. Some templates cannot (gpt-oss does `if param_spec['items']`,
+//  which a server's template engine reads as the dict's `.items()` method), and
+//  the server answers 500 before the model sees anything. The text tool format
+//  avoids the template's tool rendering altogether.
+
+const TEMPLATE_ERROR_PATTERNS: readonly RegExp[] = [
+  /while executing \w+ at line \d+/i,
+  /function is not a bool value/i,
+  /error rendering prompt with jinja template/i,
+  /\bjinja2?\b[^\n]{0,80}\b(error|exception|failed|syntax)/i,
+  /\b(error|exception|failed)\b[^\n]{0,80}\bjinja2?\b/i,
+  /chat[ _-]?template[^\n]{0,80}\b(error|fail|failed|render|rendering|exception|invalid)/i,
+  /\b(error|failed|failure|cannot|can't|unable)\b[^\n]{0,60}\b(render|rendering|apply|applying)\b[^\n]{0,40}\bchat[ _-]?template/i,
+];
+
+function errorTexts(err: unknown, depth = 0): string[] {
+  if (err == null || depth > 3) return [];
+  if (typeof err === 'string') return [err];
+  if (typeof err !== 'object') return [];
+  const e = err as Record<string, unknown>;
+  const out: string[] = [];
+  if (typeof e['message'] === 'string') out.push(e['message']);
+  for (const key of ['error', 'body', 'response', 'data']) {
+    const v = e[key];
+    if (typeof v === 'string') out.push(v);
+    else if (v && typeof v === 'object') {
+      const inner = v as Record<string, unknown>;
+      if (typeof inner['message'] === 'string') out.push(inner['message']);
+      if (typeof inner['error'] === 'string') out.push(inner['error']);
+      else if (inner['error'] && typeof inner['error'] === 'object') out.push(...errorTexts(inner['error'], depth + 1));
+      if (typeof inner['data'] === 'string') out.push(inner['data']);
+    }
+  }
+  if (e['cause']) out.push(...errorTexts(e['cause'], depth + 1));
+  return out;
+}
+
+/** True when a request failed because the server could not render the model's chat template. */
+export function isToolTemplateError(err: unknown): boolean {
+  if (err && typeof err === 'object' && (err as { name?: unknown }).name === 'AbortError') return false;
+  return errorTexts(err).some((text) => TEMPLATE_ERROR_PATTERNS.some((re) => re.test(text)));
+}

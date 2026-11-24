@@ -5,6 +5,11 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.99.8 - 2026-11-24
+
+### Fixed
+- **Local models whose chat template can't render tools no longer fail the run.** gpt-oss on some local servers failed with a 500 ("Function is not a bool value") as soon as it was given tools, because the model's chat template can't render array parameters there. Cascade now switches such a model to the text tool format and retries the step, and remembers that for Ollama and OpenAI-compatible servers.
+
 ## 0.99.7 - 2026-11-24
 
 ### Added
