@@ -24,7 +24,7 @@ import type { KeyObject } from 'node:crypto';
 import { randomBytes } from 'node:crypto';
 import type { WebSocket } from 'ws';
 import {
-  type ApprovalPayload, type GrantPayload, type Identity, type NonceStore, type Signed,
+  type ApprovalBase, type CapabilityFamily, type GrantPayload, type Identity, type NonceStore, type Signed,
   MAX_LIFETIME_MS, claimAtServer, issueGrant, verifyHello,
 } from './capability.js';
 
@@ -71,7 +71,7 @@ export type DeviceControlFrame =
   // service worker lives only while its connections carry traffic.
   | { v: 1; t: 'ping' }
   | { v: 1; t: 'decline'; nonce: string; reason?: string };
-export type ClaimFrame = { v: 1; t: 'claim'; grant: Signed<GrantPayload>; approval: Signed<ApprovalPayload> };
+export type ClaimFrame = { v: 1; t: 'claim'; grant: Signed<GrantPayload>; approval: Signed<ApprovalBase> };
 /** `outcome` tells the device what became of its approval: see `acquireLease`. */
 export type ClaimOutcome = 'refused' | 'replay' | 'unavailable' | 'unknown';
 export type ClaimReply = { v: 1; t: 'claimed' } | { v: 1; t: 'refused'; outcome: ClaimOutcome; reason: string };
@@ -107,6 +107,11 @@ export interface RelayHubOptions {
   agentAttachTimeoutMs?: number;
   /** How much may be queued towards a side that isn't reading, before the lease ends. */
   outboundLimitBytes?: number;
+  /**
+   * What this hub's runs are served: a browser unless said. A hub serves one family:
+   * its grants are signed for it, and a claim approved for another is refused.
+   */
+  family?: CapabilityFamily<object>;
   /**
    * How often each device with a lease or a connection is checked against the registry.
    * A device removed through another server instance is only seen this way: removal
@@ -354,6 +359,7 @@ export function createRelayHub(opts: RelayHubOptions): RelayHub {
       clearTimeout(timer);
       void claimAtServer({
         server: opts.server, store: opts.store, grant: claim.grant, approval: claim.approval, now: now(),
+        ...(opts.family ? { family: opts.family } : {}),
         deviceKey: opts.deviceKey,
         // The server's own record, by grant: the run this nonce was issued for, and no other.
         issued: (n) => (n === nonce ? p.run : null),
@@ -410,7 +416,7 @@ export function createRelayHub(opts: RelayHubOptions): RelayHub {
     }
     if (!opts.deviceKey(request.deviceId)) { reject(new RelayRefused('the device is not registered')); return; }
     const run = { userId: request.userId, deviceId: request.deviceId, runId: request.runId };
-    const grant = issueGrant(opts.server, { ...run, ttlMs: request.ttlMs ?? MAX_LIFETIME_MS, now: now() });
+    const grant = issueGrant(opts.server, { ...run, ttlMs: request.ttlMs ?? MAX_LIFETIME_MS, now: now() }, opts.family);
     const nonce = grant.payload.nonce;
     const timer = setTimeout(() => withdraw(nonce, 'the device did not answer in time'), offerTimeoutMs);
     pending.set(nonce, { run, grant, resolve, reject, timer, claiming: false });

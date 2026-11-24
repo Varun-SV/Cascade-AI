@@ -1441,7 +1441,10 @@ export class T3Worker extends BaseTier {
     // nothing changed since, is answered from there instead of run again. A
     // local-only subtask reads nothing from it and adds nothing to it, but what
     // it changes still has to make the others' stored answers stale.
-    const board = this.router.getRunMemory?.(this.artifactRoot());
+    // A tool that runs on another machine (a workspace the user serves: src/workspace/)
+    // is kept off the board: it watches files and checks facts on this machine, which
+    // say nothing of that one.
+    const board = this.toolRegistry.getTool?.(tc.name)?.remote ? undefined : this.router.getRunMemory?.(this.artifactRoot());
     const reused = this.localOnlyMatch ? null : board?.reuse(tc.name, tc.input, this.id);
     if (reused) {
       // Read as surely as if it had run: what this worker learns from it has the same
@@ -1922,8 +1925,35 @@ ${assignment.expectedOutput}`;
    * command may be writing one of these files, not yet marked.
    */
   private async verifyArtifacts(assignment: T2ToT3Assignment): Promise<{ ok: boolean; issues: string[] }> {
+    // Files written on another machine (a workspace the user serves: src/workspace/)
+    // are checked there, not in this machine's folder, where they never are.
+    if (this.tools.some((t) => ARTIFACT_TOOLS.has(t.name) && this.toolRegistry.getTool?.(t.name)?.remote)) {
+      return this.checkRemoteArtifacts(assignment);
+    }
     const check = () => this.checkArtifacts(assignment);
     return this.toolRegistry.whileShared ? this.toolRegistry.whileShared(check) : check();
+  }
+
+  /**
+   * The promised files, read through the workspace's own file_read: present and not
+   * empty. Without a remote file_read the run can't look, so nothing is claimed.
+   */
+  private async checkRemoteArtifacts(assignment: T2ToT3Assignment): Promise<{ ok: boolean; issues: string[] }> {
+    if (!this.toolRegistry.getTool?.('file_read')?.remote) return { ok: true, issues: [] };
+    const issues: string[] = [];
+    for (const artifactPath of this.extractArtifactPaths(assignment)) {
+      try {
+        const out = await this.toolRegistry.execute('file_read', { path: artifactPath }, {
+          tierId: this.id, sessionId: this.taskId, requireApproval: false, ...(this.signal ? { signal: this.signal } : {}),
+        });
+        // file_read numbers every line (`1\t…`): an empty file still comes back as "1\t".
+        const text = out.split('\n').map((line) => line.replace(/^\d+\t/, '')).join('\n');
+        if (!text.trim()) issues.push(`Artifact is empty: ${artifactPath}`);
+      } catch {
+        issues.push(`Expected artifact not found in the workspace: ${artifactPath}`);
+      }
+    }
+    return { ok: issues.length === 0, issues };
   }
 
   private async checkArtifacts(assignment: T2ToT3Assignment): Promise<{ ok: boolean; issues: string[] }> {

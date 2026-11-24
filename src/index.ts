@@ -93,6 +93,17 @@ export {
   MAX_LIFETIME_MS as RELAY_MAX_LIFETIME_MS,
 } from './browser/relay/capability.js';
 export type { NonceStore as RelayNonceStore, Identity as RelayIdentity } from './browser/relay/capability.js';
+// A folder on the user's machine as a cloud run's workspace (docs/design/workspace-env.md).
+export {
+  WORKSPACE_FAMILY, WORKSPACE_TOOLS, READ_TOOLS as WORKSPACE_READ_TOOLS, isWorkspaceTool,
+} from './workspace/protocol.js';
+export type { WorkspaceScope, WorkspaceTool } from './workspace/protocol.js';
+export { connectWorkspaceDevice, serveWorkspaceDevice } from './workspace/device.js';
+export type { WorkspaceConsent, WorkspaceDeviceClient, WorkspaceDeviceOptions, WorkspaceRunInfo, PairedWorkspaceKey } from './workspace/device.js';
+export { createWorkspaceExecutor } from './workspace/executor.js';
+export type { WorkspaceExecutor, WorkspaceExecutorOptions, WorkspaceQuestion, WorkspaceCheckpoints, WorkspaceRegistry } from './workspace/executor.js';
+export { openRemoteWorkspace, WorkspaceUnavailable } from './workspace/remote.js';
+export type { RemoteWorkspace, WorkspaceSocket } from './workspace/remote.js';
 export { connectDeviceClient } from './browser/relay/device.js';
 // The private-network rule, for a server deciding whether it may dial an address a user gave.
 export { isPrivateHost as isPrivateNetworkHost, bareHost } from './browser/relay/egress-rules.js';

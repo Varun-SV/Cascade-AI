@@ -5,6 +5,30 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.99.2 - 2026-11-24
+
+### Added
+- **Groundwork: your own machine as a coding environment for cloud runs.**
+  A run in the hosted web app will be able to work in a folder on your own
+  computer, through the desktop app: the run's model calls stay on the server,
+  and its tool calls (shell, files, git) run on your machine. This release adds
+  the core only; nothing is switched on yet. The server and desktop pieces come
+  next (see `docs/design/workspace-env.md`).
+  - Nothing runs without a yes on your machine, where you choose the folder and
+    the tools the run may use. A call for any other tool is refused there,
+    whatever the server sends.
+  - Risky calls are asked about on your machine (deleting, sending things off it,
+    rewriting git history, installing software, changing files outside the
+    folder). The folder is checkpointed before the run's first change, so you can
+    undo everything it did. If no checkpoint can be taken, every change is asked
+    about.
+  - Files your `privacy.paths` rules mark local-only are never read for the run,
+    since its models are cloud models.
+  - The folder's path never leaves your machine; the run sees only a label you
+    choose. Stop on your machine ends the run's access at once.
+  - Workspace approvals are signed under their own domains, so a browser
+    approval can never be used as a workspace one, nor the reverse.
+
 ## 0.99.1 - 2026-11-24
 
 ### Fixed

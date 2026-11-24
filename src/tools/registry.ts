@@ -230,6 +230,11 @@ export class ToolRegistry extends EventEmitter {
     this.registerDefaults();
   }
 
+  /** How commands are confined: "off" is the user's choice to run them as they are. */
+  processJailMode(): string {
+    return this.config.processJail ?? 'auto';
+  }
+
   /** The privacy policies the process jail hides local-only paths by. */
   setPrivacyPaths(paths: PrivacyPaths | undefined): void {
     this.privacyPaths = paths;
@@ -420,6 +425,12 @@ export class ToolRegistry extends EventEmitter {
   ): Promise<string> {
     const tool = this.tools.get(toolName);
     if (!tool) throw new Error(`Tool not found: ${toolName}`);
+    // On another machine, whose own registry checks the call: nothing here applies,
+    // and it always leaves this one.
+    if (tool.remote) {
+      if (options.isOffline?.()) throw new Error(`${toolName} is unavailable to a local-only subtask (privacy.paths): it runs on another machine.`);
+      return tool.execute(input, options);
+    }
     this.checkRoot();
     // The same authored batch can reach this boundary through a generated
     // tool, concurrent nested calls, or a fallback. Never rebind an old ref

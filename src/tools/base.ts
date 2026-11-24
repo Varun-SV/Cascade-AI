@@ -35,6 +35,13 @@ export abstract class BaseTool {
    */
   readonly localOnlySafe: boolean = false;
 
+  /**
+   * True for a tool that runs on another machine (a workspace the user serves to a
+   * cloud run: src/workspace/). That machine's own registry applies the workspace
+   * rules to the call; this one's, rooted at a folder the call never touches, doesn't.
+   */
+  readonly remote: boolean = false;
+
   setWorkspaceRoot(root: string): void {
     this.workspaceRoot = root;
   }
