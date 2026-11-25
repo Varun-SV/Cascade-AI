@@ -388,6 +388,35 @@ describe('a run started with workspaceDeviceId', () => {
     expect(fs.existsSync(path.join(m.dir, 'README.md'))).toBe(true);
   }, 30_000);
 
+  it('tells the web app which files a workspace run changed, and when a call is answered, without any output', async () => {
+    const w = await server();
+    const alice = w.user('alice');
+    const m = await desktop(w, alice);
+    const stub = await startStubOpenAIServer({ delayMs: 3000 });
+    cleanup.push(() => stub.close());
+    const original = Cascade.prototype.addRemoteTools;
+    let tools: Parameters<typeof original>[0] | undefined;
+    const spy = vi.spyOn(Cascade.prototype, 'addRemoteTools').mockImplementation(function (this: InstanceType<typeof Cascade>, t) { tools = t; return original.call(this, t); });
+    cleanup.push(() => spy.mockRestore());
+    const stop = new AbortController();
+    const { socket, result } = await runTurn(w, alice.id, m.device.id, { stub, signal: stop.signal });
+    await vi.waitFor(() => expect(tools).toBeDefined(), { timeout: 10_000 });
+    const opts = { tierId: 'T3:1', sessionId: 's', requireApproval: false };
+    // Called the way the registry calls it, as a worker's fallback does too: no model tool event at all.
+    void tools!.find((t) => t.name === 'file_write')!.execute({ path: 'notes.md', content: 'hello' }, opts).catch(() => undefined);
+    expect(socket.named('workspace:call')).toHaveLength(1);
+    expect(socket.named('workspace:call')[0]).toMatchObject({ runId: 'client-run-1', tool: 'file_write', change: { kind: 'write', path: 'notes.md', content: 'hello' } });
+    fs.writeFileSync(path.join(m.dir, 'secret.txt'), 'TOP SECRET OUTPUT');
+    await tools!.find((t) => t.name === 'file_read')!.execute({ path: 'secret.txt' }, opts);
+    // A read changes nothing: no call event, and its result says only that it was answered.
+    expect(socket.named('workspace:call')).toHaveLength(1);
+    // The write above may finish before or after this read: the read's result is found by its tool.
+    expect(socket.named('workspace:result').find((r) => (r as { tool?: string }).tool === 'file_read')).toMatchObject({ tool: 'file_read', ok: true, worker: 'T3_1' });
+    expect(JSON.stringify(socket.events)).not.toContain('TOP SECRET');
+    stop.abort();
+    await result.catch(() => undefined);
+  }, 30_000);
+
   it('an offline desktop fails the start with a clear message, before anything is saved', async () => {
     const w = await server();
     const alice = w.user('alice');

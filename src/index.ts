@@ -104,7 +104,7 @@ export { createWorkspaceExecutor } from './workspace/executor.js';
 export { Checkpoints } from './core/checkpoints.js';
 export { PrivacyPaths } from './core/privacy/paths.js';
 export type { WorkspaceExecutor, WorkspaceExecutorOptions, WorkspaceQuestion, WorkspaceCheckpoints, WorkspaceRegistry } from './workspace/executor.js';
-export { openRemoteWorkspace, WorkspaceUnavailable } from './workspace/remote.js';
+export { openRemoteWorkspace, WorkspaceUnavailable, workerId as workspaceWorkerId } from './workspace/remote.js';
 export type { RemoteWorkspace, WorkspaceSocket } from './workspace/remote.js';
 export { connectDeviceClient } from './browser/relay/device.js';
 // The private-network rule, for a server deciding whether it may dial an address a user gave.

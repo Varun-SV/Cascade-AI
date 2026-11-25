@@ -13,7 +13,7 @@ import { Check } from 'lucide-react';
  */
 export type MenuItem =
   | { kind: 'action'; label: string; icon?: ReactNode; onSelect: () => void; danger?: boolean; disabled?: boolean }
-  | { kind: 'radio'; label: string; sub?: string; checked: boolean; onSelect: () => void; disabled?: boolean }
+  | { kind: 'radio'; label: string; sub?: string; checked: boolean; onSelect: () => void; disabled?: boolean; /** A status dot before the label: green when on. */ dot?: 'on' | 'off'; title?: string }
   | { kind: 'toggle'; label: string; sub?: string; icon?: ReactNode; checked: boolean; onToggle: () => void; disabled?: boolean; title?: string }
   | { kind: 'label'; label: string }
   | { kind: 'separator' }
@@ -158,9 +158,17 @@ export default function Menu({ anchor, items, onClose, label }: Props) {
                 role="menuitemradio"
                 aria-checked={it.checked}
                 disabled={it.disabled}
+                title={it.title}
                 onClick={it.onSelect}
                 className="cz-mi"
               >
+                {it.dot && (
+                  <span
+                    aria-hidden="true"
+                    data-dot={it.dot}
+                    className={`h-2 w-2 shrink-0 rounded-full ${it.dot === 'on' ? 'bg-success-500' : 'bg-ink-500/50'}`}
+                  />
+                )}
                 <span className="min-w-0 flex-1">
                   {it.label}
                   {it.sub && <span className="block text-[12px] text-ink-500">{it.sub}</span>}

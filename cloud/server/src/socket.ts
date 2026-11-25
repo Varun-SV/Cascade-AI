@@ -323,6 +323,20 @@ export interface LiveRun {
    * fields are mutually exclusive by construction: each write clears the other.
    */
   contextApprovalClosed?: Record<string, unknown>;
+  /**
+   * The run's workspace events (`workspace:*`), in order, for a page that reconnects:
+   * what attached, each file change and its result, what waits on the user's computer.
+   * The client's reducer takes a repeat as a no-op, so a transient reconnect that kept
+   * the page loses nothing and doubles nothing. Bounded: oldest first out.
+   */
+  workspaceLog?: Array<{ event: string; payload: unknown; size: number }>;
+  workspaceLogSize?: number;
+  /**
+   * The run's `workspace:attached`, kept apart from the log and replayed first: the
+   * client builds its view on it, and drops every later event until it has it, so it
+   * must outlast whatever the log's bound evicts.
+   */
+  workspaceAttached?: unknown;
   terminal?: { conversationId?: string; error?: string };
 }
 
@@ -353,8 +367,27 @@ const TERMINAL_EVENTS = new Set(['session:complete', 'session:error']);
  */
 let refusalSeq = 0;
 
+/** How much of a run's workspace events is kept for a reconnecting page. */
+const MAX_WORKSPACE_LOG_EVENTS = 500;
+const MAX_WORKSPACE_LOG_CHARS = 4_000_000;
+
 export function rememberForReplay(run: LiveRun, event: string, payload: unknown): void {
   const p = (payload ?? {}) as Record<string, unknown>;
+  if (event === 'workspace:attached') {
+    run.workspaceAttached = payload;
+    return;
+  }
+  if (event.startsWith('workspace:')) {
+    let size = 0;
+    try { size = JSON.stringify(payload ?? null).length; } catch { return; }
+    const log = (run.workspaceLog ??= []);
+    log.push({ event, payload, size });
+    run.workspaceLogSize = (run.workspaceLogSize ?? 0) + size;
+    while (log.length > MAX_WORKSPACE_LOG_EVENTS || (run.workspaceLogSize > MAX_WORKSPACE_LOG_CHARS && log.length > 1)) {
+      run.workspaceLogSize -= log.shift()!.size;
+    }
+    return;
+  }
   if (event === 'browser:live-view') {
     // `active: false` is the run giving the browser up. Dropping the entry
     // rather than storing it also drops the live-view URL, which is a bearer
@@ -608,6 +641,9 @@ function replayRunState(run: LiveRun, socket: Pick<Socket, 'emit'>): void {
   // taken down; a page that reloaded gets it put back.
   if (run.contextApprovalClosed) socket.emit('context:approval-closed', run.contextApprovalClosed);
   if (run.contextApproval) socket.emit('context:approval-required', run.contextApproval);
+  // In the order they happened: a result after its call, a wait before what answered it.
+  if (run.workspaceAttached) socket.emit('workspace:attached', run.workspaceAttached);
+  for (const { event, payload } of run.workspaceLog ?? []) socket.emit(event, payload);
 }
 
 export interface SocketOptions {

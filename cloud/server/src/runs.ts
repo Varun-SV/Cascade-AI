@@ -17,6 +17,7 @@ import {
 import type { Cascade, CascadeConfig, ConversationMessage, ImageAttachment, ApprovalRequest, ProviderConfig, BrowserAllowance, BrowserInput } from '#cascade-ai';
 import { attachRemoteBrowser, providerRationsSessions, type RelayForRun } from './remote-browser.js';
 import type { BrowserRelay } from './browser-relay.js';
+import { observeWorkspaceTools } from './workspace-events.js';
 import { WorkspaceRunError, openWorkspaceForRun, type RunWorkspace, type WorkspaceRelay } from './workspace-relay.js';
 import { decryptAtRest } from './secrets.js';
 import { checkEndpointUrl } from './user-endpoint.js';
@@ -2093,8 +2094,10 @@ async function runChatTurnInner(payload: ChatRunPayload, deps: ChatRunDeps, hold
   if (workspace) {
     const ws = workspace;
     const where = { conversationId: conversation.id, runId: payload.runId, label: ws.remote.label, device: ws.device };
+    // Watched before they are registered, so every way a call reaches them is seen.
+    observeWorkspaceTools(ws.remote.tools, (event, ev) => socket.emit(event, { conversationId: conversation.id, runId: payload.runId, ...ev }));
     cascade.addRemoteTools(ws.remote.tools);
-    ws.remote.onWaiting((call) => socket.emit('workspace:waiting', { conversationId: conversation.id, runId: payload.runId, tool: call.tool, label: ws.remote.label, device: ws.device }));
+    ws.remote.onWaiting((call) => socket.emit('workspace:waiting', { conversationId: conversation.id, runId: payload.runId, tool: call.tool, ...(call.worker ? { worker: call.worker } : {}), label: ws.remote.label, device: ws.device }));
     socket.emit('workspace:attached', { ...where, tools: ws.remote.tools.map((t) => t.name) });
     // Gone mid-run: the calls in flight and every later one fail with that reason, which
     // the model reads, and the web app is told. The run never waits on a connection that is over.

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { AnimatePresence, MotionConfig, motion } from 'framer-motion';
 import LandingPage from './components/LandingPage.js';
@@ -23,6 +23,7 @@ import Toaster from './components/Toaster.js';
 import { toast } from './lib/toast.js';
 import { useMediaQuery } from './lib/useMediaQuery.js';
 import { titleOf } from './lib/conversations.js';
+import { useWorkspaceRun } from './chat/useWorkspaceRun.js';
 import { useChatSession, toChatMessage } from './chat/useChatSession.js';
 import { useAutoTitler } from './chat/useAutoTitler.js';
 import { useBrowserAllowance } from './chat/browserAllowance.js';
@@ -150,7 +151,19 @@ export default function App() {
   const socket = user ? getSocket() : null;
   // Routing, web and browser are always a menu away now (there is no Simple
   // view that hides them), so the controls are always visible to the session.
-  const chat = useChatSession(socket, providers, skillId, webSearchPayload(webSearch), undefined, true);
+  // Where a run works: the user's own computer, when the server has the workspace relay and
+  // one is chosen. The chat reads the choice when it sends; the choice follows the chat's
+  // conversation, so the two hooks meet through this ref.
+  const workspaceDeviceRef = useRef<string | undefined>(undefined);
+  const adoptFirstTurnRef = useRef<((conversationId: string, deviceId: string | undefined) => void) | undefined>(undefined);
+  const chat = useChatSession(
+    socket, providers, skillId, webSearchPayload(webSearch), undefined, true,
+    () => workspaceDeviceRef.current,
+    (conversationId, deviceId) => adoptFirstTurnRef.current?.(conversationId, deviceId),
+  );
+  const workspace = useWorkspaceRun(socket, config?.workspaceRelay === true, chat.activeConversation, chat.busy);
+  workspaceDeviceRef.current = workspace.workspaceDeviceId;
+  adoptFirstTurnRef.current = workspace.adoptFirstTurn;
   // Re-read as each run starts and ends, which is when a session can be spent.
   // Two ways a run can have a browser: the deployment's hosted one, and the
   // user's own Chrome through the extension. Only the hosted one is rationed, so
@@ -416,6 +429,11 @@ export default function App() {
             thinkingUnavailable={providers.length > 0 && providers.every((p) => p.type === 'azure')}
             thinking={chat.thinking}
             onThinkingChange={chat.setThinking}
+            workspace={workspace.enabled ? {
+              devices: workspace.devices, known: workspace.devicesKnown, loading: workspace.loading, failed: workspace.failed,
+              selected: workspace.selected, onSelect: workspace.select, onOpen: workspace.refresh,
+            } : undefined}
+            workspaceRun={workspace.enabled ? { view: workspace.view, awaitingConsent: workspace.awaitingConsent, awaitingDeviceName: workspace.awaitingDeviceName } : undefined}
             skills={skills}
             skillId={skillId}
             onSkillChange={setSkillId}
