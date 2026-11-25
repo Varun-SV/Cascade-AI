@@ -256,6 +256,9 @@ export function createCliWorkspace(deps: CliWorkspaceDeps) {
     new Promise<boolean>((resolve) => {
       // "Allow everything for this run" was chosen earlier in this terminal.
       if (current?.allowAll) { resolve(true); return; }
+      // Withdrawn before it got here (the executor was still taking its checkpoint): an
+      // abort listener added now would never hear it, and the question would sit open.
+      if (q.signal.aborted) { resolve(false); return; }
       const ac = new AbortController();
       let timer: ReturnType<typeof setTimeout> | undefined;
       let finished = false;
@@ -275,7 +278,7 @@ export function createCliWorkspace(deps: CliWorkspaceDeps) {
       const secrets = current?.secrets() ?? [];
       ui.askCall({
         tool: q.tool, summary: displayText(summarizeCall(q.tool, q.input), { max: 1000, secrets }),
-        risk: q.risk.level, reason: displayText(q.risk.reason, { max: 300 }), label: current?.label ?? null,
+        risk: q.risk.level, reason: displayText(q.risk.reason, { max: 300, secrets }), label: current?.label ?? null,
         timeoutMs: callTimeout, signal: ac.signal,
       }).then((answer) => {
         if (answer === 'all' && current) {

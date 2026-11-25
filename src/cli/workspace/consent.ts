@@ -98,7 +98,9 @@ export function summarizeCall(tool: string, input: Record<string, unknown>): str
   else if (tool === 'run_code') text = [str(input['language']), str(input['code'])].filter(Boolean).join('\n') || null;
   else if (tool === 'git') text = ['git', ...(Array.isArray(input['args']) ? input['args'].map(String) : []), str(input['command']) ?? ''].join(' ').trim();
   else text = str(input['path']) ?? str(input['pattern']);
-  const out = text ?? JSON.stringify(input);
+  // Where it runs: `rm -rf build` means different files in different folders.
+  const cwd = tool === 'shell' || tool === 'git' || tool === 'run_code' ? str(input['cwd']) : null;
+  const out = `${text ?? JSON.stringify(input)}${cwd ? `  (in ${cwd})` : ''}`;
   return out.length > 2000 ? `${out.slice(0, 2000)}…` : out;
 }
 

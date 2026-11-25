@@ -7,7 +7,7 @@ import {
 } from './service.js';
 import {
   CONSENT_MAX_MS, EDIT_TOOLS, READ_TOOLS, WORKSPACE_TOOLS, activityText, buildLabel, consentWindowMs, displayText, leaksPath,
-  presetOf, sanitizeTools, validateFolder, type FolderFs,
+  presetOf, sanitizeTools, summarizeCall, validateFolder, type FolderFs,
 } from './consent.js';
 import { WORKSPACE_TOOLS as SDK_TOOLS } from '../../workspace/protocol.js';
 
@@ -334,6 +334,30 @@ describe('a served run', () => {
     expect(q(h).q.summary).not.toContain('\u001b');
     q(h).resolve('deny');
     await p;
+  });
+
+  it('masks credentials in the risk reason too, and shows where a shell or git call runs', async () => {
+    const h = harness();
+    const { exec } = await opened(h);
+    const p = exec.ask({ ...call('shell', { command: 'pkill -f sk-from-config', cwd: 'packages/api' }), risk: { level: 'risky', reason: 'stops processes: pkill -f sk-from-config' } });
+    expect(q(h).q.reason).not.toContain('sk-from-config');
+    expect(q(h).q.summary).toContain('(in packages/api)');
+    q(h).resolve('deny');
+    await p;
+    expect(summarizeCall('git', { args: ['reset', '--hard'], cwd: 'sub' })).toBe('git reset --hard  (in sub)');
+    expect(summarizeCall('file_delete', { path: 'a', cwd: 'x' })).toBe('a');
+  });
+
+  it('a call withdrawn before it is asked is refused at once, with no question left open', async () => {
+    const h = harness();
+    const { exec, s } = await opened(h);
+    s.onServing!(info());
+    const ac = new AbortController();
+    ac.abort();
+    const asked = h.calls.length;
+    expect(await exec.ask(call('shell', { command: 'x' }, ac.signal))).toBe(false);
+    expect(h.calls.length).toBe(asked);
+    expect(h.ws.status().serving).not.toMatchObject({ allowAll: true });
   });
 
   it('refuses a call the run withdrew, and one pending when Stop is pressed', async () => {
