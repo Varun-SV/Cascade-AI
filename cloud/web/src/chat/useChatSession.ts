@@ -1346,15 +1346,24 @@ export function useChatSession(
     setConversationId(initialConversationId);
   }, [initialConversationId]);
 
-  // If the user opted into the on-device model, warm it in the background so it
-  // can classify complexity (and title chats) without a first-use stall. The
+  // If the user opted into the on-device model, load it in the background — but
+  // only once a run has finished and the browser is idle. Loading puts the model
+  // on the GPU, which can hold up the whole browser for a while; started when the
+  // page opened, it landed on the first send, and that send waited for it. Until
+  // it has loaded, sends go out at once and the server classifies as usual. The
   // engine is shared with the titler — this is a no-op if it's already loading.
+  const warmedRef = useRef(false);
+  const wasBusyForWarmRef = useRef(false);
   useEffect(() => {
+    const finished = wasBusyForWarmRef.current && !busy;
+    wasBusyForWarmRef.current = busy;
+    if (!finished || warmedRef.current) return;
     if (!localModelEnabled() || !detectLocalModelCapability().supported) return;
+    warmedRef.current = true;
     const idle = (cb: () => void) =>
-      typeof requestIdleCallback === 'function' ? requestIdleCallback(cb, { timeout: 4000 }) : setTimeout(cb, 1500);
+      typeof requestIdleCallback === 'function' ? requestIdleCallback(cb, { timeout: 10_000 }) : setTimeout(cb, 3000);
     idle(() => warmLocalModel());
-  }, []);
+  }, [busy]);
 
   useEffect(() => {
     if (!socket) return;
