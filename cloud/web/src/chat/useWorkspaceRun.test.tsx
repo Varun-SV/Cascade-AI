@@ -126,6 +126,26 @@ describe('useWorkspaceRun', () => {
     expect(result.current.awaitingConsent).toBe(false);
   });
 
+  it("a new chat's first run shows its workspace while it runs, though the page has no id for the chat yet", async () => {
+    const fake = fakeSocket();
+    const { result, rerender } = renderHook(({ c, busy }) => useWorkspaceRun(fake.socket, true, c, busy), { initialProps: { c: undefined as string | undefined, busy: false } });
+    await waitFor(() => expect(result.current.devicesKnown).toBe(true));
+    act(() => result.current.select('d1'));
+    rerender({ c: undefined, busy: true });
+    act(() => {
+      fake.fire('workspace:attached', { conversationId: 'srv-1', runId: 'r1', label: 'proj', device: { id: 'd1', name: 'Work PC' }, tools: ['file_write'] });
+      fake.fire('workspace:waiting', { conversationId: 'srv-1', runId: 'r1', tool: 'shell', worker: 'T3-1' });
+    });
+    expect(result.current.awaitingConsent).toBe(false);
+    expect(result.current.view?.label).toBe('proj');
+    expect(result.current.view?.waitingTool).toBe('shell');
+    // Another blank chat opened meanwhile isn't this run's: once its run ends, it shows nothing.
+    rerender({ c: undefined, busy: false });
+    expect(result.current.view).toBeUndefined();
+    rerender({ c: 'srv-1', busy: false });
+    expect(result.current.view?.label).toBe('proj');
+  });
+
   it('stops listening when unmounted', async () => {
     const fake = fakeSocket();
     const { result, unmount } = renderHook(() => useWorkspaceRun(fake.socket, true, 'c1', true));

@@ -30,7 +30,7 @@ export function useWorkspaceRun(socket: Socket | null, enabled: boolean, convers
    * server names it) and the desktop it asked for. The consent notice is about this run
    * only, wherever the user looks meanwhile; `attached` is whether its computer answered.
    */
-  const [run, setRun] = useState<{ key: string; deviceId: string | undefined; attached: boolean } | null>(null);
+  const [run, setRun] = useState<{ key: string; deviceId: string | undefined; attached: boolean; named?: string } | null>(null);
 
   const keyRef = useRef(key);
   keyRef.current = key;
@@ -93,7 +93,9 @@ export function useWorkspaceRun(socket: Socket | null, enabled: boolean, convers
       if (!parsed) return;
       const k = parsed.conversationId ?? keyRef.current;
       // Its own run's computer answered (a first turn's id may not be adopted yet).
-      if (parsed.event.type === 'attached') setRun((r) => (r && (r.key === k || r.key === '') ? { ...r, attached: true } : r));
+      // A first turn's chat has no id in the page until the run ends: the id its workspace
+      // events carry is remembered, so the blank chat shows its workspace while it runs.
+      if (parsed.event.type === 'attached') setRun((r) => (r && (r.key === k || r.key === '') ? { ...r, attached: true, ...(r.key === '' ? { named: k } : {}) } : r));
       setViews((v) => {
         const next = applyWorkspaceEvent(v[k], parsed.event);
         return next === v[k] ? v : { ...v, [k]: next };
@@ -132,6 +134,6 @@ export function useWorkspaceRun(socket: Socket | null, enabled: boolean, convers
     /** This run asked for a workspace and its computer has not answered yet. */
     awaitingConsent: enabled && busy && !!run && run.deviceId !== undefined && !run.attached && run.key === key,
     awaitingDeviceName: deviceName ?? 'your computer',
-    view: enabled ? views[key] : undefined,
+    view: enabled ? (views[key] ?? (key === '' && run?.key === '' && run.named ? views[run.named] : undefined)) : undefined,
   };
 }
