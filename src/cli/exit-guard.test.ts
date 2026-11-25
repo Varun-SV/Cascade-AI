@@ -1,8 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ExitGuard, describe as describeError, previousEndingNotice, signalExitCode } from './exit-guard.js';
+import { ExitGuard, claimStopSignals, describe as describeError, handOverStopSignal, previousEndingNotice, signalExitCode } from './exit-guard.js';
 
 const fresh = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'exit-guard-')), 'state', 'last-exit.json');
 
@@ -109,5 +109,27 @@ describe('ExitGuard', () => {
     expect(new ExitGuard(file, '1.0.0').previous()?.running).toMatch(/answered "n"/);
     g.noteStep(null);
     expect(new ExitGuard(file, '1.0.0').previous()?.running).toBeUndefined();
+  });
+});
+
+describe('stop signals claimed by a command', () => {
+  it('go to the command that claimed them until it lets go', () => {
+    expect(handOverStopSignal('SIGINT')).toBe(false);
+    const fn = vi.fn();
+    const release = claimStopSignals(fn);
+    expect(handOverStopSignal('SIGTERM')).toBe(true);
+    expect(fn).toHaveBeenCalledWith('SIGTERM');
+    release();
+    expect(handOverStopSignal('SIGINT')).toBe(false);
+  });
+
+  it('an old release does not drop a newer claim', () => {
+    const first = claimStopSignals(vi.fn());
+    const second = vi.fn();
+    const releaseSecond = claimStopSignals(second);
+    first();
+    expect(handOverStopSignal('SIGINT')).toBe(true);
+    expect(second).toHaveBeenCalledOnce();
+    releaseSecond();
   });
 });

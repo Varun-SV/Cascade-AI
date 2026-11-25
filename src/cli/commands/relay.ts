@@ -23,6 +23,7 @@ import readline from 'node:readline';
 import chalk from 'chalk';
 import { CloudClient, type RelayServerInfo } from '../../cloud/client.js';
 import { globalDir } from '../../cloud/session-store.js';
+import { claimStopSignals } from '../exit-guard.js';
 import { generateStoredKey, identityFromPrivateKey, publicKeyFromText } from '../../browser/relay/capability.js';
 import { DEFAULT_RUN_TABS, MAX_RUN_TABS, connectDeviceClient, tabsAllowed, type DeviceClient, type DeviceClientOptions, type UserConsent } from '../../browser/relay/device.js';
 
@@ -214,9 +215,9 @@ export async function relayServeCommand(opts: { chromium?: string } = {}): Promi
   let endpoints: { controlUrl: string; runUrl: string };
   try { endpoints = relayEndpoints(stored.serverUrl, await client.relayServer()); } catch (err) { fail(err); return; }
   const stopping = new AbortController();
-  const onSignal = (): void => stopping.abort();
-  process.once('SIGINT', onSignal);
-  process.once('SIGTERM', onSignal);
+  // The first stop closes the browser and the run's use of it; a second one leaves at once.
+  const onSignal = (): void => { if (stopping.signal.aborted) process.exit(130); stopping.abort(); };
+  const release = claimStopSignals(onSignal);
   console.log(chalk.magenta(`\n  ◈ Serving "${stored.name}" to ${stored.serverUrl}`));
   console.log(chalk.dim('  Ctrl-C to stop. Any run using this machine\'s browser ends with it.\n'));
   try {
@@ -231,8 +232,7 @@ export async function relayServeCommand(opts: { chromium?: string } = {}): Promi
       process.exitCode = 1;
     } else console.log(chalk.dim('\n  Stopped.\n'));
   } catch (err) { fail(err); } finally {
-    process.off('SIGINT', onSignal);
-    process.off('SIGTERM', onSignal);
+    release();
   }
 }
 

@@ -29,7 +29,8 @@ import { STATE, statePath } from '../../config/project-state.js';
 import { ToolRegistry } from '../../tools/registry.js';
 import { secretValuesIn } from '../../core/cascade.js';
 import { loadRelayDevice } from './relay.js';
-import { PRESETS, buildLabel, validateFolder, type LabelMode, type ToolPreset } from '../workspace/consent.js';
+import { claimStopSignals } from '../exit-guard.js';
+import { PRESETS, buildLabel, presetOf, validateFolder, type LabelMode, type ToolPreset } from '../workspace/consent.js';
 import {
   createCliWorkspace, defaultFolderFs, type CallQuestion, type CliWorkspaceCore, type ConsentQuestion, type PairedDevice, type WorkspaceRunSummary, type WorkspaceUi,
 } from '../workspace/service.js';
@@ -102,19 +103,26 @@ export function createTerminalUi(opts: TerminalUiOptions): WorkspaceUi & { idle(
       }
       const mins = Math.max(1, Math.round(q.windowMs / 60_000));
       const labels = (mode: LabelMode): string => buildLabel(mode, q.device, path.join(path.sep, q.folderName));
+      // The preset `--tools` named, offered as "y". Enter stays a no.
+      const defKey = presetOf(q.defaults.tools);
+      const defNum = defKey ? PRESET_KEYS.indexOf(defKey) + 1 : null;
       const header = (): void => {
         print(chalk.magenta('\n  ◈ A cloud run wants this workspace'));
         print(chalk.dim(`  ${q.chat ? `"${q.chat}" · ` : ''}run ${q.runId} · folder "${q.folderName}" on ${q.device} · this question lapses in about ${mins} min`));
-        PRESET_KEYS.forEach((k, i) => print(`    ${i + 1}  ${PRESETS[k].title}`));
+        PRESET_KEYS.forEach((k, i) => print(`    ${i + 1}  ${PRESETS[k].title}${k === defKey ? chalk.dim('  (y)') : ''}`));
         print(chalk.dim('  The run is shown a name you pick below, never the folder\'s path. Risky calls ask again here.'));
       };
       type Pick = { key: ToolPreset } | null;
-      return ask<Pick>(header, '  Allow with which tools? 1, 2 or 3 (Enter to say no): ', q.signal, (text, done, again) => {
+      const question = defNum
+        ? `  Allow with which tools? 1, 2 or 3, or y for ${defNum} (Enter to say no): `
+        : '  Allow with which tools? 1, 2 or 3 (Enter to say no): ';
+      return ask<Pick>(header, question, q.signal, (text, done, again) => {
         const t = text.trim();
         if (!t) { print(chalk.dim('  Declined.')); done(null); return; }
+        if (defKey && /^y(es)?$/i.test(t)) { done({ key: defKey }); return; }
         const n = Number.parseInt(t, 10);
         const key = PRESET_KEYS[n - 1];
-        if (!key || String(n) !== t) { print(chalk.yellow('  Type 1, 2 or 3, or press Enter to say no.')); again(); return; }
+        if (!key || String(n) !== t) { print(chalk.yellow(`  Type 1, 2 or 3${defNum ? ', or y' : ''}, or press Enter to say no.`)); again(); return; }
         done({ key });
       }, null).then(async (pick) => {
         if (!pick) return null;
@@ -164,9 +172,11 @@ export function createTerminalUi(opts: TerminalUiOptions): WorkspaceUi & { idle(
       void ask<boolean>(() => {}, '  Undo what it changed now? [y/N] ', lapse.signal, (text, done) => done(/^\s*y(es)?\s*$/i.test(text)), false).then(async (yes) => {
         clearTimeout(timer);
         if (!yes) { print(chalk.dim('  Kept. To undo later, run `cascade` in that folder and type /undo.')); return; }
-        const r = await undo();
+        // A failed restore (a file it can't write, say) is said here; serving goes on.
+        let r: Awaited<ReturnType<typeof undo>>;
+        try { r = await undo(); } catch (err) { r = { error: `The undo failed: ${err instanceof Error ? err.message : String(err)}` }; }
         print('error' in r ? chalk.yellow(`  ${r.error}`) : chalk.green(`  ✓ Undone: ${r.restored} restored, ${r.removed} removed${r.skipped ? `, ${r.skipped} left as you changed them` : ''}.`));
-      });
+      }).catch(() => {});
     },
 
     notice(line) {
@@ -249,8 +259,9 @@ export async function workspaceServeCommand(folderArg: string | undefined, opts:
     core: realCore, folder: checked.folder, device: stored, ui,
     defaults: { tools: [...PRESETS[preset as ToolPreset].tools], labelMode },
   });
-  process.once('SIGINT', onSignal);
-  process.once('SIGTERM', onSignal);
+  // The first Ctrl-C (or SIGTERM) stops serving and waits for the run's calls to drain and
+  // its checkpoint to be written; the second leaves at once.
+  const release = claimStopSignals(onSignal);
   const label = buildLabel(labelMode, stored.name, checked.folder);
   console.log(chalk.magenta(`\n  ◈ Serving ${label} to Cascade Cloud — Ctrl+C to stop`));
   console.log(chalk.dim(`  Folder: ${checked.folder} (its path is never sent) · server: ${stored.serverUrl}`));
@@ -272,8 +283,7 @@ export async function workspaceServeCommand(folderArg: string | undefined, opts:
     }
   } catch (err) { fail(err); } finally {
     svc.shutdown();
-    process.off('SIGINT', onSignal);
-    process.off('SIGTERM', onSignal);
+    release();
   }
 }
 

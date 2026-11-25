@@ -37,7 +37,7 @@ import { applySetup, runSetupWizard } from './setup/index.js';
 import { McpClient } from '../mcp/client.js';
 import { restoreTerminal } from './terminal.js';
 import {
-  ExitGuard, currentGuard, describe, guardEvents, previousEndingNotice, setCurrentGuard, signalExitCode, wasQuitByUser,
+  ExitGuard, currentGuard, describe, guardEvents, handOverStopSignal, previousEndingNotice, setCurrentGuard, signalExitCode, wasQuitByUser,
 } from './exit-guard.js';
 import { onCrashNote } from '../utils/crash-note.js';
 import { armFatalReport, takeFatalReport } from './fatal-report.js';
@@ -133,6 +133,8 @@ process.on('exit', (code) => {
  */
 function onStopSignal(signal: NodeJS.Signals): void {
   const guard = currentGuard();
+  // A command winding down on its own (serving a workspace or a browser) gets the signal.
+  if (!guard && handOverStopSignal(signal)) return;
   if (guard && signal === 'SIGINT') {
     guardEvents.emit('notice', 'Cascade was sent an interrupt signal by another program (most likely a command it was running) and carried on. To quit, press Ctrl+C twice or type /exit.');
     return;

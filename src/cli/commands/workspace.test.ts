@@ -1,6 +1,7 @@
 import { PassThrough } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import { createTerminalUi } from './workspace.js';
+import { PRESETS } from '../workspace/consent.js';
 import type { CallQuestion, ConsentQuestion } from '../workspace/service.js';
 
 function terminal(opts: { yesReadOnly?: boolean; undo?: () => Promise<any> } = {}) {
@@ -62,6 +63,23 @@ describe('the consent prompt', () => {
     expect(a?.tools).toContain('shell');
     expect(a?.labelMode).toBe('device');
     expect(t.printed.join('\n')).toMatch(/Type 1, 2 or 3/);
+  });
+
+  it('--tools sets the preset y takes, marked in the list; Enter is still a no', async () => {
+    const t = terminal();
+    const p = t.ui.askConsent(consent({ defaults: { tools: [...PRESETS.edit.tools], labelMode: 'folder' } }));
+    await tick();
+    expect(t.written()).toContain('or y for 2');
+    expect(t.printed.find((l) => l.includes('Read and edit files'))).toContain('(y)');
+    t.type('y');
+    await tick();
+    t.type('');
+    expect(await p).toEqual({ tools: [...PRESETS.edit.tools], labelMode: 'folder' });
+    const no = terminal();
+    const q = no.ui.askConsent(consent({ defaults: { tools: [...PRESETS.all.tools], labelMode: 'device' } }));
+    await tick();
+    no.type('');
+    expect(await q).toBeNull();
   });
 
   it('a lapsed question reads as a no, and is taken down', async () => {
@@ -138,6 +156,21 @@ describe('what a run shows when it ends', () => {
     await t.ui.idle();
     await tick();
     expect(t.printed.join('\n')).toContain('Undone: 1 restored, 1 removed');
+  });
+
+  it('a failed undo is said, and does not throw out of serving', async () => {
+    const undo = vi.fn(async () => { throw new Error('EACCES: permission denied'); });
+    const t = terminal({ undo });
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      t.ui.runEnded({ label: 'l', changed: 1, canUndo: true, undone: false, note: null });
+      await tick();
+      t.type('y');
+      await vi.waitFor(() => expect(t.printed.join('\n')).toContain('The undo failed: EACCES'));
+      await tick();
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally { process.off('unhandledRejection', unhandled); }
   });
 
   it('says how to undo later on a no, and offers nothing for a run that changed nothing', async () => {
