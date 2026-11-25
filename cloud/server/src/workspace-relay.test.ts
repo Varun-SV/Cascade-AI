@@ -410,7 +410,8 @@ describe('a run started with workspaceDeviceId', () => {
     await tools!.find((t) => t.name === 'file_read')!.execute({ path: 'secret.txt' }, opts);
     // A read changes nothing: no call event, and its result says only that it was answered.
     expect(socket.named('workspace:call')).toHaveLength(1);
-    expect(socket.named('workspace:result').at(-1)).toMatchObject({ tool: 'file_read', ok: true, worker: 'T3_1' });
+    // The write above may finish before or after this read: the read's result is found by its tool.
+    expect(socket.named('workspace:result').find((r) => (r as { tool?: string }).tool === 'file_read')).toMatchObject({ tool: 'file_read', ok: true, worker: 'T3_1' });
     expect(JSON.stringify(socket.events)).not.toContain('TOP SECRET');
     stop.abort();
     await result.catch(() => undefined);
