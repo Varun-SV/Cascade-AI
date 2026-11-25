@@ -1,0 +1,41 @@
+{
+  "$schema": "https://fundingjson.org/schema/v1.1.0.json",
+  "version": "v1.1.0",
+  "entity": {
+    "type": "individual",
+    "role": "owner",
+    "name": "Varun SV",
+    "email": "",
+    "phone": "",
+    "description": "Independent developer. I build and maintain Cascade AI in my own time as a hobby open-source project.",
+    "webpageUrl": {
+      "url": "https://github.com/Varun-SV"
+    }
+  },
+  "projects": [
+    {
+      "guid": "cascade-ai",
+      "name": "Cascade AI",
+      "description": "Cascade AI is an open-source, bring-your-own-key orchestrator for large language models. One prompt is split across a three-tier team of agents (T1 plans, T2 manages, T3 works) that use tools such as shell, files, git, web search and documents, and every run shows which model did each step and what it cost. It works with hosted providers and with local models through Ollama or any OpenAI-compatible server, and ships as a CLI, an SDK, a desktop app and a self-hostable web app. It is in early access: the orchestration controller is being reworked, and benchmarks will be published after that.",
+      "webpageUrl": {
+        "url": "https://github.com/Varun-SV/Cascade-AI"
+      },
+      "repositoryUrl": {
+        "url": "https://github.com/Varun-SV/Cascade-AI"
+      },
+      "licenses": ["spdx:MIT"],
+      "tags": ["artificial-intelligence", "developer-tools", "machine-learning", "productivity"]
+    }
+  ],
+  "funding": {
+    "channels": [
+      {
+        "guid": "github-sponsors",
+        "type": "payment-provider",
+        "address": "https://github.com/sponsors/Varun-SV",
+        "description": "GitHub Sponsors."
+      }
+    ],
+    "plans": []
+  }
+}
