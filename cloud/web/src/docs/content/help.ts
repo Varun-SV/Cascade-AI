@@ -16,7 +16,7 @@ export const HELP: DocPage[] = [
       h3('Do I pay Cascade for model use?'),
       p('No. You pay your providers directly, with your own keys. Cascade Cloud has a Free and a Pro plan that limit how many runs you can start each day and how much you can store. They are not a markup on models. See [Spend and budget](/docs/spend-and-budget).'),
       h3('Does Cascade store my API keys?'),
-      p('Not on its servers. On the web they stay in your browser and travel with each run you start. The desktop app keeps them in your system keychain and the CLI in a file only you can read. If you sync, the keys are encrypted on your device first, with a passphrase the server never sees. See [Providers and API keys](/docs/providers-and-keys).'),
+      p('Not on its servers. On the web they stay in your browser and travel with each run you start. The desktop app and the CLI keep them in `~/.cascade-ai/credentials.json`, a plain file only your user can read (not encrypted). If you sync, the keys are encrypted on your device first, with a passphrase the server never sees. See [Providers and API keys](/docs/providers-and-keys).'),
       h3('Can I use my Claude, ChatGPT or Copilot subscription instead of an API key?'),
       p('No. A subscription login belongs to the tool that issued it and cannot be used as an API key by another program. `cascade link` shows what is on your machine and says why such a login cannot be adopted. Use an API key from the provider.'),
       h3('How does Cascade save money?'),
@@ -127,7 +127,7 @@ export const HELP: DocPage[] = [
       ul(
         'Cascade is bring-your-own-key. Your provider keys are used to call the providers directly.',
         '**Web:** keys stay in your browser and travel with each run you start. The server has no place to store them.',
-        '**Desktop:** the system keychain. **CLI:** a file readable only by you.',
+        '**Desktop and CLI:** `~/.cascade-ai/credentials.json`, plain JSON readable only by your user (mode 0600), not encrypted. Anyone who can read your files as you can read it, so treat it like any other secret file.',
         '**Sync** is something you start. Keys are encrypted on your device with a passphrase only you know, and the server stores ciphertext it cannot read.',
       ),
       p('See [Providers and API keys](/docs/providers-and-keys).'),

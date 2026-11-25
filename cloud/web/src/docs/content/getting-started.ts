@@ -81,7 +81,7 @@ export const GETTING_STARTED: DocPage[] = [
       p('Every release is also listed on [GitHub releases](https://github.com/Varun-SV/Cascade-AI/releases/latest).'),
       h2('First run'),
       ol(
-        'Open the app. A short setup has you pick a provider, enter its key (kept in your system keychain), and choose a default workspace folder for new tasks. You can skip the folder and set it later. Ollama works too if you run models locally.',
+        'Open the app. A short setup has you pick a provider, enter its key (saved in `~/.cascade-ai/credentials.json`, readable only by you), and choose a default workspace folder for new tasks. You can skip the folder and set it later. Ollama works too if you run models locally.',
         'To use your Cascade account (synced keys, Cloud runs), sign in from Settings.',
         'Ask for something. Open the Cockpit to watch the tiers work.',
       ),

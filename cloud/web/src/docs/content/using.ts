@@ -22,7 +22,7 @@ export const USING: DocPage[] = [
       table(
         ['Surface', 'Where the key lives'],
         ['**Web app**', 'In this browser\'s own storage. It is sent to the server only as part of a run you start, to be used for that run, and the server has no place to save it. A different browser starts with no keys until you sync or add them.'],
-        ['**Desktop app**', 'In the system keychain.'],
+        ['**Desktop app**', 'In `~/.cascade-ai/credentials.json` (shared with the CLI): plain JSON readable only by your user (mode 0600), not encrypted.'],
         ['**CLI**', 'In `~/.cascade-ai/credentials.json`, a file readable only by your user (mode 600). One file for the whole machine, so every project uses the same keys.'],
         ['**Cascade server**', 'Not kept. The server stores no provider keys, apart from an encrypted sync blob it cannot read.'],
       ),
@@ -290,7 +290,7 @@ export const USING: DocPage[] = [
       table(
         ['Where', 'Tokens are stored'],
         ['Web (Cascade Cloud)', 'On the server, per account and per server, encrypted at rest. The server needs to read them to call the MCP server during a run.'],
-        ['Desktop app', 'In the system keychain.'],
+        ['Desktop app', 'In the app\'s data folder (`mcp-oauth/`), one file per server, readable only by you.'],
         ['CLI', 'In `~/.cascade-ai`, readable only by you.'],
       ),
       h2('From the CLI'),
