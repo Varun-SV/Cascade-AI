@@ -90,13 +90,20 @@ export function leaksPath(text: string, folder: string): boolean {
   return forms.some((f) => text.includes(f));
 }
 
+/** A git call's subcommand and arguments: the git tool takes the subcommand as `operation`. */
+function gitLine(input: Record<string, unknown>): string {
+  const op = typeof input['operation'] === 'string' ? input['operation'] : typeof input['command'] === 'string' ? input['command'] : '';
+  const args = Array.isArray(input['args']) ? input['args'].map(String) : [];
+  return [op, ...args].filter(Boolean).join(' ');
+}
+
 /** The call as the person is shown it: the command, or the path, short. */
 export function summarizeCall(tool: string, input: Record<string, unknown>): string {
   const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
   let text: string | null;
   if (tool === 'shell') text = str(input['command']);
   else if (tool === 'run_code') text = [str(input['language']), str(input['code'])].filter(Boolean).join('\n') || null;
-  else if (tool === 'git') text = ['git', ...(Array.isArray(input['args']) ? input['args'].map(String) : []), str(input['command']) ?? ''].join(' ').trim();
+  else if (tool === 'git') text = `git ${gitLine(input)}`.trim();
   else text = str(input['path']) ?? str(input['pattern']);
   // Where it runs: `rm -rf build` means different files in different folders.
   const cwd = tool === 'shell' || tool === 'git' || tool === 'run_code' ? str(input['cwd']) : null;
@@ -126,7 +133,7 @@ export function activityText(tool: string, input: Record<string, unknown>, folde
   let what: string;
   if (tool === 'shell') what = str(input['command']) ?? '';
   else if (tool === 'run_code') what = str(input['language']) ?? '';
-  else if (tool === 'git') what = ['git', ...(Array.isArray(input['args']) ? input['args'].map(String) : []), str(input['command']) ?? ''].join(' ').trim();
+  else if (tool === 'git') what = gitLine(input);
   else what = str(input['path']) ?? str(input['pattern']) ?? '';
   // The folder's own path is `.` wherever it appears: the line may be copied into a bug report.
   for (const f of [folder, folder.split(path.sep).join('/')].filter((x) => x.length > 3)) what = what.split(f).join('.');

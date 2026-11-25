@@ -344,7 +344,9 @@ describe('a served run', () => {
     expect(q(h).q.summary).toContain('(in packages/api)');
     q(h).resolve('deny');
     await p;
-    expect(summarizeCall('git', { args: ['reset', '--hard'], cwd: 'sub' })).toBe('git reset --hard  (in sub)');
+    expect(summarizeCall('git', { operation: 'reset', args: ['--hard'], cwd: 'sub' })).toBe('git reset --hard  (in sub)');
+    expect(summarizeCall('git', { operation: 'branch', args: ['-D', 'feature'] })).toBe('git branch -D feature');
+    expect(activityText('git', { operation: 'push', args: ['origin', 'main'] }, PROJ)).toBe('git push origin main');
     expect(summarizeCall('file_delete', { path: 'a', cwd: 'x' })).toBe('a');
   });
 

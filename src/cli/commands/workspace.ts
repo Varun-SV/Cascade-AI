@@ -63,6 +63,8 @@ export interface TerminalUiOptions {
   /** Asked for each run's undo when it ends with changes; the answer is the person's. */
   undo?: () => Promise<{ ok: true; restored: number; removed: number; skipped: number } | { error: string }>;
   print?: (line: string) => void;
+  /** Serving is stopping: no new undo question is asked, and one that is open is taken down. */
+  stopping?: AbortSignal;
 }
 
 /**
@@ -165,13 +167,19 @@ export function createTerminalUi(opts: TerminalUiOptions): WorkspaceUi & { idle(
       print(chalk.dim(`\n  ■ "${s.label}" ended${s.changed === null ? '' : s.changed === 0 ? ': it changed nothing' : `: it changed ${s.changed} file${s.changed === 1 ? '' : 's'}`}.`));
       if (s.note && !s.canUndo) print(chalk.dim(`  ${s.note}`));
       if (!s.canUndo || !opts.undo) return;
+      const later = (): void => print(chalk.dim('  Kept. To undo later, run `cascade` in that folder and type /undo.'));
+      // Stopping: no question that would hold the exit up.
+      if (opts.stopping?.aborted) { later(); return; }
       const undo = opts.undo;
       // Asked in its turn, after any question already open. Enter is no, and a lapse is no.
       const lapse = new AbortController();
       const timer = setTimeout(() => lapse.abort(), 120_000);
+      const onStop = (): void => lapse.abort();
+      opts.stopping?.addEventListener('abort', onStop, { once: true });
       void ask<boolean>(() => {}, '  Undo what it changed now? [y/N] ', lapse.signal, (text, done) => done(/^\s*y(es)?\s*$/i.test(text)), false).then(async (yes) => {
         clearTimeout(timer);
-        if (!yes) { print(chalk.dim('  Kept. To undo later, run `cascade` in that folder and type /undo.')); return; }
+        opts.stopping?.removeEventListener('abort', onStop);
+        if (!yes) { later(); return; }
         // A failed restore (a file it can't write, say) is said here; serving goes on.
         let r: Awaited<ReturnType<typeof undo>>;
         try { r = await undo(); } catch (err) { r = { error: `The undo failed: ${err instanceof Error ? err.message : String(err)}` }; }
@@ -252,6 +260,7 @@ export async function workspaceServeCommand(folderArg: string | undefined, opts:
   };
   const ui = createTerminalUi({
     onInterrupt: onSignal,
+    stopping: stopping.signal,
     ...(opts.yesReadOnly ? { yesReadOnly: true } : {}),
     undo: () => svc!.undoLastRun(),
   });

@@ -4,7 +4,7 @@ import { createTerminalUi } from './workspace.js';
 import { PRESETS } from '../workspace/consent.js';
 import type { CallQuestion, ConsentQuestion } from '../workspace/service.js';
 
-function terminal(opts: { yesReadOnly?: boolean; undo?: () => Promise<any> } = {}) {
+function terminal(opts: { yesReadOnly?: boolean; undo?: () => Promise<any>; stopping?: AbortSignal } = {}) {
   const input = new PassThrough();
   const output = new PassThrough();
   const printed: string[] = [];
@@ -13,7 +13,7 @@ function terminal(opts: { yesReadOnly?: boolean; undo?: () => Promise<any> } = {
   const onInterrupt = vi.fn();
   const ui = createTerminalUi({
     io: { input, output, terminal: false }, onInterrupt, print: (l) => printed.push(l),
-    ...(opts.yesReadOnly ? { yesReadOnly: true } : {}), ...(opts.undo ? { undo: opts.undo } : {}),
+    ...(opts.yesReadOnly ? { yesReadOnly: true } : {}), ...(opts.undo ? { undo: opts.undo } : {}), ...(opts.stopping ? { stopping: opts.stopping } : {}),
   });
   const type = (text: string): void => { input.write(`${text}\n`); };
   return { ui, type, printed, written: () => written, onInterrupt };
@@ -156,6 +156,22 @@ describe('what a run shows when it ends', () => {
     await t.ui.idle();
     await tick();
     expect(t.printed.join('\n')).toContain('Undone: 1 restored, 1 removed');
+  });
+
+  it('stopping takes an open undo question down, and asks no new one', async () => {
+    const undo = vi.fn(async () => ({ ok: true as const, restored: 1, removed: 0, skipped: 0 }));
+    const stop = new AbortController();
+    const t = terminal({ undo, stopping: stop.signal });
+    t.ui.runEnded({ label: 'l', changed: 1, canUndo: true, undone: false, note: null });
+    await tick();
+    stop.abort();
+    await t.ui.idle();
+    expect(undo).not.toHaveBeenCalled();
+    expect(t.printed.join('\n')).toContain('/undo');
+    const before = t.written();
+    t.ui.runEnded({ label: 'l2', changed: 1, canUndo: true, undone: false, note: null });
+    await t.ui.idle();
+    expect(t.written()).toBe(before);
   });
 
   it('a failed undo is said, and does not throw out of serving', async () => {
