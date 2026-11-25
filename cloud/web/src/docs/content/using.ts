@@ -1,4 +1,5 @@
 import type { DocPage } from './types.js';
+import { LOCAL_MODELS } from './local-models.js';
 import { code, h2, note, ol, p, table, tip, ul, warn } from './dsl.js';
 
 const S = 'using';
@@ -15,7 +16,7 @@ export const USING: DocPage[] = [
       ul(
         '**Anthropic** (Claude), **OpenAI**, **Google Gemini** and **Azure OpenAI** (which also needs its endpoint and deployment name).',
         '**OpenAI-compatible endpoints:** any service that speaks the OpenAI API, given a base URL and a key. Groq, OpenRouter, DeepSeek, xAI, Mistral, Together and Fireworks all work this way.',
-        '**Ollama and other local servers** (the CLI and desktop app) for models on your own machine.',
+        '**Ollama and other local servers** (the CLI and desktop app) for models on your own machine. See [Local models](/docs/local-models).',
       ),
       p('Once a key is set, Cascade asks that provider which models it serves, so you only ever choose from models that exist for you. Each tier can be pinned to a model or left on **Cascade Auto** ([How tiers route](/docs/how-tiers-route)).'),
       h2('Where keys are kept'),
@@ -44,6 +45,7 @@ export const USING: DocPage[] = [
       p('A browser can only send an API key. A credential that cannot be used from a browser (a bearer token for a gateway, for instance) is skipped on the web, and the sync panel tells you which one and where it still works.'),
     ],
   },
+  LOCAL_MODELS,
   {
     slug: 'how-tiers-route',
     section: S,

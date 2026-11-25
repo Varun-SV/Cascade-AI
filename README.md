@@ -209,6 +209,8 @@ Models are discovered from each provider, so new releases compete in routing wit
 
 ### Local models (Ollama and OpenAI-compatible endpoints)
 
+Step-by-step setup for Ollama, LM Studio, llama.cpp and vLLM is in the docs: [Local models](https://cascadeai.in/docs/local-models).
+
 ```bash
 ollama pull llama3.2:3b         # a good T3 worker
 cascade doctor                  # Cascade finds Ollama at localhost:11434
