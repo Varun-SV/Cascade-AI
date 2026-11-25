@@ -52,9 +52,10 @@ export const GETTING_STARTED: DocPage[] = [
       p('The controls beside the message box apply to the run you are about to send:'),
       ul(
         '**Tools menu:** [web search](/docs/web-search), the **Browser** (your own Chrome, see [Browser relay](/docs/browser-relay)) where your server offers it, and your [connectors](/docs/connectors-and-mcp).',
-        '**Mode menu:** routing (Auto, Quality or Fast), a single tier, the [thinking level](/docs/thinking-levels), and **Fast answer**.',
+        '**Mode menu** (the button at the bottom right): routing (Auto, Quality or Fast), a single tier, and **Fast answer**.',
+        '**Thinking:** the brain button sets the [thinking level](/docs/thinking-levels). It shows the level when it is not Auto.',
         '**Plus menu:** attach images and documents, and pick a [skill](/docs/skills).',
-        '**Environment:** appears when your server has workspaces turned on. It lets a run work in a folder on your own computer. See [Workspaces](/docs/workspaces).',
+        '**Environment:** where this chat works. It is always there when you are signed in. With workspaces turned on it lets a run work in a folder on your own computer; with them off its menu says so, and runs work in the Cloud only. See [Workspaces](/docs/workspaces).',
       ),
       h2('Next steps'),
       ul(

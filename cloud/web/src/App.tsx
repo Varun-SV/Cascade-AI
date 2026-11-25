@@ -429,9 +429,13 @@ export default function App() {
             thinkingUnavailable={providers.length > 0 && providers.every((p) => p.type === 'azure')}
             thinking={chat.thinking}
             onThinkingChange={chat.setThinking}
+            // Always there once the server's config is known: with workspaces off the button's menu
+            // says so, rather than the feature looking missing.
             workspace={workspace.enabled ? {
               devices: workspace.devices, known: workspace.devicesKnown, loading: workspace.loading, failed: workspace.failed,
               selected: workspace.selected, onSelect: workspace.select, onOpen: workspace.refresh,
+            } : config ? {
+              devices: [], known: true, loading: false, selected: undefined, onSelect: () => {}, onOpen: () => {}, unavailable: true,
             } : undefined}
             workspaceRun={workspace.enabled ? { view: workspace.view, awaitingConsent: workspace.awaitingConsent, awaitingDeviceName: workspace.awaitingDeviceName } : undefined}
             skills={skills}
@@ -503,6 +507,7 @@ export default function App() {
           <SettingsModal
             user={user}
             browserRelay={config?.browserRelay === true}
+            workspaceRelay={config?.workspaceRelay === true}
             onBrowserPrefsChange={setBrowserPrefs}
             onClose={() => setShowSettings(false)}
             onOpenSkills={() => setShowSkills(true)}

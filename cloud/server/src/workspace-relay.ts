@@ -27,7 +27,7 @@ import {
   type RemoteWorkspace,
 } from '#cascade-ai';
 import { type AuthedRequest, sessionMiddleware } from './auth/session.js';
-import { createBrowserRelay } from './browser-relay.js';
+import { createBrowserRelay, deviceManagementRoutes } from './browser-relay.js';
 import type { CloudStore, RelayDeviceKind } from './db.js';
 
 export const WORKSPACE_CONTROL_PATH = '/api/workspace-relay/control';
@@ -39,7 +39,7 @@ const WORKSPACE_KINDS: readonly RelayDeviceKind[] = ['desktop'];
 export interface WorkspaceRelay {
   readonly hub: RelayHub;
   readonly identity: RelayIdentity;
-  /** The signed-in user's own desktop devices, and whether each is serving workspaces now. */
+  /** The signed-in user's own devices that can serve a folder, and whether each is serving now. */
   routes(app: Express, sessionSecret: string): void;
   /** Takes the two public WebSocket paths on this server. */
   attach(server: http.Server): void;
@@ -69,9 +69,12 @@ export function createWorkspaceRelay(opts: { dataDir: string; store: CloudStore;
         res.json({
           devices: store.listRelayDevices(userId)
             .filter((d) => WORKSPACE_KINDS.includes(d.kind))
-            .map((d) => ({ id: d.id, name: d.name, online: base.hub.deviceOnline(userId, d.id) })),
+            .map((d) => ({ id: d.id, name: d.name, kind: d.kind, createdAt: d.createdAt, lastSeenAt: d.lastSeenAt, online: base.hub.deviceOnline(userId, d.id) })),
         });
       });
+      // Renaming and removing, for a server that has workspaces on and the browser relay off
+      // (with both on, Settings uses the browser relay's, which also ends a workspace here).
+      deviceManagementRoutes(app, { path: WORKSPACE_DEVICES_PATH, store, hub: base.hub, limited, auth, now: opts.now ?? Date.now, kinds: WORKSPACE_KINDS });
     },
   };
 }

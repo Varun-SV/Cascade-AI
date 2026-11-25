@@ -167,6 +167,44 @@ describe('registering a device', () => {
     expect(await list(alice.cookie)).toEqual([]);
   });
 
+  it('a user renames only their own devices, to a plain name', async () => {
+    const s = await server();
+    const alice = s.user('alice');
+    const bob = s.user('bob');
+    const a = await s.register(alice.cookie, 'Laptop');
+    const url = `/api/browser-relay/devices/${a.body.device!.id}`;
+    const list = async () => ((await (await s.api('/api/browser-relay/devices', { cookie: alice.cookie })).json()) as { devices: { name: string }[] }).devices.map((d) => d.name);
+    expect((await s.api(url, { method: 'PATCH', body: { name: 'x' } })).status).toBe(401);
+    expect((await s.api(url, { method: 'PATCH', cookie: bob.cookie, body: { name: 'Bob took it' } })).status).toBe(404);
+    expect((await s.api(url, { method: 'PATCH', cookie: alice.cookie, body: { name: '  ' } })).status).toBe(400);
+    expect((await s.api(url, { method: 'PATCH', cookie: alice.cookie, body: {} })).status).toBe(400);
+    expect(await list()).toEqual(['Laptop']);
+    const ok = await s.api(url, { method: 'PATCH', cookie: alice.cookie, body: { name: ` Desk\u0000 ${'x'.repeat(200)}` } });
+    expect(ok.status).toBe(200);
+    const [name] = await list();
+    expect(name!.length).toBe(80);
+    expect(name!.startsWith('Desk')).toBe(true);
+    expect(name).not.toContain('\u0000');
+    expect((await s.api(`/api/browser-relay/devices/dev_nope`, { method: 'PATCH', cookie: alice.cookie, body: { name: 'z' } })).status).toBe(404);
+  });
+
+  it('removing a device tells the other relay to stop serving it', async () => {
+    const s = await server();
+    const alice = s.user('alice');
+    const a = await s.register(alice.cookie, 'Desk', 'desktop');
+    const removed: string[] = [];
+    const app = (await import('express')).default();
+    app.use((await import('express')).default.json());
+    s.relay.routes(app, SECRET, { onDeviceRemoved: (id) => removed.push(id) });
+    const srv = app.listen(0, '127.0.0.1');
+    cleanup.push(async () => { srv.close(); });
+    await new Promise<void>((r) => srv.once('listening', r));
+    const port = (srv.address() as AddressInfo).port;
+    const res = await fetch(`http://127.0.0.1:${port}/api/browser-relay/devices/${a.body.device!.id}`, { method: 'DELETE', headers: { Cookie: alice.cookie } });
+    expect(res.status).toBe(200);
+    expect(removed).toEqual([a.body.device!.id]);
+  });
+
   it('has a limit per user', async () => {
     const s = await server();
     const alice = s.user('alice');

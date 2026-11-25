@@ -62,7 +62,11 @@ async function server(opts: { browserRelay?: boolean } = {}) {
     const u = store.upsertUser({ provider: 'dev', providerId: name, email: null, name, avatar: null });
     return { id: u.id, cookie: `${SESSION_COOKIE_NAME}=${createSessionToken({ userId: u.id } as never, SECRET)}` };
   };
-  const api = (pathname: string, cookie?: string) => fetch(`http://127.0.0.1:${port}${pathname}`, { headers: cookie ? { Cookie: cookie } : {} });
+  const api = (pathname: string, cookie?: string, init: { method?: string; body?: unknown } = {}) => fetch(`http://127.0.0.1:${port}${pathname}`, {
+    method: init.method ?? 'GET',
+    headers: { ...(cookie ? { Cookie: cookie } : {}), ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+    ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
+  });
   /** A device as it would exist on a user's machine: its own key pair, registered to the user. */
   const register = (userId: string, name: string, kind: RelayDeviceKind = 'desktop') => {
     const key = generateRelayKey();
@@ -180,9 +184,30 @@ describe('listing the desktops', () => {
     const raw = await res.text();
     const body = JSON.parse(raw) as { devices: Array<Record<string, unknown>> };
     expect(body.devices.map((d) => [d.name, d.online]).sort()).toEqual([['Home PC', false], ['Work PC', true]]);
-    expect(body.devices.every((d) => Object.keys(d).sort().join() === 'id,name,online')).toBe(true);
+    expect(body.devices.every((d) => Object.keys(d).sort().join() === 'createdAt,id,kind,lastSeenAt,name,online')).toBe(true);
+    expect(body.devices.every((d) => d.kind === 'desktop')).toBe(true);
     expect(body.devices.map((d) => d.id).sort()).toEqual([online.device.id, offline.device.id].sort());
     expect(raw).not.toMatch(/publicKey|PRIVATE|path|folder/i);
+  });
+
+  it("renames and removes only the user's own workspace devices", async () => {
+    const w = await server();
+    const alice = w.user('alice');
+    const bob = w.user('bob');
+    const pc = w.register(alice.id, 'Work PC');
+    const cli = w.register(alice.id, 'A CLI', 'cli');
+    const url = (id: string) => `${WORKSPACE_DEVICES_PATH}/${id}`;
+    expect((await w.api(url(pc.device.id), undefined, { method: 'PATCH', body: { name: 'x' } })).status).toBe(401);
+    expect((await w.api(url(pc.device.id), bob.cookie, { method: 'PATCH', body: { name: 'Mine now' } })).status).toBe(404);
+    expect((await w.api(url(pc.device.id), alice.cookie, { method: 'PATCH', body: { name: '   ' } })).status).toBe(400);
+    expect((await w.api(url(pc.device.id), alice.cookie, { method: 'PATCH', body: { name: '  Study PC \n' } })).status).toBe(200);
+    expect(w.store.getRelayDevice(pc.device.id)!.name).toBe('Study PC');
+    // This relay serves only the kinds that can serve a folder: it has no say over a CLI.
+    expect((await w.api(url(cli.device.id), alice.cookie, { method: 'PATCH', body: { name: 'y' } })).status).toBe(404);
+    expect((await w.api(url(pc.device.id), bob.cookie, { method: 'DELETE' })).status).toBe(404);
+    expect((await w.api(url(pc.device.id), alice.cookie, { method: 'DELETE' })).status).toBe(200);
+    expect(w.store.getRelayDevice(pc.device.id)).toBeNull();
+    expect((await w.api(url(pc.device.id), alice.cookie, { method: 'PATCH', body: { name: 'gone' } })).status).toBe(404);
   });
 
   it('is absent when the relay is off: no route exists to answer', async () => {

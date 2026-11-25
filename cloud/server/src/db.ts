@@ -2070,6 +2070,11 @@ export class CloudStore {
     return this.db.prepare('UPDATE relay_devices SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL').run(now, id, userId).changes === 1;
   }
 
+  /** Renames one of this user's live devices. False when it isn't theirs or is revoked. */
+  renameRelayDevice(userId: string, id: string, name: string): boolean {
+    return this.db.prepare('UPDATE relay_devices SET name = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL').run(name, id, userId).changes === 1;
+  }
+
   touchRelayDevice(id: string, now: number): void {
     this.db.prepare('UPDATE relay_devices SET last_seen_at = ? WHERE id = ?').run(now, id);
   }
