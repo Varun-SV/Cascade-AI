@@ -196,8 +196,11 @@ Cascade is **bring your own keys**: it never resells model access.
 | Azure OpenAI | Any number of deployments, across resources |
 | OpenAI-compatible endpoints | OpenRouter, Groq, DeepSeek, xAI, Mistral, Together, Fireworks, llama.cpp, vLLM, LM Studio and more |
 | Ollama | Local models |
+| **ChatGPT plan** (CLI and desktop only) | Your paid ChatGPT plan through OpenAI's official Sign in with ChatGPT: no API key, and calls show as $0 (tokens are still counted). `cascade chatgpt signin`, or **Continue with ChatGPT** in Settings. |
 
 Models are discovered from each provider, so new releases compete in routing without a Cascade update.
+
+**Your ChatGPT plan (CLI and desktop).** With a paid ChatGPT plan you can run eligible requests on it instead of an API key. `cascade chatgpt signin` opens your browser (OpenAI's own sign-in; Cascade registers its own client and never reads another tool's login). `cascade chatgpt status` shows the account and when its token expires, `accounts` switches between several, `signout` revokes the session, and `export` / `import` move the sign-in to a machine with no browser. The models are the ones your account offers. Plus has a five-hour limit shared with every app you use your plan in; when you reach a limit Cascade tells you and links to *Manage usage* (chatgpt.com/settings/usage), and never switches to another billing path by itself. **Not available in the web app** (hosted apps need OpenAI's commercial partner program, and the sign-in forbids tokens in browser storage). Tokens live in `~/.cascade-ai/chatgpt-accounts.json` (mode 0600), not in the keys file and not in sync.
 
 **Where keys live**
 

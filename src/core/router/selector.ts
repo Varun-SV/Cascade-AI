@@ -291,6 +291,9 @@ export class ModelSelector {
     if (this.discovered.size) {
       const tierProviders = new Set<ProviderType>();
       for (const key of priority) { const m = MODELS[key]; if (m) tierProviders.add(m.provider); }
+      // The plan's models have no place in the bundled chains; when signed in
+      // they are the account's own list, and compete as discovered models.
+      if (this.availableProviders.has('chatgpt')) tierProviders.add('chatgpt');
       const have = new Set(candidates.map((c) => c.id));
       for (const model of this.availableModels.values()) {
         if (have.has(model.id)) continue;
@@ -340,7 +343,7 @@ export class ModelSelector {
     if (overrideModelId.includes(':')) {
       const parts = overrideModelId.split(':');
       const prefix = parts[0]!.toLowerCase();
-      const validProviders = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama'];
+      const validProviders = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama', 'chatgpt'];
       if (validProviders.includes(prefix)) {
         providerStr = prefix as ProviderType;
         actualId = parts.slice(1).join(':');
@@ -356,6 +359,12 @@ export class ModelSelector {
     const registered = this.availableModels.get(actualId);
     if (registered && (!providerStr || registered.provider === providerStr)) {
       return registered;
+    }
+    // ChatGPT plan models are registered as `chatgpt:<slug>`, because a slug
+    // can equal an OpenAI API model id and ids are the key of this map.
+    if (providerStr === 'chatgpt') {
+      const plan = this.availableModels.get(`chatgpt:${actualId}`);
+      if (plan) return plan;
     }
 
     if (!providerStr) {
@@ -379,8 +388,9 @@ export class ModelSelector {
       // the catalogue has never heard of used to be born at $0/$0, which read
       // as "free" everywhere downstream.
       const dynamicModel: ModelInfo = withResolvedPricing({
-        id: actualId,
+        id: providerStr === 'chatgpt' ? `chatgpt:${actualId}` : actualId,
         name: actualId,
+        ...(providerStr === 'chatgpt' ? { baseModelId: actualId } : {}),
         provider: providerStr,
         contextWindow: 128_000,
         isVisionCapable: false,

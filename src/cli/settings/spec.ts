@@ -26,7 +26,7 @@ export const SECTIONS: ReadonlyArray<{ id: SectionId; title: string }> = [
 ];
 
 /** Something a setting does rather than a value it holds; the REPL carries it out. */
-export type ActionId = 'models' | 'login' | 'logout' | 'sync-push' | 'sync-pull' | 'mcp' | 'checkpoints';
+export type ActionId = 'models' | 'login' | 'logout' | 'sync-push' | 'sync-pull' | 'mcp' | 'checkpoints' | 'chatgpt-signin' | 'chatgpt-signout' | 'chatgpt-status';
 
 export interface SettingItem {
   /** What /settings <id> <value> names it by. */
@@ -89,6 +89,10 @@ export const SETTINGS: SettingItem[] = [
       else c.providers = c.providers.filter((p) => p.type !== type);
     },
   })),
+  // ChatGPT plan (Sign in with ChatGPT). Distinct from the Cascade Cloud sign-in under Account & sync.
+  { id: 'chatgpt', section: 'models', label: 'ChatGPT plan: Continue with ChatGPT', help: 'Use your ChatGPT plan for eligible requests, with usage included in your plan. Opens your browser. Not the same as signing in to Cascade Cloud.', kind: 'action', action: 'chatgpt-signin' },
+  { id: 'chatgpt-status', section: 'models', label: 'ChatGPT plan: status and usage', help: 'Which ChatGPT account is active, whether plan usage is on, and where to manage usage (https://chatgpt.com/settings/usage).', kind: 'action', action: 'chatgpt-status' },
+  { id: 'chatgpt-signout', section: 'models', label: 'ChatGPT plan: sign out', help: 'Revoke the ChatGPT session and clear its tokens on this machine.', kind: 'action', action: 'chatgpt-signout' },
   { id: 'ollama', section: 'models', label: 'Ollama address', help: 'Where your local Ollama runs, e.g. http://localhost:11434. Empty: not used.', kind: 'text',
     get: (c) => c.providers.find((p) => p.type === 'ollama')?.baseUrl,
     set: (c, v) => {

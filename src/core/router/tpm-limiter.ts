@@ -15,6 +15,8 @@ export const DEFAULT_PROVIDER_TPM: Record<ProviderType, number> = {
   azure: 30_000,
   'openai-compatible': 30_000,
   ollama: Number.POSITIVE_INFINITY,
+  // The plan's own limits are enforced server-side (a usage-limit error), not by a token bucket here.
+  chatgpt: Number.POSITIVE_INFINITY,
 };
 
 interface Bucket {

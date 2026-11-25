@@ -86,6 +86,7 @@ export const GETTING_STARTED: DocPage[] = [
         'To use your Cascade account (synced keys, Cloud runs), sign in from Settings.',
         'Ask for something. Open the Cockpit to watch the tiers work.',
       ),
+      p('To use your paid ChatGPT plan instead of an API key, open Settings, then Providers, then **Continue with ChatGPT**. Your browser opens to approve it. The app then shows **Using ChatGPT plan** with a **Manage usage** link by the model picker, and a clear message with **Manage usage** if you reach a limit. See [ChatGPT plan](/docs/providers-and-keys#chatgpt-plan).'),
       note('The app keeps settings in tabs: Providers, Models, Budget, Connectors, Cloud runs, Workspaces, Advanced, Data, Appearance and Updates.', 'Settings'),
       h2('Cloud runs and Workspaces'),
       p('Two settings let the desktop app serve your Cascade Cloud account. Both are off until you turn them on and both use one pairing of this computer to your account:'),
@@ -126,7 +127,8 @@ cascade link            # reuse credentials from other AI tools where possible`)
       ),
       p('`cascade link` goes further. It lists the credentials it finds on the machine and adopts the usable ones: also `GEMINI_API_KEY`, and the keys of OpenAI-compatible services, each together with its endpoint: `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `MISTRAL_API_KEY`, `TOGETHER_API_KEY` and `FIREWORKS_API_KEY`. For example `cascade link groq`.'),
       p('Inside the REPL, `/settings` opens a panel for keys and everything else ([the settings panel](/docs/settings-panel)), and `/model` picks a provider and model for a tier.'),
-      warn('Subscription logins from other tools (for example a Claude Code or ChatGPT sign-in) cannot be used as API keys. `cascade link` shows what it finds and says why such a login cannot be adopted.', 'Subscriptions are not API keys'),
+      warn('Subscription logins from other tools (for example a Claude Code or a Codex sign-in) cannot be used as API keys. `cascade link` shows what it finds and says why such a login cannot be adopted.', 'Subscriptions are not API keys'),
+      p('The exception is your own ChatGPT plan, through OpenAI\'s official sign-in: `cascade chatgpt signin` (CLI and desktop only). See [Providers and API keys](/docs/providers-and-keys#chatgpt-plan).'),
       h2('Running a prompt'),
       code(`cascade                          # interactive
 cascade run "summarise this repo" # one prompt, then exit

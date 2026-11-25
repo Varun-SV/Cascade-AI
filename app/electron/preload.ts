@@ -190,6 +190,21 @@ contextBridge.exposeInMainWorld('cascade', {
     },
   },
 
+  // ChatGPT plan usage (chatgpt-ipc.ts). Accounts as emails and states only: the
+  // tokens stay in the main process.
+  chatgpt: {
+    status: () => ipcRenderer.invoke('chatgpt:status'),
+    signIn: (a?: { accountId?: string; enablePlan?: boolean }) => ipcRenderer.invoke('chatgpt:signIn', a),
+    cancel: () => ipcRenderer.invoke('chatgpt:cancel'),
+    signOut: (a?: { accountId?: string }) => ipcRenderer.invoke('chatgpt:signOut', a),
+    switch: (a: { accountId: string }) => ipcRenderer.invoke('chatgpt:switch', a),
+    dismissWelcome: () => ipcRenderer.invoke('chatgpt:dismissWelcome'),
+    manageUsage: () => ipcRenderer.invoke('chatgpt:manageUsage'),
+    onChanged: (cb: (v: unknown) => void) => {
+      ipcRenderer.on('chatgpt:changed', (_e, v) => cb(v));
+    },
+  },
+
   // A folder on this computer as a cloud run's workspace (workspace-ipc.ts).
   workspace: {
     status: () => ipcRenderer.invoke('workspace:status'),

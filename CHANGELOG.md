@@ -5,6 +5,17 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.99.13 - 2026-11-25
+
+### Added
+- **Use your ChatGPT plan in the CLI and the desktop app, through OpenAI's official "Sign in with ChatGPT".** With a paid ChatGPT plan, eligible requests can run on it instead of an API key. Run `cascade chatgpt signin` (or **Continue with ChatGPT** in `/settings`, the setup wizard, or the desktop app's Settings, then Providers): your browser opens, you approve plan usage, and Cascade saves the sign-in. Cascade registers its own client with OpenAI and never reads another tool's login (not Codex's). The sign-in is checked as the flow requires: PKCE, state and nonce, the ID token's signature against OpenAI's published keys, its issuer, audience and expiry, and the granted scopes. It listens on `127.0.0.1` only (port 1455 when free). The models are the ones your account lists, named `chatgpt:<model>`; Auto can use them, and plan calls are shown as $0 while their tokens are still counted.
+- **`cascade chatgpt status | accounts | signout | export | import`.** `status` shows the active account, whether plan usage is on and when the token expires; `accounts` lists and switches between several accounts (two registrations never share tokens, even with the same email); `signout` revokes the session with OpenAI and clears the tokens here (and says so when it could not confirm the revocation). For a machine with no browser, sign in elsewhere, then `cascade chatgpt export --stdout | ssh host 'cascade chatgpt import -'`: the file holds credentials, so use a secure channel; the importing machine keeps its own host ID and renews the sign-in from then on.
+- **"Using ChatGPT plan" in the CLI status bar and the desktop composer, with Manage usage.** The first sign-in shows "You're using your ChatGPT plan" once. When you reach a usage limit, Cascade says so and points to chatgpt.com/settings/usage (the desktop app has **Manage usage** as the main button), and does not retry in a loop or switch billing path by itself.
+- **The sign-in is kept in `~/.cascade-ai/chatgpt-accounts.json`** (mode 0600, written atomically), with a per-machine host ID in `chatgpt-host.json`. The CLI and the desktop app can run at once: the access token is renewed before it expires by one process at a time (a lock file), so the rotating refresh token is never spent twice, and a network error or a 5xx never erases a sign-in. The desktop app signs in from its main process and the window never receives a token.
+
+### Changed
+- **Docs and README:** providers and keys, the CLI reference, the desktop app and the FAQ describe the ChatGPT plan option: paid plans (Plus has a five-hour limit shared with your other apps), CLI and desktop only. The FAQ answer on subscriptions now says ChatGPT: yes there, Claude and Copilot: no.
+
 ## 0.99.12 - 2026-11-25
 
 ### Added

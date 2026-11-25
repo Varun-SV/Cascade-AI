@@ -24,6 +24,8 @@ import {
 import { SettingsView } from './views/SettingsView.js';
 import { ApprovalModal } from './components/ApprovalModal.js';
 import { RelayConsentModal } from './components/RelayConsentModal.js';
+import { ChatGptNotices } from './components/ChatGptPlan.js';
+import { isUsageLimitMessage, type PlanViewState } from './lib/chatgpt-plan.js';
 import { RelayRunBanner } from './components/RelayRunBanner.js';
 import { WorkspaceConsentModal } from './components/WorkspaceConsentModal.js';
 import { WorkspaceServingBanner } from './components/WorkspaceServingBanner.js';
@@ -169,6 +171,16 @@ declare global {
         onAsk(cb: (a: { id: number; runId: string; expiresAt: number; sites?: string[] }) => void): void;
         onAskClosed(cb: (a: { id: number }) => void): void;
         onStatus(cb: (s: RelayStatus) => void): void;
+      };
+      chatgpt?: {
+        status(): Promise<PlanViewState>;
+        signIn(a?: { accountId?: string; enablePlan?: boolean }): Promise<{ ok: true; planUsageEnabled: boolean; showWelcome: boolean; view: PlanViewState } | { ok: false; error: string }>;
+        cancel(): Promise<{ ok: true }>;
+        signOut(a?: { accountId?: string }): Promise<{ ok: true; message: string; revocationConfirmed: boolean; view: PlanViewState } | { ok: false; error: string }>;
+        switch(a: { accountId: string }): Promise<{ ok: true; needsSignIn: boolean; view: PlanViewState } | { ok: false; error: string }>;
+        dismissWelcome(): Promise<{ ok: true }>;
+        manageUsage(): Promise<{ ok: true }>;
+        onChanged(cb: (v: PlanViewState) => void): void;
       };
       workspace?: {
         status(): Promise<WorkspaceStatus>;
@@ -472,6 +484,8 @@ export function App() {
       void mirrorAndConfirm(cloudMirror, data, (id) => socket.emit('run:accounting:ack', { id }));
     });
     socket.on('session:error', (data: { sessionId?: string; error?: string }) => {
+      // The plan's own limit: say so with Manage usage first, besides the run's error line.
+      if (isUsageLimitMessage(data?.error)) window.dispatchEvent(new CustomEvent('cascade:chatgpt-usage-limit'));
       dispatch(setBackendError(data?.error ? `Run failed: ${data.error}` : 'Run failed — check your model/key and try again.'));
       dispatch(clearApprovals());
       dispatch(setPendingPlan(null));
@@ -588,6 +602,7 @@ export function App() {
       {showSettings && <SettingsView socket={socketRef.current} />}
       <ApprovalModal socket={socketRef.current} />
       <RelayConsentModal />
+      <ChatGptNotices />
       <RelayRunBanner />
       <WorkspaceConsentModal />
       <WorkspaceServingBanner />

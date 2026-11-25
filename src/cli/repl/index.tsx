@@ -47,6 +47,8 @@ import { GeminiProvider } from '../../providers/gemini.js';
 import { AnthropicProvider } from '../../providers/anthropic.js';
 import { OllamaProvider } from '../../providers/ollama.js';
 import { OpenAICompatibleProvider } from '../../providers/openai-compatible.js';
+import { ChatGptProvider } from '../../providers/chatgpt.js';
+import { chatGptStatusText, signInChatGpt, signOutChatGpt, usesChatGptPlan } from '../commands/chatgpt.js';
 import type { BaseProvider } from '../../providers/base.js';
 import { getTheme } from '../themes/index.js';
 import { SlashCommandRegistry } from '../slash/index.js';
@@ -315,6 +317,7 @@ async function refreshModelCache(store: MemoryStore, providers: CascadeConfig['p
       else if (provider.type === 'anthropic') instance = new AnthropicProvider(provider, dummyModel);
       else if (provider.type === 'ollama') instance = new OllamaProvider(provider, dummyModel);
       else if (provider.type === 'openai-compatible') instance = new OpenAICompatibleProvider(provider, dummyModel);
+      else if (provider.type === 'chatgpt') instance = new ChatGptProvider(provider, dummyModel);
       else if (provider.type === 'azure') {
         const { AzureOpenAIProvider } = await import('../../providers/azure.js');
         instance = new AzureOpenAIProvider(provider, dummyModel);
@@ -771,6 +774,18 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         return signInHere(progress);
       }
       case 'logout': return signOutHere();
+      case 'chatgpt-signin': {
+        const text = await signInChatGpt(progress);
+        // The plan row is derived from the sign-in: take it into the live session.
+        if (text.startsWith('✓')) await reloadConfig().catch(() => undefined);
+        return text;
+      }
+      case 'chatgpt-signout': {
+        const text = await signOutChatGpt();
+        await reloadConfig().catch(() => undefined);
+        return text;
+      }
+      case 'chatgpt-status': return chatGptStatusText();
       case 'sync-push': return pushSettings(workspacePath, passphrase ?? '');
       case 'sync-pull': {
         const out = await pullSettings(workspacePath, passphrase ?? '');
@@ -1693,6 +1708,7 @@ export function Repl({ config, workspacePath, themeName, initialPrompt, identity
         tokens={state.totalTokens}
         costUsd={state.totalCostUsd}
         unpricedCalls={Object.values(state.unpricedByModel).reduce((a, n) => a + n, 0)}
+        usingChatGptPlan={usesChatGptPlan(config)}
         savedUsd={state.savedUsd}
         workspacePath={workspacePath}
         isExecuting={state.isExecuting}
@@ -1990,7 +2006,7 @@ async function validateConfiguredModels(config: CascadeConfig): Promise<string |
 export function inferProviderFromModelId(id: string, providers: CascadeConfig['providers']): ProviderType | null {
   if (id.includes(':')) {
     const prefix = id.split(':')[0]!.toLowerCase();
-    const validProviders = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama'];
+    const validProviders = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama', 'chatgpt'];
     if (validProviders.includes(prefix)) {
       return prefix as ProviderType;
     }

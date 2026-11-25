@@ -16,6 +16,7 @@ import { createServer } from 'node:net';
 import { registerCloudAuthIpc, type CloudAuthHandle } from './cloudAuth';
 import { registerRelayIpc } from './relay-ipc';
 import { registerWorkspaceIpc } from './workspace-ipc';
+import { registerChatGptIpc } from './chatgpt-ipc';
 import { insideWorkspace, isRunnable } from './file-access';
 import { registerBrowserHandlers, readCurrentPage, actOnCurrentPage, setAgentControlEnabled, resumeAgentControl, agentRunEnded, agentActorEnded, setApprovalWaitCeiling, setLifecycleReleaseWired, approvalWaitCeilingFor } from './browser';
 
@@ -851,6 +852,18 @@ function registerIPC(): void {
   // This app as one of the user's devices, for their cloud runs: off until turned on in Settings.
   let workspace: ReturnType<typeof registerWorkspaceIpc> | null = null;
   registerRelayIpc({ loadCore, cloudAuth: () => cloudAuth, mainWindow: () => mainWindow, onForgotten: () => workspace?.deviceChanged() });
+  // ChatGPT plan usage: the sign-in runs here, in the main process; the window sees emails and states.
+  registerChatGptIpc({
+    loadCore,
+    mainWindow: () => mainWindow,
+    // A sign-in or sign-out changes whether the plan is a usable provider: the live config follows,
+    // and the next run (each builds its own Cascade over this object) sees it.
+    onChanged: () => {
+      if (!cascadeConfig) return;
+      const { withChatGptPlan } = loadCore() as unknown as { withChatGptPlan: (p: unknown[]) => unknown[] };
+      cascadeConfig.providers = withChatGptPlan(cascadeConfig.providers ?? []);
+    },
+  });
   // A folder on this computer as a cloud run's workspace: serves with the same pairing; off until turned on.
   workspace = registerWorkspaceIpc({ loadCore, cloudAuth: () => cloudAuth, mainWindow: () => mainWindow, ensureWindow: () => { if (!mainWindow && app.isReady()) createWindow(); } });
 }

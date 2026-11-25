@@ -12,7 +12,7 @@ export * from './core/verification/index.js';
 
 export { runCascade, createCascade, streamCascade } from './sdk/index.js';
 
-export { ConfigManager, hasUsableProvider, hasProviderCredential, applyProviderApiKey } from './config/index.js';
+export { ConfigManager, hasUsableProvider, hasProviderCredential, applyProviderApiKey, withChatGptPlan } from './config/index.js';
 export { useProjectStateDir, projectStateDir, statePath, globalDir, STATE } from './config/project-state.js';
 // The schema `createCascade` validates against. Exported so an embedder can
 // check a config it assembled BEFORE handing it over — the parse strips keys it
@@ -40,6 +40,8 @@ export { sameEndpoint, normalizeEndpoint } from './utils/net.js';
 // generic string compare above.
 export { sameCredentialEndpoint, credentialEndpointIdentity, hasDefaultEndpoint } from './config/endpoint-identity.js';
 export { sameAzureEndpoint } from './config/azure-endpoint.js';
+// ChatGPT plan usage (Sign in with ChatGPT). CLI and desktop only.
+export * from './auth/chatgpt/index.js';
 export { Keystore } from './config/keystore.js';
 export { CascadeIgnore } from './config/ignore.js';
 export { MemoryStore } from './memory/store.js';

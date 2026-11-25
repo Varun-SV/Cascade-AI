@@ -1,6 +1,7 @@
 import type { Socket } from 'socket.io-client';
 import { MessageSquare } from 'lucide-react';
 import { ModelPicker } from '../components/ModelPicker.js';
+import { ChatGptPlanBadge } from '../components/ChatGptPlan.js';
 import { HelpButton } from '../help/HelpButton.js';
 import { ChatPanel } from '../components/ChatPanel.js';
 import { useAppDispatch, useAppSelector, setActiveModelChat } from '../store/index.js';
@@ -22,6 +23,7 @@ export function ChatView({ socket }: { socket: Socket | null }) {
           value={activeModel.chat}
           onChange={(id) => dispatch(setActiveModelChat(id))}
         />
+        <ChatGptPlanBadge model={activeModel.chat} />
         <div style={{ flex: 1 }} />
         <HelpButton context="chat" />
       </div>
