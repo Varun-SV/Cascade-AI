@@ -1,6 +1,6 @@
 # ◈ Cascade AI
 
-> **One prompt becomes an organization of AI agents that plan, delegate and work in parallel,** each step routed to the best-value model for the job. Typically far cheaper than running everything on one frontier model, and Cascade shows you the saving on every run.
+> **One prompt becomes an organization of AI agents that plan, delegate and work in parallel,** with a model chosen for each step. Every run shows what it cost, tier by tier.
 
 [![npm](https://img.shields.io/npm/v/cascade-ai?color=aaff00&label=npm)](https://www.npmjs.com/package/cascade-ai)
 [![DOI](https://zenodo.org/badge/1199633168.svg)](https://doi.org/10.5281/zenodo.23427428)
@@ -9,11 +9,14 @@
 [![providers](https://img.shields.io/badge/providers-6-a78bff.svg)](#providers-and-your-own-keys)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-f5a623.svg)](CONTRIBUTING.md)
 
+> [!NOTE]
+> **Status: early access.** Cascade is a hobby open-source project and is changing quickly. The orchestration controller (how T1, T2 and T3 plan and delegate) is being reworked; benchmarks will be published after that, so this README makes no performance or cost claims yet.
+
 <p align="center">
   <img src="assets/readme/cascade-reel.webp" width="100%" alt="Cascade AI in 36 seconds: one prompt becomes an organization of AI agents. T1 plans, T2 managers delegate, T3 workers execute in parallel, with web, browser, media, document and code tools, from the CLI, desktop app, cloud, self-host or API.">
 </p>
 
-Cascade runs your request through a three-tier team of agents: **T1 plans, T2 manages, T3 does the work**. It sizes the team to the task, picks a model for each agent, runs tools (shell, files, git, web, browser, documents, images), checks the results and hands you one finished answer. Think Claude Code or Gemini CLI, but built around **orchestration**: you can see the team work, steer it, and see what it saved you.
+Cascade runs your request through a three-tier team of agents: **T1 plans, T2 manages, T3 does the work**. It sizes the team to the task, picks a model for each agent, runs tools (shell, files, git, web, browser, documents, images), checks the results and hands you one finished answer. Think Claude Code or Gemini CLI, but built around **orchestration**: you can see the team work, steer it, and see what each step cost.
 
 ```bash
 npm install -g cascade-ai
@@ -112,7 +115,7 @@ flowchart TD
     X1 --> R[T1 compiles one answer]
     X2 --> R
     X3 --> R
-    R --> U2([Result, cost and savings])
+    R --> U2([Result and cost])
 ```
 
 | Complexity | Tiers in play | Shape |
@@ -127,17 +130,17 @@ flowchart TD
 - **T3 Worker** runs the tools and tests its own output. It uses small, fast (often local) models. A worker can ask its manager for bounded sibling workers when work fans out.
 - **Permission escalation.** A worker that needs more than it has asks up the chain: T3 → T2 → T1 → you.
 
-### Routing: the best-value model for each step
+### Routing: choosing a model for each step
 
 Set a tier to **Auto** (the default) and Cascade picks within that tier's class of model for each task. It combines live public benchmark scores for the task type with live pricing, then learns from how each model actually did. `autoBias` (`balanced`, `quality` or `cost`) sets the trade-off. Newly released models compete as soon as a provider lists them. You can pin any tier to a model instead. If a model fails, **failover** treats a rate limit, an exhausted quota, a model your key can't use and a dead account differently.
 
 `cascade stats` shows what the router has learned, and `/rate good|bad` teaches it.
 
-### "Why?" and cost savings
+### "Why?" and cost
 
 Every run can explain itself: the complexity verdict and the classifier's reasoning, which model served each tier, any failovers and escalations. Use `/why` in the CLI, the **Why** panel in the desktop app, or **Why** from the web app's top bar.
 
-Every run also shows what the hierarchy **saved** versus running the whole thing on the top tier (for example `saved $0.094 – 75% vs. all-T1`), because the cheap T3 workers (free, when local) do the heavy lifting. Where a model has no published price, Cascade says "cost not tracked" instead of showing $0.
+Every run also shows its cost per tier, next to a comparison: the same token counts priced at the T1 model's rate. That comparison is an estimate, not a measured saving, because a run done entirely on T1 would not use the same tokens. Where a model has no published price, Cascade says "cost not tracked" instead of showing $0, and shows no comparison.
 
 ### Thinking levels
 
@@ -287,8 +290,8 @@ More: [docs/mcp-oauth.md](docs/mcp-oauth.md), [docs/connectors-broker.md](docs/c
 
 ### Spend tracking and budgets
 
-- **Spend & savings report** (web app): what your runs cost and saved, by day and period (today, 7 days, 30 days, all time), with a per-tier and per-model breakdown. Only numbers are stored, never prompts or replies. Memory building and skill suggestions show up there too.
-- **Live cost** in every surface: tokens, USD and delegation savings per run (`/cost` in the CLI).
+- **Spend & savings report** (web app): what your runs cost, with the all-T1 comparison, by day and period (today, 7 days, 30 days, all time), with a per-tier and per-model breakdown. Only numbers are stored, never prompts or replies. Memory building and skill suggestions show up there too.
+- **Live cost** in every surface: tokens, USD and the all-T1 comparison per run (`/cost` in the CLI).
 - **Per-run caps:** *Max tokens per run* (default 200k) and a *per-run cost cap*. A run plans within its cap, and at 80% starts no new work and writes the answer from what is done, so you still get one.
 - **Session and daily caps** (CLI and SDK config): `budget.sessionBudgetUsd`, `budget.dailyBudgetUsd` (`/budget set <$>`, `/budget clear`), with a warning at `budget.warnAtPct` (default 80). `/continue` resumes a run that hit its token cap.
 - **Plan limits** on Cascade Cloud: Free is 20 runs a day, Pro 200 (resets at midnight UTC), plus a daily allowance of hosted browser sessions where a deployment offers them.
@@ -459,7 +462,7 @@ reply = client.chat.completions.create(
     messages=[{"role": "user", "content": "Compare Postgres and SQLite for a CLI tool."}],
 )
 print(reply.choices[0].message.content)
-print(reply.cascade)   # which tier and model served it, and what routing saved
+print(reply.cascade)   # which tier and model served it, its cost, and the all-T1 comparison
 ```
 
 | `model` | What runs |
@@ -520,7 +523,7 @@ Options: `-p, --prompt`, `-t, --theme`, `-w, --workspace <path>`, `-i, --identit
 | `/budget [set <$> \| clear]` | Session budget cap |
 | **Seeing inside** | |
 | `/status` · `/tree` · `/comms` | Live agent tree; timeline; agent-to-agent feed |
-| `/why` · `/cost` | How the last run was routed; cost, tokens and savings |
+| `/why` · `/cost` | How the last run was routed; cost, tokens and the all-T1 comparison |
 | `/logs` · `/diagnose` · `/audit` | Runtime logs; setup summary; check the audit log's hash chain |
 | **Setup** | |
 | `/settings [section \| name value]` | Every setting in one panel (keys are typed masked) |
