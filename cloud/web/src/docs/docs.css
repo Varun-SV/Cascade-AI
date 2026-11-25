@@ -1,0 +1,36 @@
+/* The docs. Colour, type and surfaces come from the app's own tokens
+   (index.css, tailwind.config.js), so light and dark work with no rules of
+   their own; this file is the little that utility classes can't say. */
+
+.docs-root { scroll-behavior: auto; }
+.docs-root ::selection { background: rgb(var(--c-accent-500) / 0.3); }
+
+.docs-skip {
+  position: fixed; left: 12px; top: -48px; z-index: 60; padding: 8px 14px; border-radius: 10px;
+  background: rgb(var(--c-accent-500)); color: #fff; font-size: 14px; text-decoration: none;
+  transition: top 0.12s ease;
+}
+.docs-skip:focus { top: 10px; }
+
+.docs-root a:focus-visible, .docs-root button:focus-visible, .docs-root [role='region']:focus-visible {
+  outline: 2px solid rgb(var(--c-accent-500)); outline-offset: 2px; border-radius: 6px;
+}
+
+/* A table is a region you can scroll with the keyboard on a narrow screen. */
+.docs-root .cz-tbl { max-width: 100%; }
+.docs-root .cz-tbl table { min-width: 28rem; }
+.docs-root .cz-tbl td { min-width: 6rem; }
+
+.docs-fade { animation: docsFade 0.16s ease both; }
+.docs-pop { animation: docsPop 0.16s ease both; }
+.docs-slide { animation: docsSlide 0.2s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+@keyframes docsFade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes docsPop { from { opacity: 0; transform: translateY(6px) scale(0.985); } to { opacity: 1; transform: none; } }
+@keyframes docsSlide { from { transform: translateX(-100%); } to { transform: none; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .docs-fade, .docs-pop, .docs-slide, .docs-skip { animation: none; transition: none; }
+}
+html[data-reduce-motion='1'] .docs-fade,
+html[data-reduce-motion='1'] .docs-pop,
+html[data-reduce-motion='1'] .docs-slide { animation: none; }

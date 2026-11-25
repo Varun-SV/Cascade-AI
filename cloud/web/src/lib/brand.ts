@@ -1,13 +1,8 @@
 /**
- * Brand tokens for the two PUBLIC surfaces: the landing page (this app) and the
- * docs site (cloud/server/src/docs.ts).
- *
- * The docs page is a self-contained HTML string with inline CSS — it has to be,
- * so it renders under a strict origin with no external assets — and the server
- * package's rootDir keeps it from importing anything here. So it carries its own
- * copy of these values, and `docs.test.ts` reads this file and fails if the two
- * ever disagree. That is the drift guard: one set of numbers, enforced rather
- * than hoped for.
+ * Brand tokens for the two PUBLIC surfaces: the landing page and the docs site
+ * (src/docs). Both live in this app, so both read these values directly, and the
+ * docs take their colours from the theme tokens in index.css, which hold the same
+ * ramp.
  *
  * The ramp is not decoration. Azure → sky → teal maps onto Tier 1 → 2 → 3, so
  * colour descends with the hierarchy everywhere it appears: the mark, the tier
