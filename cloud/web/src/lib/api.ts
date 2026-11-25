@@ -44,7 +44,15 @@ async function json<T>(fetchPromise: Promise<Response>): Promise<T> {
 }
 
 /** One of the user's own desktops, and whether it is serving workspaces right now. */
-export interface WorkspaceDevice { id: string; name: string; online: boolean }
+export interface WorkspaceDevice {
+  id: string;
+  name: string;
+  online: boolean;
+  /** Absent from servers that predate it: those only list desktop apps. */
+  kind?: 'extension' | 'cli' | 'desktop';
+  createdAt?: number;
+  lastSeenAt?: number | null;
+}
 
 export function fetchWorkspaceDevices(): Promise<{ devices: WorkspaceDevice[] }> {
   return json(fetch('/api/workspace-relay/devices', { credentials: 'include' }));
@@ -668,8 +676,22 @@ export async function fetchRelayDevices(): Promise<RelayDevice[]> {
   return body.devices ?? [];
 }
 
-export function removeRelayDevice(id: string): Promise<{ ok: boolean }> {
-  return json(fetch(`/api/browser-relay/devices/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'include' }));
+/**
+ * Which relay's routes manage a device. The browser relay's work for any kind of device and
+ * also end a workspace it is serving; the workspace relay's are for a server that has
+ * workspaces on and the browser relay off.
+ */
+export type RelayFamily = 'browser' | 'workspace';
+const DEVICES_PATH: Record<RelayFamily, string> = { browser: '/api/browser-relay/devices', workspace: '/api/workspace-relay/devices' };
+
+export function removeRelayDevice(id: string, family: RelayFamily = 'browser'): Promise<{ ok: boolean }> {
+  return json(fetch(`${DEVICES_PATH[family]}/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'include' }));
+}
+
+export function renameRelayDevice(id: string, name: string, family: RelayFamily = 'browser'): Promise<{ ok: boolean; name: string }> {
+  return json(fetch(`${DEVICES_PATH[family]}/${encodeURIComponent(id)}`, {
+    method: 'PATCH', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+  }));
 }
 
 // ── Where the user's runs get a browser (Settings → Browser) ──

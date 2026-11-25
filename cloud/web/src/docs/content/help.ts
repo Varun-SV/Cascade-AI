@@ -77,7 +77,7 @@ export const HELP: DocPage[] = [
         'In **Settings**, then **Workspaces**, turn on "Let Cascade Cloud runs work in a folder on this computer". If it says "Not paired", pair it under **Cloud runs** first, and sign in to the same account.',
         'Reopen the **Environment** menu in the composer. The computer should show a dot for online. It is read again each time you open the menu.',
       ),
-      p('If **Environment** never appears, your server has not turned workspaces on (`WORKSPACE_RELAY`). A message saying the computer "is not one of your desktop devices" means the chosen computer was removed, or is a CLI or extension device. Only desktop apps serve folders.'),
+      p('If the **Environment** menu says your server does not have workspaces turned on, the server has not set `WORKSPACE_RELAY`. A message saying the computer "is not one of your desktop devices" means the chosen computer was removed, or is a CLI or extension device. Only desktop apps serve folders.'),
       h2('A workspace run was refused or stopped'),
       ul(
         '**"The run was stopped before its workspace opened"**: you or the chat stopped it while your computer was still asking.',
@@ -89,7 +89,7 @@ export const HELP: DocPage[] = [
       h2('A run never got a browser'),
       ul(
         'The **Browser** switch in the Tools menu must be on for that message.',
-        'A run asks your most recently seen **online** device. If none is online, the run goes on **without a browser**. Keep the extension signed in, or `cascade relay serve` running, or the desktop app open with Cloud runs paired. **Settings**, then **Browser**, shows which are online.',
+        'A run asks your most recently seen **online** device. If none is online, the run goes on **without a browser**. Keep the extension signed in, or `cascade relay serve` running, or the desktop app open with Cloud runs paired. **Settings**, then **Environments**, shows which are online.',
         'The device\'s question is the approval. If it was closed or refused, the run has no browser.',
         'A run that needs a site on your own network (`localhost`, `192.168.x`) has to use the CLI device. The extension and desktop app block private addresses.',
       ),
@@ -100,7 +100,7 @@ export const HELP: DocPage[] = [
         'It shows a code. Open the page it links to, **signed in to the same Cascade account**, and approve the code.',
         'The toolbar popup should now say it is online.',
       ),
-      p('If pairing fails: check the server address (no extra path), that the server has `BROWSER_RELAY` on, and that you have fewer than 10 devices. To start over, use **Forget** in the extension, remove the device under **Settings**, then **Browser**, and pair again. A private window needs "Allow in Incognito" turned on for the extension. An older extension gives a run one tab only.'),
+      p('If pairing fails: check the server address (no extra path), that the server has `BROWSER_RELAY` on, and that you have fewer than 10 devices. To start over, use **Forget** in the extension, remove the device under **Settings**, then **Environments**, and pair again. A private window needs "Allow in Incognito" turned on for the extension. An older extension gives a run one tab only.'),
       h2('Shell commands are refused'),
       p('"`shell` and `run_code` are refused" on macOS and Windows, or on Linux without working bubblewrap, is deliberate. See [The process jail](/docs/process-jail). On Linux, install bubblewrap and check that unprivileged user namespaces are allowed. You can set `tools.processJail` to `off`, which removes the protection.'),
       h2('A run stopped early, or the answer is short'),

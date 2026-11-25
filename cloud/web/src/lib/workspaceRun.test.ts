@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  CLOUD_ENV, OFFLINE_HINT, applyWorkspaceEvent, changedSinceReadFiles, chosenDeviceName, clearWaiting, collectChangedFiles,
+  CLOUD_ENV, OFFLINE_HINT, CLI_OFFLINE_HINT, applyWorkspaceEvent, changedSinceReadFiles, chosenDeviceName, clearWaiting, collectChangedFiles,
   editDiff, parseWorkspaceEvent, pickerOptions, workspaceDeviceForRun, type WorkspaceEvent, type WorkspaceRunView,
 } from './workspaceRun.js';
 
@@ -13,6 +13,13 @@ describe('the environment picker', () => {
     expect(opts[0]).toMatchObject({ value: CLOUD_ENV, disabled: false });
     expect(opts[1]).toMatchObject({ online: true, disabled: false });
     expect(opts[2]).toMatchObject({ online: false, disabled: true, sub: OFFLINE_HINT });
+  });
+  it('words the hints for a CLI device as the CLI, and for a desktop (or an older server) as the app', () => {
+    const opts = pickerOptions([{ id: 'c1', name: 'Build box', online: false, kind: 'cli' }, { id: 'c2', name: 'Build box 2', online: true, kind: 'cli' }, { id: 'k1', name: 'Mac', online: false, kind: 'desktop' }], undefined);
+    expect(opts[1]).toMatchObject({ disabled: true, sub: CLI_OFFLINE_HINT });
+    expect(CLI_OFFLINE_HINT).toContain('cascade workspace serve');
+    expect(opts[2]).toMatchObject({ disabled: false, sub: 'Work in a folder, served by the Cascade CLI' });
+    expect(opts[3]).toMatchObject({ sub: OFFLINE_HINT });
   });
   it('keeps a chosen computer selectable even when it has gone offline, so the choice can be undone', () => {
     expect(pickerOptions(devices, 'd2')[2]!.disabled).toBe(false);

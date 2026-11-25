@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import Segmented from './Segmented.js';
-import BrowserDevices from './BrowserDevices.js';
 import {
   fetchBrowserPrefs, removeBrowserEndpoint, saveBrowserEndpoint, setBrowserSource,
   type BrowserPrefs, type BrowserSource,
@@ -11,9 +10,10 @@ const LABEL: Record<BrowserSource, string> = { device: 'My devices', endpoint: '
 /**
  * Settings → Browser: where runs that use the Browser switch get one. The user's own
  * devices through the relay, their own CDP endpoint, or their desktop app, which the
- * chat is handed to. Whatever is chosen, it's the user's own browser.
+ * chat is handed to. Whatever is chosen, it's the user's own browser. The devices
+ * themselves are listed, renamed and removed in Settings → Environments.
  */
-export default function BrowserSettings({ onChange }: { onChange?: (prefs: BrowserPrefs) => void }) {
+export default function BrowserSettings({ onChange, onOpenEnvironments }: { onChange?: (prefs: BrowserPrefs) => void; onOpenEnvironments?: () => void }) {
   const [prefs, setPrefs] = useState<BrowserPrefs | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [url, setUrl] = useState('');
@@ -93,7 +93,28 @@ export default function BrowserSettings({ onChange }: { onChange?: (prefs: Brows
         </p>
       )}
 
-      {prefs.source === 'device' && prefs.offers.device && <BrowserDevices />}
+      {prefs.source === 'device' && prefs.offers.device && (
+        <div className="space-y-3">
+          <p className="text-[13px] leading-snug text-ink-300">
+            Runs that use the Browser switch open a window in one of your own browsers, on sites you allow each time.
+            Nothing runs without your yes on that device.
+          </p>
+          <p className="text-[12.5px] leading-snug text-ink-300">
+            Your paired devices, and how to add one, are in{' '}
+            {onOpenEnvironments
+              ? <button type="button" onClick={onOpenEnvironments} className="text-accent-500 underline">Settings → Environments</button>
+              : 'Settings → Environments'}.
+          </p>
+          <section aria-labelledby="browser-egress-heading">
+            <h3 id="browser-egress-heading" className="mb-1 text-[13px] font-semibold text-ink-100">What leaves your device during a run</h3>
+            <ul className="list-disc space-y-1 pl-5 text-[12.5px] leading-snug text-ink-300">
+              <li>The addresses, text and structure of pages in the run's window, and what the run types into them.</li>
+              <li>No screenshots and no live picture: you watch and take over on the device itself.</li>
+              <li>Pages on sites you didn't allow don't load in the run's window.</li>
+            </ul>
+          </section>
+        </div>
+      )}
     </div>
   );
 }

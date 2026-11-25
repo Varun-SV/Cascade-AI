@@ -20,6 +20,7 @@ import type { BrowserInputEvent } from './BrowserLiveView.js';
 import { ToolApprovalPrompt } from './ToolApprovalPrompt.js';
 import { ClarificationPrompt } from './ClarificationPrompt.js';
 import { takePendingPrompt } from '../lib/pendingPrompt.js';
+import { useEngineStatus } from '../lib/localModel/useEngineStatus.js';
 import type { ToolApproval } from './useChatSession.js';
 
 interface Props {
@@ -151,6 +152,8 @@ export default function ChatPanel({
   // thread; on a narrower screen it stays above the composer, so its Stop
   // control is never scrolled away with the messages.
   const wide = useMediaQuery('(min-width: 1024px)');
+  // The opt-in on-device model, while it loads (it never loads unless that is on).
+  const localModel = useEngineStatus();
 
   // Follow the conversation by scrolling the thread itself. scrollIntoView
   // would scroll every ancestor too, the overflow-hidden ones included, and
@@ -362,6 +365,14 @@ export default function ChatPanel({
               <KeyRound size={14} className="shrink-0 text-ink-500" />
               <span className="flex-1">Add a provider key before starting a chat.</span>
               {onAddKey && <button type="button" onClick={onAddKey} className="cz-btn cz-btn-ghost cz-btn-sm">Add a key</button>}
+            </div>
+          )}
+          {localModel.stage === 'loading' && (
+            <div className={note} role="status">
+              <Layers size={14} className="shrink-0 text-ink-500" />
+              <span>
+                Loading on-device assist{typeof localModel.progress === 'number' && localModel.progress > 0 ? ` · ${Math.round(localModel.progress * 100)}%` : '…'} Your messages don't wait for it.
+              </span>
             </div>
           )}
           {ctxFull && (

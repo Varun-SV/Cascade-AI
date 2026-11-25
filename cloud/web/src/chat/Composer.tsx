@@ -67,7 +67,7 @@ function browserSub(allowance: BrowserAllowanceView, ownOnly: boolean): string {
   return left === 0 ? `All ${allowance.limit} used today` : `${left} of ${allowance.limit} left today`;
 }
 
-/** The environment picker: where this chat's runs work. Absent when the server has no workspace relay. */
+/** The environment picker: where this chat's runs work. Absent only until the server's config is known. */
 export interface WorkspacePicker {
   devices: WorkspaceDevice[];
   /** The list has been read at least once. */
@@ -80,6 +80,11 @@ export interface WorkspacePicker {
   onSelect: (deviceId: string | undefined) => void;
   /** The picker opened: re-read the list. */
   onOpen: () => void;
+  /**
+   * This server has workspaces off. The button is still there, so the feature does not look
+   * missing, but its menu says why and offers Cloud only.
+   */
+  unavailable?: boolean;
 }
 
 interface Props {
@@ -124,7 +129,7 @@ const THINKING_OPTIONS: Record<ThinkingLevel, { label: string; sub: string }> = 
   high: { label: 'High', sub: 'Thinks longest; slower, costs more' },
 };
 
-type MenuKey = 'plus' | 'tools' | 'mode' | 'env';
+type MenuKey = 'plus' | 'tools' | 'mode' | 'env' | 'thinking';
 
 export default function Composer({
   skills, skillId, onSkillChange, hasProviders, busy, onSend, onStop,
@@ -262,6 +267,23 @@ export default function Composer({
   };
 
   function itemsFor(key: MenuKey): MenuItem[] {
+    if (key === 'env' && workspace?.unavailable) {
+      return [
+        { kind: 'label', label: 'Where this chat works' },
+        { kind: 'radio', label: 'Cloud (no files)', sub: 'Runs here with no access to your files', checked: true, onSelect: () => setMenu(null) },
+        { kind: 'separator' },
+        { kind: 'custom', key: 'env-off', render: <p className="m-0 px-[9px] py-1 text-[12.5px] leading-snug text-ink-300">This server doesn&apos;t have workspaces turned on, so runs work in the Cloud only.</p> },
+        {
+          kind: 'custom', key: 'env-selfhost',
+          render: (
+            <p className="m-0 px-[9px] py-1 text-[12px] leading-snug text-ink-500">
+              Running your own server? Set <code className="rounded bg-sunk px-1">WORKSPACE_RELAY</code> and <code className="rounded bg-sunk px-1">BROWSER_RELAY</code> on it.{' '}
+              <a href="/docs/workspaces" target="_blank" rel="noopener noreferrer" className="text-accent-500 underline">How workspaces work</a>
+            </p>
+          ),
+        },
+      ];
+    }
     if (key === 'env' && workspace) {
       const opts = pickerOptions(workspace.devices, workspace.selected);
       const items: MenuItem[] = [{ kind: 'label', label: 'Where this chat works' }];
@@ -281,6 +303,19 @@ export default function Composer({
       else if (workspace.known && workspace.devices.length === 0) items.push({ kind: 'custom', key: 'env-none', render: <p className="m-0 px-[9px] py-1 text-[12.5px] text-ink-500">{NO_DEVICES_HINT}</p> });
       if (workspace.selected !== undefined) items.push({ kind: 'custom', key: 'env-fast', render: <p className="m-0 px-[9px] py-1 text-[12px] text-ink-500">Fast answer is off while a computer is chosen: it uses no tools, so it cannot work in your files.</p> });
       return items;
+    }
+    if (key === 'thinking') {
+      return [
+        { kind: 'label', label: 'Thinking' },
+        ...THINKING_LEVELS.map<MenuItem>((level) => ({
+          kind: 'radio', label: THINKING_OPTIONS[level].label, sub: THINKING_OPTIONS[level].sub,
+          checked: (thinkingUnavailable ? 'auto' : thinking) === level, onSelect: () => chooseThinking(level), disabled: thinkingUnavailable,
+        })),
+        {
+          kind: 'custom', key: 'thinking-azure',
+          render: <p className="m-0 px-[9px] py-1 text-[12px] text-ink-500">{thinkingUnavailable ? "Not available: Azure deployments don't take a thinking setting." : 'Not sent to Azure deployments.'}</p>,
+        },
+      ];
     }
     if (key === 'plus') {
       return [
@@ -326,16 +361,6 @@ export default function Composer({
       { kind: 'label', label: 'Tier' },
       ...FORCE_TIERS.map<MenuItem>((t) => ({ kind: 'radio', label: t === 'auto' ? 'Let Cascade decide' : `${t} only`, checked: forceTier === t, onSelect: () => onForceTierChange(t) })),
       { kind: 'separator' },
-      { kind: 'label', label: 'Thinking' },
-      ...THINKING_LEVELS.map<MenuItem>((level) => ({
-        kind: 'radio', label: THINKING_OPTIONS[level].label, sub: THINKING_OPTIONS[level].sub,
-        checked: (thinkingUnavailable ? 'auto' : thinking) === level, onSelect: () => chooseThinking(level), disabled: thinkingUnavailable,
-      })),
-      {
-        kind: 'custom', key: 'thinking-azure',
-        render: <p className="m-0 px-[9px] py-1 text-[12px] text-ink-500">{thinkingUnavailable ? "Not available: Azure deployments don't take a thinking setting." : 'Not sent to Azure deployments.'}</p>,
-      },
-      { kind: 'separator' },
       {
         kind: 'toggle', label: 'Fast answer', icon: <Zap size={15} />, checked: fastNext, onToggle: () => setFastNext((f) => !f),
         sub: workspaceChosen ? 'Off while a computer is chosen: it uses no tools' : 'Next message skips orchestration',
@@ -348,13 +373,14 @@ export default function Composer({
   // a billed capability like the browser is never on without saying so.
   const tokens: Array<{ key: string; icon: ReactNode; label: string; off: () => void }> = [];
   if (fastNext) tokens.push({ key: 'fast', icon: <Zap size={14} />, label: 'Fast answer', off: () => setFastNext(false) });
-  if (thinking !== 'auto' && !thinkingUnavailable) tokens.push({ key: 'thinking', icon: <Brain size={14} />, label: `Thinking: ${THINKING_OPTIONS[thinking].label}`, off: () => chooseThinking('auto') });
   if (webSearch) tokens.push({ key: 'web', icon: <Globe size={14} />, label: 'Web', off: () => onWebSearchChange(false) });
   if (browserMode) tokens.push({ key: 'browser', icon: <MonitorPlay size={14} />, label: 'Browser', off: () => onBrowserModeChange(false) });
   const envName = workspace ? chosenDeviceName(workspace.devices, workspace.selected) : null;
   if (envName) tokens.push({ key: 'env', icon: <Laptop size={14} />, label: envName, off: () => workspace?.onSelect(undefined) });
   if (skillId && skillId !== 'general' && skillName) tokens.push({ key: 'skill', icon: <Sparkles size={14} />, label: skillName, off: () => onSkillChange('general') });
 
+  // The thinking button names the level when it is not Auto, so it needs no chip of its own.
+  const thinkingShown = thinkingUnavailable ? 'auto' : thinking;
   const routeLabel = ROUTING_MODES.find((m) => m.value === routingMode)?.label ?? 'Auto';
   const canSend = hasProviders && !busy && !uploading && input.trim().length > 0;
 
@@ -432,6 +458,19 @@ export default function Composer({
         >
           <SlidersHorizontal size={17} />
         </button>
+        <button
+          type="button"
+          aria-label={thinkingShown === 'auto' ? 'Thinking' : `Thinking: ${THINKING_OPTIONS[thinkingShown].label}`}
+          title="Thinking level"
+          aria-haspopup="menu"
+          aria-expanded={menu?.key === 'thinking'}
+          onClick={openMenu('thinking')}
+          disabled={busy}
+          className={clsx('cz-ib', thinkingShown !== 'auto' && 'w-auto gap-1 px-2 text-[13px] text-accent-500')}
+        >
+          <Brain size={17} />
+          {thinkingShown !== 'auto' && <span className="font-medium">{THINKING_OPTIONS[thinkingShown].label}</span>}
+        </button>
         {workspace && (
           <button
             type="button"
@@ -500,7 +539,7 @@ export default function Composer({
       </div>
       {menu && (
         <Menu
-          label={menu.key === 'plus' ? 'Attach and skills' : menu.key === 'tools' ? 'Tools' : menu.key === 'env' ? 'Environment' : 'Routing and tier'}
+          label={menu.key === 'plus' ? 'Attach and skills' : menu.key === 'tools' ? 'Tools' : menu.key === 'env' ? 'Environment' : menu.key === 'thinking' ? 'Thinking' : 'Routing and tier'}
           anchor={menu.anchor}
           items={itemsFor(menu.key)}
           onClose={() => setMenu(null)}

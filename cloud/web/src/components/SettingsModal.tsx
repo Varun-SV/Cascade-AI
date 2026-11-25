@@ -17,6 +17,7 @@ import {
 import type { CloudUser } from '../lib/types.js';
 import Segmented from './Segmented.js';
 import BrowserSettings from './BrowserSettings.js';
+import EnvironmentsSettings from './EnvironmentsSettings.js';
 import type { BrowserPrefs } from '../lib/api.js';
 
 const TIERS: Array<{ key: 't1' | 't2' | 't3'; label: string; role: string; dot: string }> = [
@@ -109,6 +110,8 @@ interface Props {
   onChatsCleared: () => void;
   /** Whether this server lets runs use the user's own browser: shows the Browser section. */
   browserRelay?: boolean;
+  /** Whether this server lets runs work in a folder on the user's own computer: lists workspace-capable devices. */
+  workspaceRelay?: boolean;
   /** The user changed where their runs get a browser. */
   onBrowserPrefsChange?: (prefs: BrowserPrefs) => void;
 }
@@ -117,7 +120,7 @@ export default function SettingsModal({
   user, onClose, onOpenSkills, onOpenMemory, onOpenConnectors, onOpenKeyVault, onOpenUpgrade, onLogout,
   onLocalModelChange, onReduceMotionChange,
   theme, onThemeChange, density, onDensityChange, runDetail, onRunDetailChange, onChatsCleared,
-  browserRelay = false, onBrowserPrefsChange,
+  browserRelay = false, workspaceRelay = false, onBrowserPrefsChange,
 }: Props) {
   const cap = detectLocalModelCapability();
   const [localOn, setLocalOn] = useState(localModelEnabled());
@@ -133,12 +136,14 @@ export default function SettingsModal({
   const [webDefault, setWebDefault] = useState<boolean>(() => defaultWebSearch());
   const isPro = user.plan === 'pro';
 
-  type Tab = 'general' | 'appearance' | 'chat' | 'browser' | 'advanced' | 'privacy';
+  type Tab = 'general' | 'appearance' | 'chat' | 'environments' | 'browser' | 'advanced' | 'privacy';
   const [tab, setTab] = useState<Tab>('general');
   const TABS: Array<{ id: Tab; label: string }> = [
     { id: 'general', label: 'General' },
     { id: 'appearance', label: 'Appearance' },
     { id: 'chat', label: 'Chat' },
+    // Always: with the relays off it says so, rather than the feature looking missing.
+    { id: 'environments' as const, label: 'Environments' },
     // Always: handing a chat to the desktop app needs nothing from the server.
     { id: 'browser' as const, label: 'Browser' },
     { id: 'advanced', label: 'Advanced' },
@@ -416,7 +421,9 @@ export default function SettingsModal({
           </>
         )}
 
-        {tab === 'browser' && <BrowserSettings {...(onBrowserPrefsChange ? { onChange: onBrowserPrefsChange } : {})} />}
+        {tab === 'environments' && <EnvironmentsSettings browserRelay={browserRelay} workspaceRelay={workspaceRelay} />}
+
+        {tab === 'browser' && <BrowserSettings {...(onBrowserPrefsChange ? { onChange: onBrowserPrefsChange } : {})} onOpenEnvironments={() => setTab('environments')} />}
 
         {tab === 'privacy' && (
           <>
