@@ -367,6 +367,16 @@ export function isLocalEndpoint(cfg: Pick<ProviderConfig, 'type' | 'baseUrl' | '
   return false;
 }
 
+/**
+ * Models billed to the user's ChatGPT plan, not per token. Their calls cost no
+ * money (tokens are still counted), which is a real $0 rather than a missing
+ * price, so budget guards and cost readouts treat them as free. Deliberately
+ * NOT `isLocal`: that flag also means "runs on this machine" for privacy.
+ */
+export function isPlanBilled(model: Pick<ModelInfo, 'provider'>): boolean {
+  return model.provider === 'chatgpt';
+}
+
 // ── Resolution for a ModelInfo ────────────────
 
 export interface ResolvedModelPricing {
@@ -398,7 +408,7 @@ export function resolvePricing(
   model: Pick<ModelInfo, 'id' | 'provider' | 'isLocal' | 'baseModelId'>,
   opts: { inputTokens?: number; region?: string; batch?: boolean } = {},
 ): ResolvedModelPricing {
-  if (model.isLocal) return FREE;
+  if (model.isLocal || isPlanBilled(model)) return FREE;
 
   const fallbackProviders: PricingProvider[] =
     model.provider === 'azure' ? ['openai'] : model.provider === 'gemini' ? ['vertex'] : [];

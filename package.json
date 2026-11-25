@@ -1,6 +1,6 @@
 {
   "name": "cascade-ai",
-  "version": "0.99.12",
+  "version": "0.99.13",
   "description": "Multi-tier AI orchestration CLI — T1/T2/T3 hierarchical agent system",
   "type": "module",
   "main": "dist/index.cjs",
@@ -67,6 +67,7 @@
     "ink-select-input": "^6.0.0",
     "ink-spinner": "^5.0.0",
     "ink-text-input": "^6.0.0",
+    "jose": "^6.2.10",
     "jsonwebtoken": "^9.0.2",
     "node-cron": "^3.0.3",
     "node-notifier": "^10.0.1",

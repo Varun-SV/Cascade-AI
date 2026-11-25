@@ -819,4 +819,5 @@ export const PROVIDER_DISPLAY_NAMES: Record<ProviderType, string> = {
   azure: 'Azure OpenAI',
   'openai-compatible': 'OpenAI-Compatible',
   ollama: 'Ollama (Local)',
+  chatgpt: 'ChatGPT plan',
 };

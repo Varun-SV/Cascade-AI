@@ -37,6 +37,7 @@ const PROVIDER_COLORS: Record<string, string> = {
   ollama:              '#56b6c2',
   'openai-compatible': '#e0a458',
   azure:               '#0078d4',
+  chatgpt:             '#10a37f',
 };
 
 interface Props {

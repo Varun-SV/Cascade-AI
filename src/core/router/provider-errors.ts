@@ -50,6 +50,8 @@ export interface ClassifiedError {
   kind: ProviderErrorKind;
   /** True when every other worker on this model is expected to fail the same way. */
   systemic: boolean;
+  /** The provider's own error code, when it gave one (ChatGPT plan errors carry it). */
+  code?: string;
   /** HTTP status, when the provider gave us one. */
   status?: number;
   /** The provider's own message, trimmed — never invented or paraphrased. */
@@ -192,9 +194,26 @@ function hasRetryField(err: unknown): boolean {
   return false;
 }
 
+/** ChatGPT plan errors name themselves; their wording must not be guessed at. */
+function planCodeOf(err: unknown): string | undefined {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && code.startsWith('subscription_sharing_') ? code : undefined;
+}
+
 export function classifyProviderError(err: unknown): ClassifiedError {
   const raw = messageOf(err).trim();
   const status = statusOf(err);
+  const planCode = planCodeOf(err);
+  if (planCode) {
+    // A spent plan limit does not ease within a run (it is a five-hour or app
+    // limit), so it is not retried on the backoff ladder; a plan that is not
+    // eligible or a rejected sign-in fails every worker the same way.
+    const kind: ProviderErrorKind =
+      planCode === 'subscription_sharing_usage_limit_exceeded' ? 'quota_exhausted'
+      : planCode === 'subscription_sharing_user_not_eligible' || planCode === 'subscription_sharing_invalid_user' ? 'auth'
+      : 'unknown';
+    return { kind, systemic: isSystemicKind(kind), status, code: planCode, raw };
+  }
   // The retry hint is folded into the haystack so one predicate covers both
   // the text and the field forms.
   const m = raw.toLowerCase() + (hasRetryField(err) ? ' retry-after' : '');
@@ -261,6 +280,8 @@ export function enrichProviderError(err: unknown, c: ClassifiedError, modelId?: 
   if (typeof c.status === 'number') {
     (enriched as Error & { status?: number }).status = c.status;
   }
+  // The plan's own code survives the wrap, so the next classification does not re-guess from text.
+  if (c.code) (enriched as Error & { code?: string }).code = c.code;
   return enriched;
 }
 
@@ -274,6 +295,8 @@ export function enrichProviderError(err: unknown, c: ClassifiedError, modelId?: 
 export function describeProviderError(c: ClassifiedError, modelId?: string): string {
   const on = modelId ? ` on ${modelId}` : '';
   const detail = c.raw ? ` Provider said: ${c.raw}` : '';
+  // The ChatGPT plan's own message already says what to do and where.
+  if (c.code && c.raw) return c.raw;
 
   switch (c.kind) {
     case 'rate_limit':

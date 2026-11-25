@@ -31,6 +31,7 @@ import {
 import { stripRevokedCredentials, stripRevokedFromConfig, clearAnthropicPins, hasUsableAnthropic, isSubscriptionToken, REVOKED_CREDENTIAL_REASON, type ClearedPin } from './revoked-credentials.js';
 import { disambiguateMcpServerNames, type McpServerRename } from '../tools/tool-name.js';
 import { GLOBAL_KEYSTORE_FILE } from '../constants.js';
+import { chatGptPlanReady } from '../auth/chatgpt/store.js';
 
 // Provider types the setup wizard treats as key-optional (local servers need
 // no credential — see cli/setup/index.tsx's `keyOptional`/ollama handling). A
@@ -38,7 +39,9 @@ import { GLOBAL_KEYSTORE_FILE } from '../constants.js';
 // need a key or already has one. Shared by both `cascade`/`cascade run` entry
 // points (src/cli/index.ts) so they can't drift out of sync with what the
 // setup wizard actually allows to be saved as a complete config.
-const KEY_OPTIONAL_PROVIDER_TYPES = new Set(['ollama', 'openai-compatible']);
+// 'chatgpt' is here because its row is never typed in by a person: ConfigManager.load()
+// adds it only while a signed-in account approved plan usage (see withChatGptPlan).
+const KEY_OPTIONAL_PROVIDER_TYPES = new Set(['ollama', 'openai-compatible', 'chatgpt']);
 
 /**
  * Whether a provider entry carries a credential at all.
@@ -94,6 +97,16 @@ function isRoutable(p: { type: string; baseUrl?: string; deploymentName?: string
   // name neither a resource nor a deployment.
   if (p.type === 'azure') return Boolean(p.baseUrl?.trim() && p.deploymentName?.trim());
   return true;
+}
+
+/**
+ * The provider list with the ChatGPT plan in it exactly when it can serve a
+ * request: a signed-in account that approved plan usage on THIS machine. There
+ * is no key to store, so the row is derived rather than saved.
+ */
+export function withChatGptPlan(providers: ProviderConfig[], dir?: string): ProviderConfig[] {
+  const rest = providers.filter((p) => p.type !== 'chatgpt');
+  return chatGptPlanReady(dir) ? [...rest, { type: 'chatgpt', label: 'ChatGPT plan' }] : rest;
 }
 
 export function hasUsableProvider(
@@ -303,6 +316,7 @@ export class ConfigManager {
     this.config.providers = mergeGlobalCredentials(this.config.providers, ownCreds);
     await this.injectEnvKeys(globalCreds.kept);
     this.config.providers = mergeGlobalCredentials(this.config.providers, globalCreds.kept);
+    this.config.providers = withChatGptPlan(this.config.providers, this.globalDir);
     // What a save starts from: its changes since are what it writes to the
     // credential store, over whatever another process saved meanwhile.
     this.providersBase = structuredClone(this.config.providers);
@@ -431,7 +445,8 @@ export class ConfigManager {
     const configPath = statePath(this.workspacePath, STATE.config);
     try {
       await fs.mkdir(path.dirname(configPath), { recursive: true, mode: 0o700 });
-      await fs.writeFile(configPath, JSON.stringify({ ...config, providers: withoutCredentials(config.providers ?? []) }, null, 2), 'utf-8');
+      // The ChatGPT plan row is derived from the sign-in at every load, never kept in a project's file.
+      await fs.writeFile(configPath, JSON.stringify({ ...config, providers: withoutCredentials(config.providers ?? []).filter((p) => p.type !== 'chatgpt') }, null, 2), 'utf-8');
     } catch (err) {
       try { undo(); } catch { /* reported below with the write's own failure */ }
       throw err;

@@ -22,10 +22,12 @@ import type { ConfigManager } from '../../config/index.js';
 import { SafeTextInput } from '../components/SafeTextInput.js';
 import { getTheme } from '../themes/index.js';
 import { Frame, FieldBox, TierCard } from './components.js';
+import { chatGptPlanReady } from '../../auth/chatgpt/store.js';
+import { signInChatGpt } from '../commands/chatgpt.js';
 
 // ── Types ─────────────────────────────────────
 
-type ProviderType = 'anthropic' | 'openai' | 'gemini' | 'azure' | 'ollama' | 'openai-compatible';
+type ProviderType = 'anthropic' | 'openai' | 'gemini' | 'azure' | 'ollama' | 'openai-compatible' | 'chatgpt';
 
 interface ProviderEntry {
   id: string;
@@ -95,9 +97,10 @@ const PROVIDER_LABELS: Record<ProviderType, string> = {
   azure: 'Azure OpenAI',
   ollama: 'Ollama (local)',
   'openai-compatible': 'OpenAI-Compatible',
+  chatgpt: 'ChatGPT plan',
 };
 
-const providerOrder: ProviderType[] = ['anthropic', 'openai', 'gemini', 'azure', 'ollama', 'openai-compatible'];
+const providerOrder: ProviderType[] = ['anthropic', 'openai', 'gemini', 'azure', 'ollama', 'openai-compatible', 'chatgpt'];
 
 function buildInitialEntries(types: Set<ProviderType>): ProviderEntry[] {
   return [...types].map(type => ({
@@ -218,6 +221,52 @@ function wizardReducer(state: WizardState, action: WizardAction): WizardState {
   }
 }
 
+// ── ChatGPT plan: Continue with ChatGPT ───────
+
+/** Signs in in the browser, and moves on when it worked or the person chooses to skip. */
+function ChatGptStep({ theme, onDone }: { theme: ReturnType<typeof getTheme>; onDone: () => void }): React.ReactElement {
+  const [attempt, setAttempt] = useState(0);
+  const [lines, setLines] = useState<string[]>([]);
+  const [outcome, setOutcome] = useState<string | null>(null);
+  const doneRef = useRef(onDone);
+  doneRef.current = onDone;
+
+  useEffect(() => {
+    let live = true;
+    setLines([]);
+    setOutcome(null);
+    void signInChatGpt((t) => { if (live) setLines((l) => [...l, t]); }).then((text) => {
+      if (!live) return;
+      if (text.startsWith('✓')) { setLines((l) => [...l, text]); setTimeout(() => doneRef.current(), 600); } else setOutcome(text);
+    });
+    return () => { live = false; };
+  }, [attempt]);
+
+  return (
+    <Box flexDirection="column">
+      <Box marginBottom={1}>
+        <Text color={theme.colors.primary} bold>? </Text>
+        <Text color={theme.colors.foreground} bold>Continue with ChatGPT</Text>
+      </Box>
+      <Text color={theme.colors.muted}>Use eligible requests on your ChatGPT plan. Your browser opens; approve it there.</Text>
+      {lines.map((l, i) => <Text key={i} color={theme.colors.muted}>{l}</Text>)}
+      {outcome === null
+        ? <Box><Text color={theme.colors.accent}><Spinner type="dots" /></Text><Text color={theme.colors.muted}> Waiting for the browser…</Text></Box>
+        : (
+          <Box flexDirection="column" marginTop={1}>
+            <Text color={theme.colors.error}>{outcome}</Text>
+            <SelectInput
+              items={[{ label: 'Try again', value: 'retry' }, { label: 'Skip ChatGPT plan', value: 'skip' }]}
+              indicatorComponent={({ isSelected }) => <Text color={theme.colors.primary}>{isSelected ? '❯ ' : '  '}</Text>}
+              itemComponent={({ isSelected, label }) => <Text color={isSelected ? theme.colors.primary : theme.colors.muted}>{label}</Text>}
+              onSelect={(item) => { if (item.value === 'retry') setAttempt((a) => a + 1); else doneRef.current(); }}
+            />
+          </Box>
+        )}
+    </Box>
+  );
+}
+
 // ── Main Wizard Component ─────────────────────
 
 interface SetupWizardProps {
@@ -236,7 +285,8 @@ export function saveSetup(
   entries: Array<Pick<ProviderEntry, 'type' | 'apiKey' | 'baseUrl' | 'deploymentName' | 'apiVersion'>>,
   tiers: { t1: string; t2: string; t3: string },
 ): CascadeConfig {
-  const providers = entries.map(e => ({
+  // The ChatGPT plan has no key: its row stands for a sign-in, kept only when one is usable.
+  const providers = entries.filter(e => e.type !== 'chatgpt' || chatGptPlanReady()).map(e => ({
     type: e.type,
     ...(e.apiKey ? { apiKey: e.apiKey } : {}),
     ...(e.baseUrl ? { baseUrl: e.baseUrl } : {}),
@@ -299,7 +349,7 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
 
   const [providerCursor, setProviderCursor] = useState(0);
   const [fieldBuffer, setFieldBuffer] = useState('');
-  const [fieldStage, setFieldStage] = useState<'apiKey' | 'baseUrl' | 'deploymentName' | 'label' | 'apiVersion' | 'askMore'>('apiKey');
+  const [fieldStage, setFieldStage] = useState<'apiKey' | 'baseUrl' | 'deploymentName' | 'label' | 'apiVersion' | 'askMore' | 'signin'>('apiKey');
   const dispatchRef = useRef(dispatch);
   dispatchRef.current = dispatch;
 
@@ -342,6 +392,13 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
             const { GeminiProvider } = await import('../../providers/gemini.js');
             const dummyModel = { id: 'dummy', name: 'dummy', provider: type as never, contextWindow: 0, isVisionCapable: false, inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, maxOutputTokens: 0, supportsStreaming: false, isLocal: false };
             const p = new GeminiProvider({ type, apiKey }, dummyModel);
+            const fetched = await p.listModels();
+            fetched.forEach(m => models.push({ id: m.id, name: m.name, providerLabel: entry.label }));
+            dispatchRef.current({ type: 'SET_FETCH_LOG', line: `  ✔ ${entry.label} — ${fetched.length} models` });
+          } else if (type === 'chatgpt') {
+            const { ChatGptProvider } = await import('../../providers/chatgpt.js');
+            const dummyModel = { id: 'dummy', name: 'dummy', provider: type as never, contextWindow: 0, isVisionCapable: false, inputCostPer1kTokens: 0, outputCostPer1kTokens: 0, maxOutputTokens: 0, supportsStreaming: false, isLocal: false };
+            const p = new ChatGptProvider({ type }, dummyModel);
             const fetched = await p.listModels();
             fetched.forEach(m => models.push({ id: m.id, name: m.name, providerLabel: entry.label }));
             dispatchRef.current({ type: 'SET_FETCH_LOG', line: `  ✔ ${entry.label} — ${fetched.length} models` });
@@ -403,7 +460,7 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
         }
         dispatch({ type: 'CONFIRM_PROVIDERS' });
         const firstType = [...state.selectedTypes][0];
-        setFieldStage(firstType === 'azure' ? 'deploymentName' : firstType === 'openai-compatible' ? 'label' : firstType === 'ollama' ? 'baseUrl' : 'apiKey');
+        setFieldStage(firstType === 'azure' ? 'deploymentName' : firstType === 'openai-compatible' ? 'label' : firstType === 'ollama' ? 'baseUrl' : firstType === 'chatgpt' ? 'signin' : 'apiKey');
         setFieldBuffer('');
       }
     }
@@ -496,7 +553,7 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
       setFieldBuffer('');
       const nextEntry = state.entries[state.currentEntryIdx + 1];
       if (nextEntry) {
-        setFieldStage(nextEntry.type === 'azure' ? 'deploymentName' : nextEntry.type === 'openai-compatible' ? 'label' : nextEntry.type === 'ollama' ? 'baseUrl' : 'apiKey');
+        setFieldStage(nextEntry.type === 'azure' ? 'deploymentName' : nextEntry.type === 'openai-compatible' ? 'label' : nextEntry.type === 'ollama' ? 'baseUrl' : nextEntry.type === 'chatgpt' ? 'signin' : 'apiKey');
       }
       dispatch({ type: 'NEXT_ENTRY' });
     }
@@ -523,6 +580,7 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
                 {p === 'azure' && <Text color={theme.colors.muted} dimColor>  — multiple deployments supported</Text>}
                 {p === 'openai-compatible' && <Text color={theme.colors.muted} dimColor>  — Groq, Together, custom</Text>}
                 {p === 'ollama' && <Text color={theme.colors.muted} dimColor>  — no API key needed</Text>}
+                {p === 'chatgpt' && <Text color={theme.colors.muted} dimColor>  — use your paid ChatGPT plan, no API key</Text>}
               </Box>
             );
           })}
@@ -536,6 +594,23 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
   }
 
   if (state.step === 'API_KEYS' && currentEntry) {
+    if (currentEntry.type === 'chatgpt') {
+      return (
+        <Frame theme={theme} phase="keys">
+          <ChatGptStep
+            theme={theme}
+            onDone={() => {
+              const nextEntry = state.entries[state.currentEntryIdx + 1];
+              if (nextEntry) {
+                setFieldStage(nextEntry.type === 'azure' ? 'deploymentName' : nextEntry.type === 'openai-compatible' ? 'label' : nextEntry.type === 'ollama' ? 'baseUrl' : nextEntry.type === 'chatgpt' ? 'signin' : 'apiKey');
+              }
+              dispatch({ type: 'NEXT_ENTRY' });
+              setFieldBuffer('');
+            }}
+          />
+        </Frame>
+      );
+    }
     const isAzure = currentEntry.type === 'azure';
     const isCompat = currentEntry.type === 'openai-compatible';
     const isOllama = currentEntry.type === 'ollama';
@@ -567,7 +642,7 @@ export function SetupWizard({ workspacePath, onComplete }: SetupWizardProps): Re
                 } else {
                   const nextEntry = state.entries[state.currentEntryIdx + 1];
                   if (nextEntry) {
-                    setFieldStage(nextEntry.type === 'azure' ? 'deploymentName' : nextEntry.type === 'openai-compatible' ? 'label' : nextEntry.type === 'ollama' ? 'baseUrl' : 'apiKey');
+                    setFieldStage(nextEntry.type === 'azure' ? 'deploymentName' : nextEntry.type === 'openai-compatible' ? 'label' : nextEntry.type === 'ollama' ? 'baseUrl' : nextEntry.type === 'chatgpt' ? 'signin' : 'apiKey');
                   }
                   dispatch({ type: 'NEXT_ENTRY' });
                   setFieldBuffer('');

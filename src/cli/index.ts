@@ -31,6 +31,9 @@ import { makeIdentityCommand } from './commands/identity.js';
 import { modelsCommand, setModelCommand } from './commands/models.js';
 import { exportCommand } from './commands/export.js';
 import { linkCommand } from './commands/link.js';
+import {
+  chatgptAccountsCommand, chatgptExportCommand, chatgptImportCommand, chatgptSigninCommand, chatgptSignoutCommand, chatgptStatusCommand,
+} from './commands/chatgpt.js';
 import { telemetryCommand } from './commands/telemetry.js';
 import { statsCommand } from './commands/stats.js';
 import { applySetup, runSetupWizard } from './setup/index.js';
@@ -243,6 +246,54 @@ program
   .description('Show the signed-in Cascade Cloud account')
   .action(async () => {
     await whoamiCommand();
+  });
+
+// ── Your ChatGPT plan, through Sign in with ChatGPT (not Cascade Cloud: that is `login`) ──
+const chatgpt = program
+  .command('chatgpt')
+  .description('Use your ChatGPT plan for eligible requests, through Sign in with ChatGPT (CLI and desktop only)');
+chatgpt
+  .command('signin')
+  .description('Continue with ChatGPT: sign in in your browser and approve plan usage')
+  .option('--new', 'Add another ChatGPT account instead of signing in to the active one')
+  .option('--account <account>', 'Sign in again to this saved account (number, email or ID)')
+  .option('--enable-plan', 'Ask again to approve ChatGPT plan usage (after declining it)')
+  .action(async (opts: { new?: boolean; account?: string; enablePlan?: boolean }) => {
+    await chatgptSigninCommand(opts);
+  });
+chatgpt
+  .command('signout')
+  .description('Sign out of ChatGPT: revoke the session and clear the tokens on this machine')
+  .option('--account <account>', 'Sign out of this saved account (default: the active one)')
+  .action(async (opts: { account?: string }) => {
+    await chatgptSignoutCommand(opts);
+  });
+chatgpt
+  .command('status')
+  .description('The active ChatGPT account, whether plan usage is enabled, and when the token expires')
+  .action(() => {
+    chatgptStatusCommand();
+  });
+chatgpt
+  .command('accounts [action] [account]')
+  .description('List your ChatGPT accounts, or switch: accounts use <number|email>')
+  .action((action?: string, account?: string) => {
+    chatgptAccountsCommand(action, account);
+  });
+chatgpt
+  .command('export')
+  .description('Write one account\'s protected credential record, to move it to a machine with no browser')
+  .option('--account <account>', 'Which account (default: the active one)')
+  .option('--out <file>', 'Where to write it (default: ./cascade-chatgpt-account.json, owner-only)')
+  .option('--stdout', 'Print it instead, to pipe over SSH')
+  .action((opts: { account?: string; out?: string; stdout?: boolean }) => {
+    chatgptExportCommand(opts);
+  });
+chatgpt
+  .command('import <file>')
+  .description('Import an exported account on this machine (use - to read stdin); this machine keeps its own host ID')
+  .action((file: string) => {
+    chatgptImportCommand(file);
   });
 
 // ── This machine's browser, for your cloud runs ──

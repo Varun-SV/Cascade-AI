@@ -4,7 +4,7 @@
 
 import type { ModelInfo, TokenUsage } from '../types.js';
 import { MODELS } from '../constants.js';
-import { resolvePricing, hasContextBands, type PricingProvider } from '../core/router/pricing.js';
+import { resolvePricing, hasContextBands, isPlanBilled, type PricingProvider } from '../core/router/pricing.js';
 
 export interface ResolvedPricing {
   /** USD per 1k input tokens. */
@@ -47,7 +47,7 @@ export function resolveModelPricing(
   model: ModelInfo,
   opts: { inputTokens?: number } = {},
 ): ResolvedPricing {
-  if (model.isLocal) return { input: 0, output: 0, unknown: false };
+  if (model.isLocal || isPlanBilled(model)) return { input: 0, output: 0, unknown: false };
 
   // Banded models are asked of the DATASET first, ahead of the stamped fields.
   // Those fields are not user intent for such a model — both the bundled

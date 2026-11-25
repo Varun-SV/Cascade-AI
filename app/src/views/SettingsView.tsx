@@ -10,6 +10,7 @@ import { setThemePreference } from '../theme/useTheme.js';
 import { RelaySettingsPanel } from './RelaySettingsPanel.js';
 import { WorkspaceSettingsPanel } from './WorkspaceSettingsPanel.js';
 import { UpdatesPanel } from './UpdatesPanel.js';
+import { ChatGptPlanSection } from '../components/ChatGptPlan.js';
 
 type Tab = 'keys' | 'models' | 'budget' | 'connectors' | 'cloudRuns' | 'workspaces' | 'advanced' | 'data' | 'appearance' | 'updates';
 type Bias = 'balanced' | 'quality' | 'cost';
@@ -586,6 +587,7 @@ export function SettingsView({ socket }: Props) {
               <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: 0 }}>
                 Keys are stored in your local Cascade config and never sent to any server other than the model provider.
               </p>
+              <ChatGptPlanSection />
               {[
                 { id: 'anthropic', label: 'Anthropic', val: anthropicKey, set: setAnthropicKey, placeholder: 'sk-ant-…', url: anthropicUrl, setUrl: touchEndpoint('anthropic', setAnthropicUrl) },
                 { id: 'openai', label: 'OpenAI', val: openaiKey, set: setOpenaiKey, placeholder: 'sk-…', url: openaiUrl, setUrl: touchEndpoint('openai', setOpenaiUrl) },

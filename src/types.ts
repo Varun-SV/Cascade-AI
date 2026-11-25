@@ -10,7 +10,9 @@ export type ProviderType =
   | 'gemini'
   | 'azure'
   | 'openai-compatible'
-  | 'ollama';
+  | 'ollama'
+  /** "ChatGPT plan": the user's own ChatGPT subscription via Sign in with ChatGPT (CLI and desktop only). */
+  | 'chatgpt';
 
 export interface ModelInfo {
   id: string;

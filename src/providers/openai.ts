@@ -292,6 +292,55 @@ export class OpenAIProvider extends BaseProvider {
   }
 
   /**
+   * The request body of one Responses call. A subclass whose route accepts
+   * fewer fields (ChatGPT plan usage) narrows it here rather than rebuilding it.
+   */
+  protected responsesParams(options: GenerateOptions): Record<string, unknown> {
+    const responsesEffort = this.reasoningEffort(this.model.baseModelId ?? this.model.id, options, false);
+    return {
+      model: this.model.id,
+      input: this.convertToResponsesInput(options.messages),
+      ...(options.systemPrompt ? { instructions: options.systemPrompt } : {}),
+      tools: toResponsesTools(options.tools ?? []),
+      max_output_tokens: options.maxTokens ?? this.model.maxOutputTokens,
+      ...(responsesEffort ? { reasoning: { effort: responsesEffort as OpenAI.ReasoningEffort } } : {}),
+      store: false,
+      // Without storage, the encrypted reasoning is the only way the next
+      // turn can carry this turn's reasoning forward.
+      include: ['reasoning.encrypted_content'],
+      stream: true,
+    };
+  }
+
+  /** Opens the event stream. Overridden where the client or its credential changes per request. */
+  protected async createResponsesStream(
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<AsyncIterable<OpenAI.Responses.ResponseStreamEvent>> {
+    return await this.client.responses.create(params as unknown as OpenAI.Responses.ResponseCreateParamsStreaming, { signal }) as AsyncIterable<OpenAI.Responses.ResponseStreamEvent>;
+  }
+
+  /** Called for each function call the model returns (its item, with any fields this SDK version does not type). */
+  protected onResponsesFunctionCall(_item: Record<string, unknown>): void { /* nothing to remember by default */ }
+
+  /**
+   * True where only `response.completed` counts as success. A stream that
+   * ends without it, or ends `response.incomplete`, is an error: the default
+   * keeps the lenient behaviour every other Responses caller has had.
+   */
+  protected responsesRequireCompleted = false;
+
+  /** The error for a `response.failed` / stream `error` event. */
+  protected responsesFailure(err: { code?: string | null; message?: string | null; param?: string | null } | null | undefined): Error {
+    return new Error(err ? `${err.code}: ${err.message}` : 'OpenAI Responses API request failed');
+  }
+
+  /** The error for a stream that did not finish with `response.completed` (only when required). */
+  protected responsesIncomplete(reason?: string): Error {
+    return new Error(reason ? `The response ended early (${reason}).` : 'The response stream ended without response.completed.');
+  }
+
+  /**
    * The same contract as the Chat Completions path — streamed text, tool calls
    * with parsed input, usage, finish reason — over the Responses API, for the
    * models that only call tools there.
@@ -304,27 +353,15 @@ export class OpenAIProvider extends BaseProvider {
     options: GenerateOptions,
     onChunk: (chunk: StreamChunk) => void,
   ): Promise<GenerateResult> {
-    const responsesEffort = this.reasoningEffort(this.model.baseModelId ?? this.model.id, options, false);
-    const params = {
-      model: this.model.id,
-      input: this.convertToResponsesInput(options.messages),
-      ...(options.systemPrompt ? { instructions: options.systemPrompt } : {}),
-      tools: toResponsesTools(options.tools ?? []),
-      max_output_tokens: options.maxTokens ?? this.model.maxOutputTokens,
-      ...(responsesEffort ? { reasoning: { effort: responsesEffort as OpenAI.ReasoningEffort } } : {}),
-      store: false,
-      // Without storage, the encrypted reasoning is the only way the next
-      // turn can carry this turn's reasoning forward.
-      include: ['reasoning.encrypted_content' as const],
-      stream: true as const,
-    };
-    const stream = await this.client.responses.create(params, { signal: options.signal });
+    const params = this.responsesParams(options);
+    const stream = await this.createResponsesStream(params, options.signal);
 
     let fullContent = '';
     let isThinking = false;
     let inputTokens = 0;
     let outputTokens = 0;
     let finishReason: GenerateResult['finishReason'] = 'stop';
+    let completed = false;
     // Keyed by output item id, in the order the items appear.
     const calls = new Map<string, { id: string; name: string; args: string }>();
     const reasoning: OpenAI.Responses.ResponseReasoningItem[] = [];
@@ -359,6 +396,7 @@ export class OpenAIProvider extends BaseProvider {
             calls.set(event.item.id ?? event.item.call_id, {
               id: event.item.call_id, name: event.item.name, args: event.item.arguments ?? '',
             });
+            this.onResponsesFunctionCall(event.item as unknown as Record<string, unknown>);
           }
           break;
         }
@@ -369,6 +407,12 @@ export class OpenAIProvider extends BaseProvider {
         }
         case 'response.output_item.done': {
           if (event.item.type === 'reasoning') reasoning.push(event.item);
+          if (event.item.type === 'function_call') {
+            // The item's own final form, even when its `added` event was not seen.
+            const key = event.item.id ?? event.item.call_id;
+            if (!calls.has(key)) calls.set(key, { id: event.item.call_id, name: event.item.name, args: event.item.arguments ?? '' });
+            this.onResponsesFunctionCall(event.item as unknown as Record<string, unknown>);
+          }
           break;
         }
         case 'response.function_call_arguments.done': {
@@ -379,6 +423,10 @@ export class OpenAIProvider extends BaseProvider {
         }
         case 'response.completed':
         case 'response.incomplete': {
+          if (event.type === 'response.incomplete' && this.responsesRequireCompleted) {
+            throw this.responsesIncomplete(event.response.incomplete_details?.reason ?? undefined);
+          }
+          completed = true;
           const usage = event.response.usage;
           if (usage) {
             inputTokens = usage.input_tokens;
@@ -392,19 +440,19 @@ export class OpenAIProvider extends BaseProvider {
           break;
         }
         case 'response.failed': {
-          const err = event.response.error;
-          throw new Error(err ? `${err.code}: ${err.message}` : 'OpenAI Responses API request failed');
+          throw this.responsesFailure(event.response.error);
         }
         // A stream-level error (not a failed response). Returning normally here
         // would hand the tier an empty "success" instead of letting the router
         // retry or fail over.
         case 'error':
-          throw new Error(`${event.code ?? 'error'}: ${event.message}`);
+          throw this.responsesFailure({ code: event.code ?? 'error', message: event.message, param: event.param });
         default:
           break;
       }
     }
     closeThinking();
+    if (this.responsesRequireCompleted && !completed) throw this.responsesIncomplete();
 
     const toolCalls = [...calls.values()].map((tc) => {
       // Same degradation as the Chat Completions path: a truncated argument

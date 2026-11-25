@@ -24,6 +24,7 @@ import { AzureOpenAIProvider, azureModelForDeployment } from '../../providers/az
 import { GeminiProvider } from '../../providers/gemini.js';
 import { OllamaProvider } from '../../providers/ollama.js';
 import { OpenAICompatibleProvider } from '../../providers/openai-compatible.js';
+import { ChatGptProvider } from '../../providers/chatgpt.js';
 import { OpenAIProvider } from '../../providers/openai.js';
 import { ProviderUnreachableError } from '../../providers/base.js';
 import type { BaseProvider } from '../../providers/base.js';
@@ -775,7 +776,7 @@ export class CascadeRouter extends EventEmitter {
 
       const model = this.selector.selectForTier(tier, override);
       if (!model) {
-        const knownProviders = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama'];
+        const knownProviders = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'ollama', 'chatgpt'];
         const hasProviderPrefix = override.includes(':') &&
           knownProviders.some(p => override.startsWith(p + ':'));
         if (hasProviderPrefix) {
@@ -987,7 +988,7 @@ export class CascadeRouter extends EventEmitter {
    * best-effort + time-boxed, so offline/error simply keeps the bundled catalog.
    */
   private async validateCloudProviderModels(config: CascadeConfig): Promise<void> {
-    const providers: ProviderType[] = ['anthropic', 'openai', 'gemini'];
+    const providers: ProviderType[] = ['anthropic', 'openai', 'gemini', 'chatgpt'];
     await Promise.all(providers.map(async (type) => {
       if (!this.selector.isProviderAvailable(type)) return;
       const cfg = config.providers.find((p) => p.type === type);
@@ -997,9 +998,12 @@ export class CascadeRouter extends EventEmitter {
       // stayed pinned to the BUNDLED public Anthropic catalogue and could pick
       // a model the gateway does not serve — failing the first real request
       // from a gateway that had advertised its models correctly.
-      if (!cfg || !hasProviderCredential(cfg)) return;
+      // ChatGPT plan has no key in config: its credential is the signed-in
+      // account, and its model list is per account, so it is never served from
+      // the per-process cache (an account switch must show the new list).
+      if (!cfg || (type !== 'chatgpt' && !hasProviderCredential(cfg))) return;
       const cacheKey = discoveryCacheKey(type, cfg);
-      let entry = cloudDiscoveryCache.get(cacheKey);
+      let entry = type === 'chatgpt' ? undefined : cloudDiscoveryCache.get(cacheKey);
       if (!entry || Date.now() - entry.at > DISCOVERY_TTL_MS) {
         const seed = this.getAnyModelForProvider(type);
         if (!seed) return;
@@ -1020,7 +1024,7 @@ export class CascadeRouter extends EventEmitter {
           );
           if (!models.length) return; // empty/unreachable → keep the static catalog
           entry = { models, ids: models.map((m) => m.id), at: Date.now() };
-          cloudDiscoveryCache.set(cacheKey, entry);
+          if (type !== 'chatgpt') cloudDiscoveryCache.set(cacheKey, entry);
         } catch {
           return; // best-effort — offline/error leaves today's behaviour intact
         }
@@ -1036,7 +1040,7 @@ export class CascadeRouter extends EventEmitter {
    * models without a package upgrade. Mirrors discoverOllamaModels.
    */
   private async discoverProviderModels(): Promise<void> {
-    const cloud: ProviderType[] = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible'];
+    const cloud: ProviderType[] = ['anthropic', 'openai', 'gemini', 'azure', 'openai-compatible', 'chatgpt'];
     const tasks = cloud.map(async (type) => {
       if (!this.selector.isProviderAvailable(type)) return;
       const seed = this.getAnyModelForProvider(type);
@@ -2570,6 +2574,7 @@ export class CascadeRouter extends EventEmitter {
       case 'azure': return new AzureOpenAIProvider(cfg, model);
       case 'ollama': return new OllamaProvider(cfg, model);
       case 'openai-compatible': return new OpenAICompatibleProvider(cfg, model);
+      case 'chatgpt': return new ChatGptProvider(cfg, model);
       default:
         throw new Error(`Unsupported provider type: ${String(cfg.type)}`);
     }
@@ -2585,7 +2590,8 @@ export class CascadeRouter extends EventEmitter {
     // marked available and its models could not be selected. Synthesize a minimal
     // seed so the client can be built for the availability check and model
     // listing; the real models are discovered from the endpoint.
-    if (type === 'openai-compatible' || type === 'azure') {
+    // chatgpt too: its models are the signed-in account's own list, fetched live.
+    if (type === 'openai-compatible' || type === 'azure' || type === 'chatgpt') {
       return {
         id: type, name: type, provider: type,
         contextWindow: 32_000, isVisionCapable: false,

@@ -216,6 +216,8 @@ const PROFILES: Record<ProviderType, WireProfile> = {
   azure: OPENAI,
   'openai-compatible': OPENAI,
   ollama: OLLAMA,
+  // ChatGptProvider extends OpenAIProvider and sends the same messages.
+  chatgpt: OPENAI,
 };
 
 /**

@@ -12,6 +12,7 @@ import React from 'react';
 import { Text, useStdout } from 'ink';
 import chalk from 'chalk';
 import type { Theme } from '../../../types.js';
+import { USING_PLAN_LABEL } from '../../../auth/chatgpt/constants.js';
 
 interface StatusBarProps {
   theme: Theme;
@@ -33,6 +34,8 @@ interface StatusBarProps {
    * cost can't be, so the cost shown is what the rest cost: "$8.51+".
    */
   unpricedCalls?: number;
+  /** A tier runs on the user's ChatGPT plan: say so (the manage-usage link is in /settings and `cascade chatgpt status`). */
+  usingChatGptPlan?: boolean;
 }
 
 /** "anthropic:claude-opus-4-1-20250805" → "opus-4-1"; unset → "auto". */
@@ -43,13 +46,13 @@ export function shortModel(id: string | undefined): string {
 }
 
 function StatusBarInternal({
-  theme, tierModels, tokens, costUsd, savedUsd = 0, isExecuting, autonomy = 'manual', checkpoint, elapsedMs, unpricedCalls = 0,
+  theme, tierModels, tokens, costUsd, savedUsd = 0, isExecuting, autonomy = 'manual', checkpoint, elapsedMs, unpricedCalls = 0, usingChatGptPlan = false,
 }: StatusBarProps): React.ReactElement {
   const { stdout } = useStdout();
   const width = stdout?.columns ?? 100;
 
   const mode = autonomy === 'auto' ? 'AUTO' : 'ASKS FIRST';
-  const left = ` ◆ CASCADE · ${mode}${checkpoint ? ` · ↺ #${checkpoint}` : ''} `;
+  const left = ` ◆ CASCADE · ${mode}${checkpoint ? ` · ↺ #${checkpoint}` : ''}${usingChatGptPlan ? ` · ${USING_PLAN_LABEL}` : ''} `;
   const models = ` T1 ${shortModel(tierModels.t1)} · T2 ${shortModel(tierModels.t2)} · T3 ${shortModel(tierModels.t3)} `;
   const time = elapsedMs !== undefined && elapsedMs > 0 ? ` · ${formatClock(elapsedMs)}` : '';
   const saved = savedUsd > 0 && width >= 100 ? ` · saved $${savedUsd.toFixed(2)}` : '';
