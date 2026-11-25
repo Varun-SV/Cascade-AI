@@ -5,6 +5,15 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.99.12 - 2026-11-25
+
+### Added
+- **`cascade workspace serve` lets the CLI serve a folder to a Cascade Cloud run, as the desktop app does.** Run `cascade workspace serve` (or `cascade workspace serve ~/code/app`) in a terminal where you have run `cascade login` and `cascade relay pair`. It prints "Serving <label> to Cascade Cloud — Ctrl+C to stop" and stays connected, with the same device and key the browser relay uses: nothing new is registered. When a run asks for the folder the terminal shows which chat is asking and what you can give it: 1 read only, 2 read and edit, 3 everything. Enter is a no, and so is no answer within the offer's time (never more than ten minutes). You then choose what the run sees the folder called, "Workspace on <your computer>" or the folder's own name; the path is never sent. Risky calls (deleting, installing, sending things off the machine, rewriting git history) ask again in the terminal: `y` allows one, `a` allows the rest of that run, and anything else, or two minutes with no answer, refuses it. While a run works, one dim line per call shows the tool and a relative path or the command, with your configured keys masked and never file contents or the code of `run_code`. Ctrl+C ends the run's access at once. When a run ends having changed files, the terminal offers to undo them from the checkpoint taken before its first change, or tells you to run `cascade` in that folder and type `/undo`. The same rules as the desktop app apply: a whole drive, your home folder and a folder that holds it are refused, `.cascadeignore` and `privacy.paths` are respected, your configured keys are scrubbed from commands, an undo or a previous run still finishing blocks a new run from opening the folder, and a service that was stopped can no longer open or end a newer one's run. Options: `--tools <read|edit|all>` and `--label <device|folder>` set the default answers, and `--yes-read-only` answers "read only" for a run that asks, without a question. It never answers for anything more, and a risky call is always asked about.
+- **`cascade workspace status`** says whether this machine is paired, which server it would serve, and whether the server still lists it as one of your devices.
+
+### Changed
+- **The server now lets a CLI device serve a workspace.** The workspace relay admitted only desktop devices; it now admits CLI devices too, and still refuses a browser extension. A CLI machine that is serving shows in the web app's Environment menu like a desktop does. The message for a computer that is not serving now also mentions `cascade workspace serve`, and a chosen computer that cannot serve a workspace reads "not one of your devices that can serve a workspace". The docs (Workspaces, CLI reference, Troubleshooting) and the README describe the CLI command.
+
 ## Unreleased
 
 ### Added

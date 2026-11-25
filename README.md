@@ -311,12 +311,13 @@ How each model has actually done on each kind of task across Cascade's runs is p
 
 ### Workspaces: a Cloud run in your own folder
 
-By default a hosted run has no shell and no files. **Workspaces** let a Cascade Cloud run work in **a folder on your own computer**, served by the desktop app. The agent loop stays on the server; only **tool calls** cross (`shell`, `file_read`, `file_write`, `file_edit`, `file_delete`, `file_list`, `glob`, `grep`, `git`, `run_code`). Cascade hosts no cloud sandboxes.
+By default a hosted run has no shell and no files. **Workspaces** let a Cascade Cloud run work in **a folder on your own computer**, served by the desktop app or by the CLI (`cascade workspace serve`). The agent loop stays on the server; only **tool calls** cross (`shell`, `file_read`, `file_write`, `file_edit`, `file_delete`, `file_list`, `glob`, `grep`, `git`, `run_code`). Cascade hosts no cloud sandboxes.
 
 **Set up**
 
 1. Self-hosters: set `WORKSPACE_RELAY=true` on the server. Without it none of the workspace endpoints exist.
 2. In the desktop app, sign in to Cascade Cloud and turn on **Settings → Workspaces** (off by default; it uses the same pairing as Cloud runs).
+   Or, from a terminal: `cascade login`, `cascade relay pair` once, then `cascade workspace serve [folder]` (see below).
 3. In the web app, use the **Environment** button next to the tools in the message box. It lists "Cloud (no files)" (the default) and each of your computers, with a dot for whether it is serving. The choice is remembered per chat.
 
 **What you control, on your computer**
@@ -328,6 +329,18 @@ By default a hosted run has no shell and no files. **Workspaces** let a Cascade 
 - **Undo.** The folder is checkpointed before the run's first change. Afterwards the banner offers **Undo this run's changes**. If no checkpoint can be taken, every change is asked about.
 - **Privacy.** `.cascadeignore` and `privacy.paths` are respected: protected and local-only files are never read for the run, since its models are cloud models. Commands run in the [process jail](#privacy-paths-and-the-process-jail).
 - **Your path stays private.** The run is told only a label you choose ("Workspace on <computer>", or the folder's name). The server logs none of the files, paths or command output.
+
+**From the CLI**
+
+```bash
+cascade relay pair                     # once: register this machine (the same pairing the browser relay uses)
+cascade workspace serve                # serve the current folder; or: cascade workspace serve ~/code/app
+cascade workspace serve --tools edit --label folder     # default answer: read and edit; the run sees the folder's name
+cascade workspace serve --yes-read-only                 # answer "read only" for a run that asks, without a question
+cascade workspace status               # paired? registered? which server would it serve?
+```
+
+It prints "Serving <label> to Cascade Cloud — Ctrl+C to stop", then asks in the terminal when a run wants the folder: **1** read only, **2** read and edit, **3** everything, Enter for no (no answer within the offer's time, never over ten minutes, is a no), and what the run should call the folder. Risky calls ask again (`y` allow, `a` allow the rest of this run, otherwise no; unanswered for two minutes is no). A compact line per call shows the tool and a relative path or the command, never file contents. **Ctrl+C** ends the run's access at once. When a run ends having changed files, it offers to undo them from the checkpoint; or run `cascade` in that folder and type `/undo`. The folder rules, tool presets, `.cascadeignore`, `privacy.paths` and scrubbing of your configured keys are the same as the desktop app's. `--yes-read-only` is the only automatic answer there is: a risky call is always asked about.
 
 **In the web app**, the chat shows "Waiting for <computer> to allow this run…", then a chip "Working in <folder> on <computer>", a notice while a step waits for your approval on that computer, and a **Files changed in your workspace** list: an edit with a red and green diff, a write with the new content, a delete as "deleted", and a note for any file that changed on your computer since the run read it. Command output and file contents it read are never sent to this list.
 
@@ -481,6 +494,7 @@ cascade login | logout | whoami      Cascade Cloud account (shared with desktop 
 cascade sync push | pull             Encrypted settings sync, with a passphrase
 cascade sessions [show|branch|rm|rename|delete]   Manage cloud chats
 cascade relay pair|serve|devices|forget           Serve your browser to cloud runs
+cascade workspace serve [folder] | status          Serve a folder to cloud runs, asking here first
 cascade dashboard [-p <port>]        Local web dashboard
 cascade telemetry [on|off|status]    Anonymous usage telemetry (off by default)
 cascade update                       Update to the latest version
@@ -637,7 +651,7 @@ docker compose up                    # → http://localhost:8787
 | `SESSION_SECRET` | Required, at least 16 characters |
 | `PORT` (8787), `DATA_DIR`, `WEB_ORIGIN` | Port, where the database and uploads live (mount a volume), and the public origin |
 | `GITHUB_CLIENT_ID/SECRET`, `GOOGLE_CLIENT_ID/SECRET` | Real sign-in |
-| `WORKSPACE_RELAY=true` | Lets runs work in a folder on a user's computer through the desktop app. Off by default; with it off the endpoints do not exist |
+| `WORKSPACE_RELAY=true` | Lets runs work in a folder on a user's computer through the desktop app or `cascade workspace serve`. Off by default; with it off the endpoints do not exist |
 | `BROWSER_RELAY=true` | Lets runs use a user's own browser through the extension, CLI or desktop. Off by default |
 | `BROWSER_ENDPOINTS=true` | Lets users give runs their own CDP endpoint (public addresses only unless `BROWSER_ENDPOINTS_PRIVATE`) |
 | `REMOTE_BROWSER_PROVIDER` (`cdp` or `steel`), `REMOTE_BROWSER_URL`, `REMOTE_BROWSER_API_KEY`, `REMOTE_BROWSER_VISION` | An operator-hosted browser. `HOSTED_BROWSER=off` retires it |

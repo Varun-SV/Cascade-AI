@@ -22,6 +22,7 @@ import {
   sessionBranchCommand, sessionRemoveMessageCommand, sessionRenameCommand, sessionDeleteCommand,
   syncPushCommand, syncPullCommand,
 } from './commands/cloud.js';
+import { workspaceServeCommand, workspaceStatusCommand } from './commands/workspace.js';
 import { relayDevicesCommand, relayForgetCommand, relayPairCommand, relayServeCommand } from './commands/relay.js';
 import { mcpConnectCommand, mcpListCommand, mcpRemoveCommand } from './commands/mcp.js';
 import { updateCommand } from './commands/update.js';
@@ -271,6 +272,26 @@ relay
   .description('Remove this machine, on the server and here')
   .action(async () => {
     await relayForgetCommand();
+  });
+
+// ── A folder on this machine, for your cloud runs ──
+const workspaceCmd = program
+  .command('workspace')
+  .description('Let your Cascade Cloud runs work in a folder on this machine, with your yes each time');
+workspaceCmd
+  .command('serve [folder]')
+  .description('Serve a folder (default: this one) to cloud runs, asking here before each run and each risky call')
+  .option('--tools <preset>', 'The tools offered as the default answer: read, edit or all', 'read')
+  .option('--label <mode>', 'What a run is shown: device ("Workspace on <this machine>") or folder (the folder\'s name)', 'device')
+  .option('--yes-read-only', 'Give a run that asks read-only access without a question (never anything more)')
+  .action(async (folder: string | undefined, opts: { tools?: string; label?: string; yesReadOnly?: boolean }) => {
+    await workspaceServeCommand(folder, opts);
+  });
+workspaceCmd
+  .command('status')
+  .description('Whether this machine is paired, and which server it would serve')
+  .action(async () => {
+    await workspaceStatusCommand();
   });
 
 const sessions = program

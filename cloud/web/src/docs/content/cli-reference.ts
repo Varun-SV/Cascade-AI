@@ -76,6 +76,13 @@ cascade -p "<prompt>"        # the same, as an option`),
         ['`cascade relay forget`', 'Remove this machine, on the server and here.'],
       ),
       p('See [Browser relay](/docs/browser-relay).'),
+      h2('A folder on this machine, for Cloud runs'),
+      table(
+        ['Command', 'What it does'],
+        ['`cascade workspace serve [folder]`', 'Serve a folder (default: the current one) to Cloud runs, asking here before each run and each risky call. Needs `cascade login` and `cascade relay pair`. `--tools <read|edit|all>` sets the default answer (default `read`), `--label <device|folder>` what the run sees the folder called (default `device`), `--yes-read-only` answers read only for a run that asks, without a question.'],
+        ['`cascade workspace status`', 'Whether this machine is paired and registered, and which server it would serve.'],
+      ),
+      p('See [Workspaces](/docs/workspaces).'),
     ],
   },
   {

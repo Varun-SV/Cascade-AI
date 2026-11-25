@@ -2,14 +2,14 @@
 //  Cascade Cloud — a run's coding tools are the user's own machine's
 // ─────────────────────────────────────────────
 //
-//  The server hosts no shell, no files and no git. A user's desktop app dials out
+//  The server hosts no shell, no files and no git. A user's desktop app (or `cascade workspace serve`) dials out
 //  to this server and serves a folder the user chose; a run started with that
 //  device runs its coding tools there (docs/design/workspace-env.md).
 //
 //  This is the browser relay's machinery under a family of its own: the same
 //  server key, the same device table (a desktop's registered key serves both), the
 //  same hub rules, but grants and approvals signed under the workspace domains, two
-//  endpoints of its own, and only `desktop` devices admitted. The server relays
+//  endpoints of its own, and only `desktop` and `cli` devices admitted. The server relays
 //  frames. It reads nothing of them beyond the protocol's own checks and logs
 //  nothing of their content: no file contents, no paths, no command output.
 
@@ -33,13 +33,13 @@ import type { CloudStore, RelayDeviceKind } from './db.js';
 export const WORKSPACE_CONTROL_PATH = '/api/workspace-relay/control';
 export const WORKSPACE_RUN_PATH = '/api/workspace-relay/run';
 export const WORKSPACE_DEVICES_PATH = '/api/workspace-relay/devices';
-/** Only a desktop app serves a folder: not the CLI, and not a browser extension. */
-const WORKSPACE_KINDS: readonly RelayDeviceKind[] = ['desktop'];
+/** The desktop app and the CLI (`cascade workspace serve`) serve a folder: a browser extension can't. */
+const WORKSPACE_KINDS: readonly RelayDeviceKind[] = ['desktop', 'cli'];
 
 export interface WorkspaceRelay {
   readonly hub: RelayHub;
   readonly identity: RelayIdentity;
-  /** The signed-in user's own desktop devices, and whether each is serving workspaces now. */
+  /** The signed-in user's own desktop and CLI devices, and whether each is serving workspaces now. */
   routes(app: Express, sessionSecret: string): void;
   /** Takes the two public WebSocket paths on this server. */
   attach(server: http.Server): void;
@@ -98,13 +98,13 @@ export async function openWorkspaceForRun(
   req: { userId: string; deviceId: string; runId: string; signal?: AbortSignal },
 ): Promise<RunWorkspace> {
   const device = store.getRelayDevice(req.deviceId);
-  // Only the user's own desktops: another user's id reads the same as none.
+  // Only the user's own desktop and CLI devices: another user's id reads the same as none.
   if (!device || device.userId !== req.userId || !WORKSPACE_KINDS.includes(device.kind)) {
-    throw new WorkspaceRunError('That computer is not one of your desktop devices. Pick one from your devices, or run without a workspace.');
+    throw new WorkspaceRunError('That computer is not one of your devices that can serve a workspace. Pick one from your devices, or run without a workspace.');
   }
   const named = `"${device.name}"`;
   if (!relay.hub.deviceOnline(req.userId, device.id)) {
-    throw new WorkspaceRunError(`Your computer ${named} is not serving workspaces right now. Open the Cascade desktop app on it and turn workspace serving on, then try again.`);
+    throw new WorkspaceRunError(`Your computer ${named} is not serving workspaces right now. Open the Cascade desktop app on it and turn workspace serving on (or run \`cascade workspace serve\` there), then try again.`);
   }
   const stopped = (): WorkspaceRunError => new WorkspaceRunError('The run was stopped before its workspace opened.');
   if (req.signal?.aborted) throw stopped();
