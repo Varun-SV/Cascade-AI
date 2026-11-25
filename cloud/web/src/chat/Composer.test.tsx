@@ -177,31 +177,55 @@ describe('attachments', () => {
 });
 
 describe('the thinking level', () => {
-  it('is chosen in the mode menu and shown as a chip that turns it back to Auto', () => {
-    const onThinkingChange = vi.fn();
-    const { rerender, ...props } = renderComposer({ onThinkingChange });
+  it('has its own button, named for the level when it is not Auto', () => {
+    const { rerender, ...props } = renderComposer();
+    expect(screen.getByRole('button', { name: 'Thinking' })).toBeInTheDocument();
+    rerender(<Composer {...props} thinking="high" />);
+    const btn = screen.getByRole('button', { name: 'Thinking: High' });
+    expect(btn).toHaveTextContent('High');
+    // One place for it: no chip, and nothing about it in the routing menu.
+    expect(screen.queryByRole('button', { name: /Remove Thinking/ })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /^Auto/ }));
+    expect(screen.queryByRole('menuitemradio', { name: /^High/ })).toBeNull();
+    expect(screen.queryByText('Thinking')).toBeNull();
+  });
+
+  it('opens a menu of the five levels with their sub-labels, and chooses one', () => {
+    const onThinkingChange = vi.fn();
+    renderComposer({ onThinkingChange });
+    fireEvent.click(screen.getByRole('button', { name: 'Thinking' }));
+    const levels = screen.getAllByRole('menuitemradio');
+    expect(levels).toHaveLength(5);
+    expect(levels.map((l) => l.textContent)).toEqual([
+      "AutoEach model's default", 'OffAs little as each model allows', 'LowQuick, light reasoning', 'MediumBalanced', 'HighThinks longest; slower, costs more',
+    ]);
+    expect(screen.getByRole('menuitemradio', { name: /^Auto/ })).toHaveAttribute('aria-checked', 'true');
     fireEvent.click(screen.getByRole('menuitemradio', { name: /^High/ }));
     expect(onThinkingChange).toHaveBeenLastCalledWith('high');
-    rerender(<Composer {...props} onThinkingChange={onThinkingChange} thinking="high" />);
-    fireEvent.click(screen.getByRole('button', { name: 'Remove Thinking: High' }));
+  });
+
+  it('is turned back to Auto from its menu', () => {
+    const onThinkingChange = vi.fn();
+    renderComposer({ onThinkingChange, thinking: 'low' });
+    fireEvent.click(screen.getByRole('button', { name: 'Thinking: Low' }));
+    expect(screen.getByRole('menuitemradio', { name: /^Low/ })).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /^Auto/ }));
     expect(onThinkingChange).toHaveBeenLastCalledWith('auto');
-    rerender(<Composer {...props} onThinkingChange={onThinkingChange} thinking="auto" />);
-    expect(screen.queryByRole('button', { name: /Remove Thinking/ })).toBeNull();
   });
 
   it('says it is not sent to Azure deployments', () => {
     renderComposer();
-    fireEvent.click(screen.getByRole('button', { name: /^Auto/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Thinking' }));
     expect(screen.getByText('Not sent to Azure deployments.')).toBeInTheDocument();
   });
 
   it('is unavailable when every provider is an Azure deployment', () => {
     renderComposer({ thinkingUnavailable: true, thinking: 'high' });
-    expect(screen.queryByRole('button', { name: /Remove Thinking/ })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: /^Auto/ }));
+    expect(screen.getByRole('button', { name: 'Thinking' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Thinking' }));
     expect(screen.getByText("Not available: Azure deployments don't take a thinking setting.")).toBeInTheDocument();
     const high = screen.getByRole('menuitemradio', { name: /^High/ }) as HTMLButtonElement;
     expect(high.disabled).toBe(true);
+    expect(screen.getByRole('menuitemradio', { name: /^Auto/ })).toHaveAttribute('aria-checked', 'true');
   });
 });

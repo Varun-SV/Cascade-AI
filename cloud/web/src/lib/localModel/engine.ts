@@ -30,30 +30,65 @@ export interface MlcEngine {
 }
 
 let enginePromise: Promise<MlcEngine> | null = null;
+/** Set only once the model has finished loading: a load in progress is not ready. */
+let ready = false;
 
-/** Lazily spins up the WebLLM engine in a Web Worker (once per page). */
+/** Where the page's engine is: nothing yet, loading (with progress), ready, or failed. */
+export interface EngineStatus { stage: 'idle' | 'loading' | 'ready' | 'failed'; progress?: number }
+let status: EngineStatus = { stage: 'idle' };
+const listeners = new Set<(s: EngineStatus) => void>();
+function setStatus(next: EngineStatus): void {
+  status = next;
+  for (const fn of listeners) fn(status);
+}
+export function getEngineStatus(): EngineStatus { return status; }
+/** Called with every change of status; returns the unsubscribe. */
+export function subscribeEngineStatus(fn: (s: EngineStatus) => void): () => void {
+  listeners.add(fn);
+  return () => { listeners.delete(fn); };
+}
+
+/**
+ * Lazily spins up the WebLLM engine in a Web Worker (once per page).
+ *
+ * Loading puts the model on the GPU (WebGPU), which can hold up the whole
+ * browser for a while on some machines, so nothing waits on a load in progress
+ * except a caller that asks for the engine itself (the titler, after an answer).
+ */
 export async function getEngine(onProgress?: (p: EngineProgress) => void): Promise<MlcEngine> {
   if (!enginePromise) {
+    setStatus({ stage: 'loading', progress: 0 });
     enginePromise = (async () => {
       const { CreateWebWorkerMLCEngine } = await import('@mlc-ai/web-llm');
       const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
       const engine = await CreateWebWorkerMLCEngine(worker, LOCAL_MODEL_ID, {
-        initProgressCallback: (r: { progress: number; text: string }) =>
-          onProgress?.({ stage: 'loading', progress: r.progress, text: r.text }),
+        initProgressCallback: (r: { progress: number; text: string }) => {
+          setStatus({ stage: 'loading', progress: r.progress });
+          onProgress?.({ stage: 'loading', progress: r.progress, text: r.text });
+        },
       });
+      ready = true;
+      setStatus({ stage: 'ready' });
       onProgress?.({ stage: 'ready' });
       return engine as unknown as MlcEngine;
     })().catch((e) => {
       enginePromise = null; // a failed load shouldn't poison future attempts
+      ready = false;
+      setStatus({ stage: 'failed' });
       throw e;
     });
   }
   return enginePromise;
 }
 
-/** True once the engine has been created this session (model downloaded/cached). */
+/** True once a load has been started this page (it may still be loading). */
 export function isEngineWarm(): boolean {
   return enginePromise !== null;
+}
+
+/** True only once the model has finished loading: using it then costs no wait. */
+export function isEngineReady(): boolean {
+  return ready;
 }
 
 /**

@@ -21,7 +21,7 @@ import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import type { Duplex } from 'node:stream';
-import type { Express, Response } from 'express';
+import type { Express, RequestHandler, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import { WebSocketServer } from 'ws';
 import {
@@ -106,8 +106,12 @@ export function sqliteNonceStore(store: CloudStore, now: () => number = Date.now
 export interface BrowserRelay {
   readonly hub: RelayHub;
   readonly identity: RelayIdentity;
-  /** Registration and listing, for the signed-in user's own devices. */
-  routes(app: Express, sessionSecret: string): void;
+  /**
+   * Registration, listing, renaming and removal, for the signed-in user's own devices.
+   * `onDeviceRemoved` lets another relay on this server (the workspace one) end what it is
+   * serving for a device that was just removed here.
+   */
+  routes(app: Express, sessionSecret: string, hooks?: { onDeviceRemoved?: (deviceId: string) => void }): void;
   /** Takes the two public WebSocket paths on this server. */
   attach(server: http.Server): void;
   /** Resolves once the loopback endpoint for runs is listening. */
@@ -119,6 +123,47 @@ export interface BrowserRelay {
 
 /** What a client may see of a device. The public key is not secret, but nothing needs it. */
 const publicDevice = (d: RelayDevice, online: boolean) => ({ id: d.id, name: d.name, kind: d.kind, createdAt: d.createdAt, lastSeenAt: d.lastSeenAt, online });
+
+const MAX_DEVICE_NAME = 80;
+
+/**
+ * Renaming and removing a user's own device, the same for both relays. Only the owner's:
+ * someone else's id, an unknown one and a revoked one all read as not found. A removed
+ * device's connection ends now, not at its next connection.
+ */
+export function deviceManagementRoutes(app: Express, o: {
+  path: string;
+  store: Pick<CloudStore, 'getRelayDevice' | 'renameRelayDevice' | 'revokeRelayDevice'>;
+  hub: Pick<RelayHub, 'dropDevice'>;
+  limited: RequestHandler;
+  auth: RequestHandler;
+  now: () => number;
+  /** Only devices of these kinds are this relay's to manage. All, unless said. */
+  kinds?: readonly RelayDeviceKind[];
+  onRemoved?: (deviceId: string) => void;
+}): void {
+  const mine = (req: AuthedRequest) => req.session!.userId;
+  const ownDevice = (req: AuthedRequest): RelayDevice | null => {
+    const d = o.store.getRelayDevice(String(req.params['id']));
+    return d && d.userId === mine(req) && (!o.kinds || o.kinds.includes(d.kind)) ? d : null;
+  };
+  app.patch(`${o.path}/:id`, o.limited, o.auth, (req: AuthedRequest, res) => {
+    const raw = (req.body as { name?: unknown } | undefined)?.name;
+    // eslint-disable-next-line no-control-regex
+    const name = typeof raw === 'string' ? raw.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, MAX_DEVICE_NAME) : '';
+    if (!name) { res.status(400).json({ error: 'A device needs a name.' }); return; }
+    const d = ownDevice(req);
+    if (!d || !o.store.renameRelayDevice(mine(req), d.id, name)) { res.status(404).json({ error: 'No such device.' }); return; }
+    res.json({ ok: true, name });
+  });
+  app.delete(`${o.path}/:id`, o.limited, o.auth, (req: AuthedRequest, res) => {
+    const d = ownDevice(req);
+    if (!d || !o.store.revokeRelayDevice(mine(req), d.id, o.now())) { res.status(404).json({ error: 'No such device.' }); return; }
+    o.hub.dropDevice(d.id, 'the device was removed');
+    o.onRemoved?.(d.id);
+    res.json({ ok: true });
+  });
+}
 
 export interface BrowserRelayOptions {
   dataDir: string;
@@ -196,7 +241,7 @@ export function createBrowserRelay(opts: BrowserRelayOptions): BrowserRelay {
       return `ws://127.0.0.1:${address.port}/agent/${token}`;
     },
     attach(server) { attached = server; server.on('upgrade', onUpgrade); },
-    routes(app, sessionSecret) {
+    routes(app, sessionSecret, hooks) {
       // Its own limit, whatever the app puts in front of it: these routes check a
       // session and write to the database, and registering a device is something a
       // person does a handful of times.
@@ -227,13 +272,9 @@ export function createBrowserRelay(opts: BrowserRelayOptions): BrowserRelay {
         res.status(201).json({ device: publicDevice(device, false), serverId: identity.id, serverKey: relayPublicKeyToText(identity.publicKey) });
       });
 
-      app.delete('/api/browser-relay/devices/:id', limited, auth, (req: AuthedRequest, res) => {
-        const id = String(req.params['id']);
-        // Only the owner's own: someone else's id reads as not found.
-        if (!store.revokeRelayDevice(mine(req), id, now())) { res.status(404).json({ error: 'No such device.' }); return; }
-        // And whatever it is serving ends now, not at its next connection.
-        hub.dropDevice(id, 'the device was removed');
-        res.json({ ok: true });
+      deviceManagementRoutes(app, {
+        path: '/api/browser-relay/devices', store, hub, limited, auth, now,
+        ...(hooks?.onDeviceRemoved ? { onRemoved: hooks.onDeviceRemoved } : {}),
       });
     },
     async close() {

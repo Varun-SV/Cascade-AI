@@ -32,6 +32,21 @@ describe('the environment picker', () => {
     expect(screen.queryByRole('button', { name: 'Environment' })).toBeNull();
   });
 
+  it('with workspaces off on the server, is still there: Cloud stays chosen, nothing else is, and it says why', () => {
+    const ws = picker({ devices: [], unavailable: true });
+    render(<Composer {...base} workspace={ws} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Environment' }));
+    expect(screen.getAllByRole('menuitemradio')).toHaveLength(1);
+    expect(screen.getByRole('menuitemradio', { name: /Cloud \(no files\)/ })).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByText(/doesn.t have workspaces turned on, so runs work in the Cloud only/)).toBeInTheDocument();
+    expect(screen.getByText('WORKSPACE_RELAY')).toBeInTheDocument();
+    expect(screen.getByText('BROWSER_RELAY')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'How workspaces work' })).toHaveAttribute('href', '/docs/workspaces');
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /Cloud/ }));
+    expect(ws.onSelect).not.toHaveBeenCalled();
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
   it('lists Cloud and each computer, re-reads the list on open, and disables an offline one with a hint', () => {
     const ws = picker();
     render(<Composer {...base} workspace={ws} />);

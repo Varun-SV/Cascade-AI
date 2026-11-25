@@ -98,7 +98,7 @@ export const USING: DocPage[] = [
       ),
       h2('Where to set it'),
       ul(
-        '**Web:** the Mode menu in the composer, under **Thinking**. A chip shows when it is not on Auto.',
+        '**Web:** the **Thinking** button (a brain) in the composer, beside the Tools and Environment buttons. It shows the level when it is not on Auto, and its menu lists the five levels. It is not in the Mode menu. With only Azure deployments the menu is shown but cannot be changed.',
         '**Desktop:** set per run from the composer.',
         '**CLI and SDK:** the `thinking` config key (`"auto"`, `"off"`, `"low"`, `"medium"` or `"high"`).',
       ),

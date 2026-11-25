@@ -6,7 +6,6 @@ import { fetchBrowserPrefs, removeBrowserEndpoint, saveBrowserEndpoint, setBrows
 
 vi.mock('../lib/api.js', () => ({
   fetchBrowserPrefs: vi.fn(), setBrowserSource: vi.fn(), saveBrowserEndpoint: vi.fn(), removeBrowserEndpoint: vi.fn(),
-  fetchRelayDevices: vi.fn().mockResolvedValue([]), removeRelayDevice: vi.fn(),
 }));
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
@@ -20,8 +19,8 @@ describe('Settings → Browser: where runs get a browser (stage 6)', () => {
     render(<BrowserSettings />);
     const group = await screen.findByRole('group', { name: 'Where runs get a browser' });
     expect(within(group).getAllByRole('button').map((b) => b.textContent)).toEqual(['My devices', 'Run on my desktop']);
-    // The device list is the device source's.
-    expect(await screen.findByText('Your devices')).toBeInTheDocument();
+    // What the device source sends is its own; the list of devices is in Settings → Environments.
+    expect(await screen.findByText('What leaves your device during a run')).toBeInTheDocument();
   });
 
   it('with only the desktop on offer, it can still be chosen, and the way back is this server', async () => {

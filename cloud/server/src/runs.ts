@@ -267,7 +267,7 @@ const ChatRunPayloadSchema = z.object({
   // several online. Checked against their devices; absent picks the one seen last.
   browserDeviceId: z.string().min(1).max(64).optional(),
   // Run the coding tools (shell, files, git) in a folder on one of the user's own
-  // desktop devices, served by the desktop app (docs/design/workspace-env.md). There is
+  // devices, served by the desktop app or `cascade workspace serve` (docs/design/workspace-env.md). There is
   // no fallback: a device that is offline or says no ends the run's start with a reason.
   workspaceDeviceId: z.string().min(1).max(64).optional(),
   // Optional web-search backend the user configured (browser-held, like keys).

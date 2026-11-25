@@ -6,10 +6,10 @@
 // model's miss can never strand a complex task on a cheap tier.
 //
 // The verdict is only ever a hint: the classifier returns null on any doubt
-// (cold engine, timeout, unparseable output), and the server falls back to its
+// (engine not loaded yet, timeout, unparseable output), and the server falls back to its
 // normal classification. Prompt-building and parsing are pure functions kept
 // separate for unit testing.
-import { getEngine, isEngineWarm } from './engine.js';
+import { getEngine, isEngineReady } from './engine.js';
 
 export type LocalComplexity = 'Simple' | 'Moderate' | 'Complex';
 
@@ -57,7 +57,9 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
  * engine is ALREADY warm, so it never blocks a send on a model download.
  */
 export async function classifyLocalComplexity(prompt: string, contextSnippet?: string): Promise<LocalComplexity | null> {
-  if (!prompt.trim() || !isEngineWarm()) return null;
+  // Only a model that has finished loading: a send never waits on a load in
+  // progress (that load holds the GPU, and the first message sat behind it).
+  if (!prompt.trim() || !isEngineReady()) return null;
   try {
     const engine = await getEngine();
     const reply = await withTimeout(

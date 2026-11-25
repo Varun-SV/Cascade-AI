@@ -12,11 +12,12 @@ export const COMPUTER: DocPage[] = [
     blocks: [
       p('A Cloud run normally has no files. It can search, write and build documents, but it has no project to look at. A **workspace** changes that: you pick one folder on your own computer, and the run\'s file, search and shell tools work inside it. The run still happens on the server. Only the tool calls cross to your machine, and your machine decides whether to do them.'),
       note('Workspaces need the Cascade desktop app or the Cascade CLI (either can serve the folder) and a server that has the feature turned on. If you host your own server, it is the `WORKSPACE_RELAY` setting. See [Server environment](/docs/server-environment). The browser extension cannot serve a workspace.', 'What you need'),
+      p('**Settings**, then **Environments**, on the web lists every device you have paired (desktop app, CLI and browser extension), whether each is online, and what it can do. You can rename or remove a device there.'),
       h2('Set it up'),
       ol(
         '**Pair the desktop app.** In the app, open **Settings**, then **Cloud runs**, and pair it with your Cascade account. Workspaces use the same pairing as the browser relay.',
         '**Turn it on.** In **Settings**, then **Workspaces**, switch on "Let Cascade Cloud runs work in a folder on this computer". It is off by default. The app has to be open for it to work.',
-        '**Choose where a chat runs.** On the web, the **Environment** button in the composer lists **Cloud (no files)**, which is the default, and each of your desktop computers, with a dot showing whether it is serving now. A computer that is not serving is shown but cannot be picked. The choice is remembered for that chat.',
+        '**Choose where a chat runs.** On the web, the **Environment** button in the composer lists **Cloud (no files)**, which is the default, and each of your desktop computers, with a dot showing whether it is serving now. A computer that is not serving is shown but cannot be picked. The choice is remembered for that chat. The button is always there when you are signed in. If your server has workspaces off, its menu says so and offers Cloud only.',
         '**Send a message.** Your computer asks you what to allow (below). Say yes and the run starts.',
       ),
       p('Fast answer is turned off while a computer is chosen, because it uses no tools.'),
@@ -28,7 +29,7 @@ cascade workspace serve ~/code/app    # or another folder
 cascade workspace serve --tools edit  # offer "read and edit" as the default answer
 cascade workspace serve --yes-read-only   # answer "read only" for runs that ask, without a question
 cascade workspace status              # paired? which server would it serve?`),
-      p('It prints "Serving <label> to Cascade Cloud — Ctrl+C to stop" and then stays connected. When a run asks, the terminal shows which chat is asking and offers three choices: **1** read only, **2** read and edit, **3** everything. Press Enter to say no. A question you leave open lapses with the offer (never after more than ten minutes), and that is a no. You then choose what the run sees the folder as called: "Workspace on <your computer>", or the folder\'s own name (`--label device` or `--label folder` sets the default).'),
+      p('It prints "Serving <label> to Cascade Cloud — Ctrl+C to stop" and then stays connected. When a run asks, the terminal shows which chat is asking and offers three choices: **1** read only, **2** read and edit, **3** everything. If you started it with `--tools`, that choice is marked and `y` takes it. Press Enter to say no. A question you leave open lapses with the offer (never after more than ten minutes), and that is a no. You then choose what the run sees the folder as called: "Workspace on <your computer>", or the folder\'s own name (`--label device` or `--label folder` sets the default).'),
       p('Risky calls ask again in the terminal with the command or path shown: `y` allows it, `a` allows everything else this run asks, and anything else (or no answer within two minutes) refuses it. While a run works, a compact line per call shows the tool and a path inside the folder, or the command. File contents and the code of `run_code` are never printed.'),
       p('**Ctrl+C** stops serving and ends the run\'s access at once. When a run ends having changed files, the terminal offers to undo them from the checkpoint taken before its first change. If you say no, run `cascade` in that folder and type `/undo` later. The folder rules, tool presets, `.cascadeignore`, `privacy.paths` and the scrubbing of your configured keys from commands are the same as in the desktop app. The folder\'s location is never sent.'),
       h2('What you are asked each time'),
@@ -87,7 +88,7 @@ cascade workspace status              # paired? which server would it serve?`),
         ['**Desktop app**', 'A separate "Cascade run" window with an empty, in-memory profile. Nothing you are signed in to is in it.', '**Settings**, then **Cloud runs**.'],
         ['**CLI**', 'A fresh Chromium with its own empty profile, closed afterwards. Can reach sites on your private network.', '`cascade relay pair`, then `cascade relay serve`.'],
       ),
-      p('You can register up to 10 devices. **Settings**, then **Browser**, lists them, shows which are online, and removes one. Removing a device ends a run it is serving.'),
+      p('You can register up to 10 devices. **Settings**, then **Environments**, lists them, shows which are online, renames one and removes one. Removing a device ends a run it is serving.'),
       h2('Chrome extension'),
       ol(
         'Build it: `node extension/build.mjs` in the repository. The result is in `extension/dist`.',
@@ -105,7 +106,7 @@ cascade relay forget         # remove this machine, on the server and here`),
       h2('Using it from the web'),
       p('Turn on **Browser** in the composer\'s Tools menu. A run that needs a browser asks your most recently seen online device. If none is online, the run goes on without a browser, so keep the extension or `cascade relay serve` running.'),
       h3('Where your runs\' browser comes from'),
-      p('**Settings**, then **Browser**, picks the source:'),
+      p('**Settings**, then **Browser**, picks the source (the devices themselves are under **Environments**):'),
       ul(
         '**My devices:** the extension, CLI or desktop app, as above. Your answer on the device is the run\'s approval for that site list.',
         '**My CDP endpoint**, where the server offers it: a `wss://` address of a browser you run (Browserless, your own Chromium behind TLS, and so on). The server keeps it encrypted, never shows it back (only its host), and connects only to public addresses.',

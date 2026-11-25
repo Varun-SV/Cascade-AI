@@ -5,12 +5,13 @@
 // user chose on their computer, the computer's name, and the paths the run itself used
 // (relative to the folder).
 
-export interface WorkspaceDevice { id: string; name: string; online: boolean }
+export interface WorkspaceDevice { id: string; name: string; online: boolean; kind?: 'extension' | 'cli' | 'desktop' }
 
 /** The picker's one default: today's behaviour, no files. */
 export const CLOUD_ENV = 'cloud';
 
 export const OFFLINE_HINT = 'Open the Cascade desktop app on it and turn workspace serving on';
+export const CLI_OFFLINE_HINT = 'Run `cascade workspace serve` in the folder on it';
 export const NO_DEVICES_HINT = 'Pair the Cascade desktop app (Settings → Cloud runs in the desktop app) to let runs work in a folder on your computer.';
 
 export interface PickerOption {
@@ -28,7 +29,7 @@ export function pickerOptions(devices: readonly WorkspaceDevice[], selected: str
     { value: CLOUD_ENV, label: 'Cloud (no files)', sub: 'Runs here with no access to your files', disabled: false },
     ...devices.map<PickerOption>((d) => ({
       value: d.id, label: d.name, online: d.online,
-      sub: d.online ? 'Work in a folder on this computer' : OFFLINE_HINT,
+      sub: d.online ? (d.kind === 'cli' ? 'Work in a folder, served by the Cascade CLI' : 'Work in a folder on this computer') : (d.kind === 'cli' ? CLI_OFFLINE_HINT : OFFLINE_HINT),
       // A device already chosen stays selectable so the user can see and undo the choice.
       disabled: !d.online && d.id !== selected,
     })),

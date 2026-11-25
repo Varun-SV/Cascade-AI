@@ -325,7 +325,10 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   });
   app.use('/api', apiLimiter);
   // Registered here so it sits behind the limiter and ahead of the SPA fallback.
-  options.browserRelay?.routes(app, env.SESSION_SECRET);
+  options.browserRelay?.routes(app, env.SESSION_SECRET, {
+    // A device removed here stops serving a workspace too, not at its next connection.
+    onDeviceRemoved: (id) => options.workspaceRelay?.hub.dropDevice(id, 'the device was removed'),
+  });
   options.workspaceRelay?.routes(app, env.SESSION_SECRET);
 
   function finishLogin(res: express.Response, profile: OAuthProfile, provider: OAuthProvider) {
