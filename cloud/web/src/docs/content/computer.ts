@@ -11,7 +11,7 @@ export const COMPUTER: DocPage[] = [
     summary: 'Let a Cascade Cloud run read and edit files in a folder on your own computer, with your yes at every step that matters.',
     blocks: [
       p('A Cloud run normally has no files. It can search, write and build documents, but it has no project to look at. A **workspace** changes that: you pick one folder on your own computer, and the run\'s file, search and shell tools work inside it. The run still happens on the server. Only the tool calls cross to your machine, and your machine decides whether to do them.'),
-      note('Workspaces need the Cascade desktop app (it serves the folder) and a server that has the feature turned on. If you host your own server, it is the `WORKSPACE_RELAY` setting. See [Server environment](/docs/server-environment). Only desktop devices can serve a workspace, not the CLI or the browser extension.', 'What you need'),
+      note('Workspaces need the Cascade desktop app or the Cascade CLI (either can serve the folder) and a server that has the feature turned on. If you host your own server, it is the `WORKSPACE_RELAY` setting. See [Server environment](/docs/server-environment). The browser extension cannot serve a workspace.', 'What you need'),
       p('**Settings**, then **Environments**, on the web lists every device you have paired (desktop app, CLI and browser extension), whether each is online, and what it can do. You can rename or remove a device there.'),
       h2('Set it up'),
       ol(
@@ -21,8 +21,19 @@ export const COMPUTER: DocPage[] = [
         '**Send a message.** Your computer asks you what to allow (below). Say yes and the run starts.',
       ),
       p('Fast answer is turned off while a computer is chosen, because it uses no tools.'),
+      h2('Serving from the CLI'),
+      p('No desktop app? `cascade workspace serve` does the same job from a terminal, with the device `cascade relay pair` registered (one pairing serves the browser relay and workspaces). Sign in with `cascade login` first.'),
+      code(`cascade relay pair                    # once: register this machine (--name to choose its name)
+cascade workspace serve               # serve the current folder
+cascade workspace serve ~/code/app    # or another folder
+cascade workspace serve --tools edit  # offer "read and edit" as the default answer
+cascade workspace serve --yes-read-only   # answer "read only" for runs that ask, without a question
+cascade workspace status              # paired? which server would it serve?`),
+      p('It prints "Serving <label> to Cascade Cloud — Ctrl+C to stop" and then stays connected. When a run asks, the terminal shows which chat is asking and offers three choices: **1** read only, **2** read and edit, **3** everything. If you started it with `--tools`, that choice is marked and `y` takes it. Press Enter to say no. A question you leave open lapses with the offer (never after more than ten minutes), and that is a no. You then choose what the run sees the folder as called: "Workspace on <your computer>", or the folder\'s own name (`--label device` or `--label folder` sets the default).'),
+      p('Risky calls ask again in the terminal with the command or path shown: `y` allows it, `a` allows everything else this run asks, and anything else (or no answer within two minutes) refuses it. While a run works, a compact line per call shows the tool and a path inside the folder, or the command. File contents and the code of `run_code` are never printed.'),
+      p('**Ctrl+C** stops serving and ends the run\'s access at once. When a run ends having changed files, the terminal offers to undo them from the checkpoint taken before its first change. If you say no, run `cascade` in that folder and type `/undo` later. The folder rules, tool presets, `.cascadeignore`, `privacy.paths` and the scrubbing of your configured keys from commands are the same as in the desktop app. The folder\'s location is never sent.'),
       h2('What you are asked each time'),
-      p('Every run asks on your computer, in the desktop app, before it gets anything. The question shows the chat that is asking and closes by itself after a few minutes (never longer than ten). Closing it is a no. You choose:'),
+      p('Every run asks on your computer, in the desktop app (or the terminal running `cascade workspace serve`), before it gets anything. The question shows the chat that is asking and closes by itself after a few minutes (never longer than ten). Closing it is a no. You choose:'),
       ul(
         '**The folder,** with a folder picker. Cascade refuses a whole drive, your home folder, and any folder that contains your home folder. Choose a project folder.',
         '**The tools it may have,** by preset or one by one (next section).',

@@ -198,6 +198,23 @@ export function noteStep(step: string | null): void { current?.noteStep(step); }
 export function markQuitByUser(): void { quitByUser = true; }
 export function wasQuitByUser(): boolean { return quitByUser; }
 
+let stopClaim: ((signal: NodeJS.Signals) => void) | null = null;
+/**
+ * A long-running command that must wind down before it exits (`workspace serve`,
+ * `relay serve`) takes the process's stop signals while it runs: the global handler
+ * hands each one over instead of exiting at once. Returns the release.
+ */
+export function claimStopSignals(fn: (signal: NodeJS.Signals) => void): () => void {
+  stopClaim = fn;
+  return () => { if (stopClaim === fn) stopClaim = null; };
+}
+/** Hands a stop signal to the command that claimed it. False when none did. */
+export function handOverStopSignal(signal: NodeJS.Signals): boolean {
+  if (!stopClaim) return false;
+  stopClaim(signal);
+  return true;
+}
+
 /** One line for a person, from the previous session's record: null when it ended as they chose. */
 export function previousEndingNotice(record: ExitRecord | null): string | null {
   if (!record || record.clean) return null;

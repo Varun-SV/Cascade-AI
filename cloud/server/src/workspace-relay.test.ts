@@ -134,16 +134,24 @@ describe('who may connect to the workspace relay', () => {
     expect(browser.welcomed).toBe(true);
   });
 
-  it('refuses a device that is not a desktop: the CLI and an extension never serve a folder', async () => {
+  it('admits a CLI device (cascade workspace serve), as it does a desktop', async () => {
     const w = await server();
     const alice = w.user('alice');
-    for (const kind of ['cli', 'extension'] as const) {
-      const { device, identity } = w.register(alice.id, `a ${kind}`, kind);
-      const ws = await dial(w.ws, WORKSPACE_CONTROL_PATH, identity, w.relay.identity.id);
-      cleanup.push(() => ws.ws.close());
-      expect(ws.welcomed, kind).toBe(false);
-      expect(w.relay.hub.deviceOnline(alice.id, device.id)).toBe(false);
-    }
+    const { device, identity } = w.register(alice.id, 'a cli', 'cli');
+    const ws = await dial(w.ws, WORKSPACE_CONTROL_PATH, identity, w.relay.identity.id);
+    cleanup.push(() => ws.ws.close());
+    expect(ws.welcomed).toBe(true);
+    expect(w.relay.hub.deviceOnline(alice.id, device.id)).toBe(true);
+  });
+
+  it('refuses a browser extension: it never serves a folder', async () => {
+    const w = await server();
+    const alice = w.user('alice');
+    const { device, identity } = w.register(alice.id, 'an extension', 'extension');
+    const ws = await dial(w.ws, WORKSPACE_CONTROL_PATH, identity, w.relay.identity.id);
+    cleanup.push(() => ws.ws.close());
+    expect(ws.welcomed).toBe(false);
+    expect(w.relay.hub.deviceOnline(alice.id, device.id)).toBe(false);
   });
 
   it('refuses a key the server never registered', async () => {
@@ -165,28 +173,29 @@ describe('who may connect to the workspace relay', () => {
   });
 });
 
-describe('listing the desktops', () => {
+describe('listing the devices that serve folders', () => {
   it('needs a signed-in user', async () => {
     const w = await server();
     expect((await w.api(WORKSPACE_DEVICES_PATH)).status).toBe(401);
   });
 
-  it("shows the user's own desktops with whether each is serving now, and nothing secret", async () => {
+  it("shows the user's own desktops and CLIs, not an extension, with whether each is serving now, and nothing secret", async () => {
     const w = await server();
     const alice = w.user('alice');
     const bob = w.user('bob');
     const online = await desktop(w, alice, 'Work PC');
     const offline = w.register(alice.id, 'Home PC');
-    w.register(alice.id, 'A CLI', 'cli');
+    const cli = w.register(alice.id, 'A CLI', 'cli');
+    w.register(alice.id, 'An extension', 'extension');
     w.register(bob.id, "Bob's PC");
     const res = await w.api(WORKSPACE_DEVICES_PATH, alice.cookie);
     expect(res.status).toBe(200);
     const raw = await res.text();
     const body = JSON.parse(raw) as { devices: Array<Record<string, unknown>> };
-    expect(body.devices.map((d) => [d.name, d.online]).sort()).toEqual([['Home PC', false], ['Work PC', true]]);
+    expect(body.devices.map((d) => [d.name, d.online]).sort()).toEqual([['A CLI', false], ['Home PC', false], ['Work PC', true]]);
     expect(body.devices.every((d) => Object.keys(d).sort().join() === 'createdAt,id,kind,lastSeenAt,name,online')).toBe(true);
-    expect(body.devices.every((d) => d.kind === 'desktop')).toBe(true);
-    expect(body.devices.map((d) => d.id).sort()).toEqual([online.device.id, offline.device.id].sort());
+    expect(body.devices.map((d) => d.kind).sort()).toEqual(['cli', 'desktop', 'desktop']);
+    expect(body.devices.map((d) => d.id).sort()).toEqual([online.device.id, offline.device.id, cli.device.id].sort());
     expect(raw).not.toMatch(/publicKey|PRIVATE|path|folder/i);
   });
 
@@ -202,8 +211,12 @@ describe('listing the desktops', () => {
     expect((await w.api(url(pc.device.id), alice.cookie, { method: 'PATCH', body: { name: '   ' } })).status).toBe(400);
     expect((await w.api(url(pc.device.id), alice.cookie, { method: 'PATCH', body: { name: '  Study PC \n' } })).status).toBe(200);
     expect(w.store.getRelayDevice(pc.device.id)!.name).toBe('Study PC');
-    // This relay serves only the kinds that can serve a folder: it has no say over a CLI.
-    expect((await w.api(url(cli.device.id), alice.cookie, { method: 'PATCH', body: { name: 'y' } })).status).toBe(404);
+    // A CLI serves folders too, so it is renamed here; an extension can't, and this relay has no say over it.
+    expect((await w.api(url(cli.device.id), alice.cookie, { method: 'PATCH', body: { name: 'Laptop CLI' } })).status).toBe(200);
+    expect(w.store.getRelayDevice(cli.device.id)!.name).toBe('Laptop CLI');
+    const ext = w.register(alice.id, 'Chrome', 'extension');
+    expect((await w.api(url(ext.device.id), alice.cookie, { method: 'PATCH', body: { name: 'y' } })).status).toBe(404);
+    expect((await w.api(url(ext.device.id), alice.cookie, { method: 'DELETE' })).status).toBe(404);
     expect((await w.api(url(pc.device.id), bob.cookie, { method: 'DELETE' })).status).toBe(404);
     expect((await w.api(url(pc.device.id), alice.cookie, { method: 'DELETE' })).status).toBe(200);
     expect(w.store.getRelayDevice(pc.device.id)).toBeNull();
@@ -253,13 +266,13 @@ describe('a run that asks for a workspace', () => {
     await expect(openWorkspaceForRun(w.relay, w.store, { userId: alice.id, deviceId: device.id, runId: 'r' })).rejects.toThrow(/"Home PC" is not serving workspaces right now/);
   });
 
-  it("another user's desktop, a CLI, and an unknown id all read the same: not one of your desktop devices", async () => {
+  it("another user's desktop, an extension, and an unknown id all read the same: not one of your workspace devices", async () => {
     const w = await server();
     const alice = w.user('alice');
     const bob = w.user('bob');
     const theirs = await desktop(w, bob);
-    const cli = w.register(alice.id, 'A CLI', 'cli');
-    for (const id of [theirs.device.id, cli.device.id, 'nope']) {
+    const ext = w.register(alice.id, 'An extension', 'extension');
+    for (const id of [theirs.device.id, ext.device.id, 'nope']) {
       await expect(openWorkspaceForRun(w.relay, w.store, { userId: alice.id, deviceId: id, runId: 'r' })).rejects.toThrow(WorkspaceRunError);
     }
     expect(theirs.asked).toEqual([]);
