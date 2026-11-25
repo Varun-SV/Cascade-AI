@@ -1,4 +1,5 @@
 import type { DocPage } from './types.js';
+import { OTHER_APPS } from './other-apps.js';
 import { code, h2, h3, note, ol, p, table, tip, ul, warn } from './dsl.js';
 
 const S = 'getting-started';
@@ -196,6 +197,7 @@ await cascade.close();`, 'ts'),
     summary: 'Point an OpenAI SDK at a Cascade server and get an orchestrated run back.',
     blocks: [
       p('A Cascade server speaks enough of the OpenAI API for existing clients to use it. Set the client\'s `base_url` to your server\'s `/v1` and use a Cascade access token as the API key. `POST /v1/chat/completions` and `GET /v1/models` work, streaming and not.'),
+      p('Setting up AnythingLLM, Open WebUI, LibreChat or an SDK? See [Use Cascade from other apps](/docs/other-apps).'),
       code(`from openai import OpenAI
 
 client = OpenAI(api_key=CASCADE_ACCESS_TOKEN, base_url="https://cascadeai.in/v1")
@@ -239,4 +241,5 @@ print(reply.cascade)   # the tier and model that served it, and what routing sav
       p('Errors use OpenAI\'s envelope (`error.message`, `error.type`, `error.code`), so an SDK raises its usual exceptions. If a streamed answer ever ends up different from the final answer, the stream ends with an error chunk (`stream_reconciliation_failed`) instead of a clean stop. Retry without `stream` to get the authoritative reply.'),
     ],
   },
+  OTHER_APPS,
 ];

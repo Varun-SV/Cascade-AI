@@ -472,6 +472,8 @@ print(reply.cascade)   # which tier and model served it, and what routing saved
 - **Provider keys:** on a **single-account** instance (a self-host) the endpoint uses the provider keys in your `.env`. Once a second account exists this stops, so the operator's key never pays for others. Any instance can take keys per request with `extra_body={"providers": [...]}`.
 - `/v1` is for server-side clients: browser-side SDKs are deliberately not served. Tools, function calling and image inputs are not part of v1.
 
+Setting up AnythingLLM, Open WebUI, LibreChat or an SDK? See [Use Cascade from other apps](https://cascadeai.in/docs/other-apps).
+
 ---
 
 ## CLI quick reference
