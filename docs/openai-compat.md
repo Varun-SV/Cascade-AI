@@ -1,7 +1,7 @@
 # OpenAI-compatible API (`/v1`)
 
 Design + security only. Internal — not served publicly (the user-facing copy
-lives in `cloud/server/src/docs.ts`, which is what `/docs` renders).
+lives in `cloud/web/src/docs/content`, which is what `/docs` renders).
 
 `POST /v1/chat/completions` and `GET /v1/models` let an existing OpenAI SDK
 client point `base_url` at a Cascade instance and get an orchestrated run.

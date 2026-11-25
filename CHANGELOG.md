@@ -5,6 +5,15 @@ All notable changes to Cascade AI are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+- **The docs at cascadeai.in/docs are now a full documentation site, with a page for each topic.** There are 37 pages in seven sections: getting started (what Cascade is, the web quick start, the desktop app, the CLI, the SDK, the OpenAI-compatible `/v1` API), using Cascade (providers and keys, how tiers route and what "Why?" shows, thinking levels, web search, attachments, file generation, images, memories, skills, connectors and MCP OAuth, spend and budget, chats and branches), your computer (Workspaces, the browser relay, checkpoints and `/undo`, privacy paths, the process jail), a CLI reference (every command and slash command, the `/settings` panel, keyboard shortcuts, auto mode and approvals), the config file, `.cascadeignore` and environment variables, self-hosting with Docker and every server variable, and help (FAQ, troubleshooting, privacy and security, a link to this changelog). It was one short page with ten sections. Each page was written from the code, not from the design notes in `docs/`, which stay internal.
+- **Reading the docs is easier.** A sidebar groups the pages and becomes a menu on a phone, each page has an "On this page" outline on wide screens and links to the previous and next page, Ctrl+K (Cmd+K on a Mac) searches titles, headings and text, and code blocks have a copy button. Light and dark follow the app, with a button to switch. The docs home has a small 3D mark that follows the landing page's, drawn about 30 times a second and only while it is on screen. With reduced motion on, or without WebGL, a still mark is shown instead.
+
+### Changed
+- **`/docs` is served by the web app, not by the server.** `/docs` and `/docs/<topic>` (for example `/docs/workspaces`) open straight from a link or a reload, a visitor who is signed out can read them, and Back and Forward move between pages. The docs are their own chunk, so the chat app does not download them. The old links `/docs#privacy`, `/docs#keys` and the other section links still work: they open the matching page.
+
 ## 0.99.11 - 2026-11-24
 
 ### Added

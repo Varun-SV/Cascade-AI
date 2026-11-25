@@ -1,0 +1,222 @@
+import type { DocPage } from './types.js';
+import { code, h2, h3, note, ol, p, table, tip, ul, warn } from './dsl.js';
+
+const S = 'computer';
+
+export const COMPUTER: DocPage[] = [
+  {
+    slug: 'workspaces',
+    section: S,
+    title: 'Workspaces',
+    summary: 'Let a Cascade Cloud run read and edit files in a folder on your own computer, with your yes at every step that matters.',
+    blocks: [
+      p('A Cloud run normally has no files. It can search, write and build documents, but it has no project to look at. A **workspace** changes that: you pick one folder on your own computer, and the run\'s file, search and shell tools work inside it. The run still happens on the server. Only the tool calls cross to your machine, and your machine decides whether to do them.'),
+      note('Workspaces need the Cascade desktop app (it serves the folder) and a server that has the feature turned on. If you host your own server, it is the `WORKSPACE_RELAY` setting. See [Server environment](/docs/server-environment). Only desktop devices can serve a workspace, not the CLI or the browser extension.', 'What you need'),
+      h2('Set it up'),
+      ol(
+        '**Pair the desktop app.** In the app, open **Settings**, then **Cloud runs**, and pair it with your Cascade account. Workspaces use the same pairing as the browser relay.',
+        '**Turn it on.** In **Settings**, then **Workspaces**, switch on "Let Cascade Cloud runs work in a folder on this computer". It is off by default. The app has to be open for it to work.',
+        '**Choose where a chat runs.** On the web, the **Environment** button in the composer lists **Cloud (no files)**, which is the default, and each of your desktop computers, with a dot showing whether it is serving now. A computer that is not serving is shown but cannot be picked. The choice is remembered for that chat.',
+        '**Send a message.** Your computer asks you what to allow (below). Say yes and the run starts.',
+      ),
+      p('Fast answer is turned off while a computer is chosen, because it uses no tools.'),
+      h2('What you are asked each time'),
+      p('Every run asks on your computer, in the desktop app, before it gets anything. The question shows the chat that is asking and closes by itself after a few minutes (never longer than ten). Closing it is a no. You choose:'),
+      ul(
+        '**The folder,** with a folder picker. Cascade refuses a whole drive, your home folder, and any folder that contains your home folder. Choose a project folder.',
+        '**The tools it may have,** by preset or one by one (next section).',
+        '**What the run is told the folder is called:** "Workspace on <your computer\'s name>", or the folder\'s own name. Never its location.',
+      ),
+      p('Your last answer is offered as the default next time, and **Forget the remembered folder** in Settings clears it.'),
+      h2('Tool presets'),
+      table(
+        ['Preset', 'Tools'],
+        ['**Read only**', '`file_list`, `file_read`, `glob`, `grep`'],
+        ['**Read and edit files**', 'Read only, plus `file_write`, `file_edit`, `file_delete`'],
+        ['**Everything**', 'The above, plus `shell`, `git` and `run_code`'],
+      ),
+      p('The default is read only. Choosing exactly the tools you want is allowed. A run is never given a tool you did not tick.'),
+      h2('Approvals for risky actions'),
+      p('A yes to the folder is not a blanket yes. Risky actions ask again, in the desktop app: deleting, installing, anything that leaves the folder, anything that sends something out, and so on. The question names the tool and shows the command or path. You can **Allow**, **Deny**, or **Allow everything for this run**. A question you do not answer is refused after about two minutes. If you allow everything, the banner says so for the rest of that run.'),
+      p('What counts as risky is judged by the same rules the CLI uses for [auto mode](/docs/auto-mode). Shell commands also run inside the [process jail](/docs/process-jail) where it is available.'),
+      h2('Stop, and the banner'),
+      p('While a run is working in your folder, the desktop app always shows **Serving a Cloud run**, with the name it was given and a **Stop** button. Stop ends its access at once.'),
+      h2('Undo'),
+      p('Before the run\'s first change, the app takes a checkpoint of the folder. When the run ends the banner says how many files it changed, and **Undo this run\'s changes** puts them back: files it edited are restored, files it created are removed. A file you changed yourself after the run is left alone and counted as "left (changed since)". Checkpoints work like the CLI\'s `/undo`, so the same limits apply (see [Checkpoints and undo](/docs/checkpoints-and-undo)). If the folder could not be checkpointed, the banner says why that run cannot be undone.'),
+      h2('The changed-files panel'),
+      p('In the web chat, a run in a folder shows a chip: "Working in <name> on <computer>", which reads "Worked in" when it ends. While it waits for you it says "Waiting for <computer> to allow this run…", and while a step waits for your yes on the computer it says "Waiting for your approval on <computer> (<tool>)".'),
+      p('**Files changed in your workspace** lists each file the run wrote, edited or deleted. An edit shows a red and green diff, a write shows the new content, and a delete says "deleted". If a file changed on your computer after the run read it (the run, you, or something else), the list says so. The run is also told, before its next step, so it reads the file again instead of relying on an old copy.'),
+      h2('Privacy'),
+      ul(
+        '**The folder\'s location never leaves your computer.** The run is told only the name you chose.',
+        '**The run\'s model does see what its tools return.** When a run reads a file, the text goes to the model through the server, like any other message. Choose **Read only**, or a different folder, if that is a problem.',
+        '**The server relays and does not keep.** It passes tool calls and results between your computer and the run. It logs no file contents, paths or command output.',
+        '**The chat sees only what it needs to show you.** To draw the changed-files list the server sends your browser the path and change of each call that writes, edits or deletes a file. Command output and the contents of files the run only read are not sent to your browser.',
+        '**Local-only paths are never read.** Files you marked local-only (the `privacy.paths` setting) in that folder\'s Cascade settings, and files that `.cascadeignore` hides, are refused to the run. See [Privacy paths](/docs/privacy-paths) and [.cascadeignore](/docs/cascadeignore).',
+      ),
+      h2('Limits'),
+      ul(
+        'Up to 8 tool calls can be in flight on one run at once.',
+        'A tool call\'s input can be up to 2 MB, and a result longer than about 256,000 characters is cut, and says it was cut.',
+        'If something goes wrong, see [Troubleshooting](/docs/troubleshooting).',
+      ),
+    ],
+  },
+  {
+    slug: 'browser-relay',
+    section: S,
+    title: 'Browser relay',
+    summary: 'Let a run use a browser on your own machine, through the Chrome extension, the desktop app or the CLI.',
+    blocks: [
+      p('A Cloud run, or a run on a server you host, can use **your own browser** instead of one the server hosts. The server keeps no browser of its own for this. Your device opens one, asks you first, and gives the run a window in it.'),
+      h2('Pick a device'),
+      table(
+        ['Device', 'What the run gets', 'Set up'],
+        ['**Chrome extension**', 'A new window of your Chrome: private (the default) or normal, where your signed-in sites see you signed in.', 'Build it from the repo, load it, pair it (below).'],
+        ['**Desktop app**', 'A separate "Cascade run" window with an empty, in-memory profile. Nothing you are signed in to is in it.', '**Settings**, then **Cloud runs**.'],
+        ['**CLI**', 'A fresh Chromium with its own empty profile, closed afterwards. Can reach sites on your private network.', '`cascade relay pair`, then `cascade relay serve`.'],
+      ),
+      p('You can register up to 10 devices. **Settings**, then **Browser**, lists them, shows which are online, and removes one. Removing a device ends a run it is serving.'),
+      h2('Chrome extension'),
+      ol(
+        'Build it: `node extension/build.mjs` in the repository. The result is in `extension/dist`.',
+        'In Chrome open `chrome://extensions`, turn on **Developer mode**, choose **Load unpacked**, and pick `extension/dist`.',
+        'Open the extension from the toolbar. Type your server\'s address (for example `https://cascadeai.in`) and a name for this browser, then approve the code it shows on the server\'s page, while signed in.',
+      ),
+      p('The extension makes a key in your browser. The server gets only its public half, and the sign-in used for pairing is revoked straight away. **Forget** in the extension deletes the key. A private window needs "Allow in Incognito" turned on for Cascade in `chrome://extensions`.'),
+      h2('CLI device'),
+      code(`cascade login                # if you have not
+cascade relay pair           # register this machine (--name to choose its name)
+cascade relay serve          # stay connected; runs ask here first
+cascade relay devices        # your devices, and which are online
+cascade relay forget         # remove this machine, on the server and here`),
+      p('`serve` uses Playwright\'s Chromium, or `--chromium <path>`, or the `CASCADE_RELAY_CHROMIUM` variable.'),
+      h2('Using it from the web'),
+      p('Turn on **Browser** in the composer\'s Tools menu. A run that needs a browser asks your most recently seen online device. If none is online, the run goes on without a browser, so keep the extension or `cascade relay serve` running.'),
+      h3('Where your runs\' browser comes from'),
+      p('**Settings**, then **Browser**, picks the source:'),
+      ul(
+        '**My devices:** the extension, CLI or desktop app, as above. Your answer on the device is the run\'s approval for that site list.',
+        '**My CDP endpoint**, where the server offers it: a `wss://` address of a browser you run (Browserless, your own Chromium behind TLS, and so on). The server keeps it encrypted, never shows it back (only its host), and connects only to public addresses.',
+        '**Run on my desktop:** a message that needs the browser is handed to the desktop app with a one-time code, and runs there. Its files go with it.',
+      ),
+      h2('What you agree to, each time'),
+      p('Nothing happens without a yes on your device. It shows which run is asking and you type the sites it may use. The site the run wants is filled in for you. For research, tick **Any public site**, and the run can open whatever public site it finds, while your private network stays blocked.'),
+      ul(
+        'The run gets **a new window**, never a tab you already have open.',
+        'Pages load only from the sites you allowed. Anything else the page tries to open is blocked.',
+        'Private-network addresses (`localhost`, `10.x`, `192.168.x`, `.local` and the like) are blocked. The extension matches addresses as written, and cannot see a public name that resolves to a private address; the CLI checks the resolved address too.',
+        '**Tabs at once** (four unless you pick, eight at most): parts of the run that browse side by side each get a tab of their own. No more than two tabs of one run are on one site at a time.',
+        'Popups the page opens are closed, and dialogs are dismissed.',
+        'Downloads: the CLI\'s browser refuses them. In the extension a download ends the run, and the file stays in your Downloads folder.',
+        '**Screenshots are off** unless you tick "Let Cascade take screenshots of these sites for your report" for that run. With it on, a run can take still pictures of its window, never a recording. Password, card and one-time-code fields, and frames from other sites, are blurred in each picture.',
+        'In the extension you can tick "Use this answer for this chat\'s next runs", kept until Chrome closes (8 hours at most). The toolbar button shows how many chats have an answer kept, with **Forget them**.',
+      ),
+      p('Beyond that, risky page actions ask you again in the chat, and only you can answer: a control named Pay, Buy, Delete, Send, Publish, Subscribe or Confirm, for example, or Enter in a field that is not a search box.'),
+      h2('Take over and stop'),
+      ul(
+        '**Take over** (in the extension toolbar, and at the bottom of the desktop window while a run is on) pauses the run so you can use its tab yourself, to sign in for instance. The run cannot act there, and nothing from the tab is sent, until you **Hand back**. The CLI has no takeover.',
+        'Stop a run from the extension\'s toolbar button, by closing its window, or with Ctrl+C in `cascade relay serve`.',
+      ),
+      h2('Running your own server'),
+      p('The relay is off by default. Set `BROWSER_RELAY=true` on the server. It needs no other setting. See [Server environment](/docs/server-environment) for `HOSTED_BROWSER` and the CDP options.'),
+      note('The extension\'s own privacy policy is in the repository at `extension/PRIVACY.md`.'),
+    ],
+  },
+  {
+    slug: 'checkpoints-and-undo',
+    section: S,
+    title: 'Checkpoints and undo',
+    summary: 'Every run is recorded before and after, so /undo can take its changes back.',
+    blocks: [
+      p('Before each run, and again after it, Cascade records the project\'s files in a git repository **of its own**, kept in the project\'s state folder, outside the project. Your own git is never touched: no commit, no stash, no change to your index.'),
+      h2('/undo'),
+      table(
+        ['Command', 'What it does'],
+        ['`/undo`', 'Puts back the files the last run changed, as they were before it, and removes the files it made.'],
+        ['`/undo 3`', 'The same for the last three runs.'],
+        ['`/undo --force`', 'Also takes back files you changed by hand since the run, which are otherwise left alone and named.'],
+        ['`/checkpoints`', 'Lists the runs that can be undone and what each one changed.'],
+        ['`/rollback`', 'Undoes every file the file tools changed in this session. `/undo` also covers what commands did, run by run.'],
+      ),
+      h2('What is not covered'),
+      ul(
+        'What your `.gitignore` leaves out (`node_modules`, build output) is not recorded, so it is not put back either.',
+        'Repositories nested inside the project are recorded only as a pointer and are not touched.',
+        'A run whose checkpoint could not be taken (no git on the machine, or a folder too large to record in time) cannot be undone. [Auto mode](/docs/auto-mode) then asks about that run\'s changes as it would without checkpoints.',
+        'A run that was cut off before its end was recorded is not undone unless you force it.',
+        'Things outside the project folder, and anything a command sent elsewhere (a push, an email), are not undone. That is exactly what approvals are for.',
+      ),
+      p('The desktop app\'s Workspaces feature uses the same checkpoints: the serving banner offers **Undo this run\'s changes** when the run ends. See [Workspaces](/docs/workspaces).'),
+      tip('Run `/checkpoints` before `/undo` if you are unsure what will come back. Each entry says what that run changed.'),
+    ],
+  },
+  {
+    slug: 'privacy-paths',
+    section: S,
+    title: 'Privacy paths',
+    summary: 'Keep chosen folders on models that run on your own machine or network. A local-only rule applies on the CLI and desktop.',
+    blocks: [
+      p('Some folders should never reach a cloud model. A `privacy.paths` rule marks them **local-only**. Work that touches them runs on a model on your machine or private network, and what that work produces is held back from the tiers above it.'),
+      code(`{
+  "privacy": {
+    "paths": [
+      { "pattern": "clients/**", "policy": "local-only" },
+      { "pattern": "*.private.md", "policy": "local-only" }
+    ]
+  }
+}`, 'json', 'config.json'),
+      p('Patterns use `.gitignore` syntax, like [`.cascadeignore`](/docs/cascadeignore). `local-only` is the one policy.'),
+      h2('What counts as private'),
+      p('A model is private when its address is on your machine or private network, whatever its pricing says: a loopback address, a private range, or a `.local` name. A provider reached by a bare name such as `http://ollama:11434` can be declared with `"privateNetwork": true` on its provider entry. With no private model configured, Cascade refuses the read instead of falling back to the cloud.'),
+      h2('What happens to a local-only worker'),
+      ul(
+        'A worker whose assignment names a matching path starts on a private model. One that reads a matching file along the way moves to one first, before that text reaches any model.',
+        'Its output is withheld from the tiers above. Its approval questions go to you, not to the T2 and T1 models.',
+        'Nothing it knows leaves your machine through Cascade\'s tools: it cannot message other workers, and tools that send their arguments elsewhere are refused to it. That covers web and browser tools, GitHub, media generation, MCP and plugins.',
+        'What it makes goes to a **private folder** outside the project (`@private/…` to the file tools), where no other worker looks.',
+        'Local-only files are never put in the code index, and a name in `file_list` or `glob` is hidden from a worker that is not local-only.',
+        'Its shell commands run in the [process jail](/docs/process-jail) with no network.',
+      ),
+      note('Privacy paths are a local feature. For a Cloud run working in a folder on your computer, files marked local-only in that folder\'s Cascade settings are refused to the run. See [Workspaces](/docs/workspaces).'),
+    ],
+  },
+  {
+    slug: 'process-jail',
+    section: S,
+    title: 'The process jail',
+    summary: 'How shell, run_code and git are confined, and what is refused where no jailer exists.',
+    blocks: [
+      p('Approvals decide whether a command may run. The **process jail** limits what it can reach once it does. It applies to the `shell`, `run_code` and `git` tools.'),
+      h2('What it hides and limits'),
+      ul(
+        'Cascade\'s own folder, `~/.cascade-ai`, and the built-in secrets (`.env`, `*.pem`, `*.key`, `id_rsa` and so on) are hidden from commands.',
+        'The usual credential places in your home folder are hidden too: `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.kube`, `~/.docker/config.json`, `~/.netrc` and `~/.npmrc`.',
+        'Each command gets its own process namespace, so Cascade\'s environment is not there to read.',
+        'Provider keys and credential-file hints are removed from every command\'s environment.',
+        'The repository\'s git store is hidden while its history holds any of those secret files.',
+        'For a local-only worker: no network, no reach to host services through sockets, and writes only into the workspace and its private folder.',
+      ),
+      h2('Where it works'),
+      table(
+        ['System', 'What happens'],
+        ['**Linux** with bubblewrap working', 'Commands run in the jail.'],
+        ['**macOS, Windows,** or a Linux where bubblewrap is missing or cannot create user namespaces', '`shell` and `run_code` are **refused**, because nothing would keep them from reading a protected file and handing it to a cloud model.'],
+      ),
+      p('`git` does not need the jail to be safe: Cascade checks its operations itself. Without a jailer it runs with provider keys removed from its environment and without any configuration that can start a program. It never runs hooks, and a repository whose own configuration names a program (a filter, a credential helper, an ssh command) is refused, with the setting named. Pushing over HTTPS then has no credential helper, and ssh reads no `~/.ssh/config`.'),
+      h2('The setting'),
+      p('`tools.processJail` takes one of:'),
+      table(
+        ['Value', 'Meaning'],
+        ['`auto` (default)', 'Use bubblewrap on Linux where it works.'],
+        ['`bwrap`', 'Require bubblewrap.'],
+        ['`sandbox-exec`', 'Kept for compatibility. It refuses commands, because it cannot contain surviving child processes.'],
+        ['`off`', 'No jail and no scrubbing. A deliberate choice: commands then run with your full access.'],
+      ),
+      p('Also in the CLI: `/settings`, Tools, **Shell sandbox**.'),
+      warn('`off` removes the protection described above. Use it only where you accept that a command can read what you can.'),
+      h2('Tools Cascade writes for itself'),
+      p('Tools a run writes at run time always run confined, with no access to files, network or processes, only a gated way to call other tools and a guarded `fetch`. The sandbox is a V8 isolate where the optional `isolated-vm` add-on is installed, and a WebAssembly sandbox otherwise, which every install has. There is no unconfined fallback: if the sandbox cannot start, the tool does not run. `tools.dynamicToolSandbox` chooses the mode (`auto`, `isolate` or `wasm`).'),
+    ],
+  },
+];

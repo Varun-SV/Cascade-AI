@@ -33,7 +33,6 @@ import { checkEndpointUrl, endpointLabel } from './user-endpoint.js';
 import { encryptAtRest } from './secrets.js';
 import { buildSpendReport, DEVICE_RUN_ID, deviceEndedAt, deviceRunSpendId, parsePeriod, parseTimeZone, spendEntryFromRun } from './spend.js';
 import { skillCatalog } from './skills.js';
-import { renderDocsPage } from './docs.js';
 import { tenantScratchDir } from './paths.js';
 import { pendingMediaPath, sweepPendingMediaInBackground } from './pending-media.js';
 import {
@@ -1723,14 +1722,10 @@ export function createApp(env: CloudEnv, store: CloudStore, options: CreateAppOp
   app.get(['/download', '/download/'], (_req, res) => res.redirect(302, '/#download'));
 
   // ── Public docs site (cascadeai.in/docs) ─────
-  // Registered before the SPA catch-all so /docs serves the documentation page
-  // rather than the app shell. Self-contained HTML; safe to cache briefly.
-  app.get(['/docs', '/docs/'], (_req, res) => {
-    res.set('Cache-Control', 'public, max-age=300');
-    res.type('html').send(renderDocsPage());
-  });
-  // Any deeper /docs/* path (there are no sub-pages yet) redirects to the index.
-  app.get('/docs/*', (_req, res) => res.redirect(302, '/docs'));
+  // Served by the SPA, not here: /docs and /docs/<topic> fall through to the
+  // catch-all below, which sends index.html, and cloud/web renders the docs
+  // (src/docs). Nothing is registered for them on purpose — a deep link such
+  // as /docs/workspaces must reach the app shell like any other client route.
 
   // ── OpenAI-compatible API (/v1) ──────────────
   // Registered before the SPA catch-all so an SDK client gets JSON rather than

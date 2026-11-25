@@ -1,1131 +1,714 @@
 # ◈ Cascade AI
 
-> **One prompt → an organization of AI agents that plan, delegate, and execute in parallel.**
-> Auto-routed to the cheapest model that's best at each step. **Up to 90% cheaper** than running everything on one frontier model.
+> **One prompt becomes an organization of AI agents that plan, delegate and work in parallel,** each step routed to the best-value model for the job. Typically far cheaper than running everything on one frontier model, and Cascade shows you the saving on every run.
 
 [![npm](https://img.shields.io/npm/v/cascade-ai?color=aaff00&label=npm)](https://www.npmjs.com/package/cascade-ai)
 [![DOI](https://zenodo.org/badge/1199633168.svg)](https://doi.org/10.5281/zenodo.23427428)
 [![license](https://img.shields.io/badge/license-MIT-aaff00.svg)](LICENSE)
-[![node](https://img.shields.io/badge/node-%E2%89%A522-5AB4E8.svg)](#installation)
-[![providers](https://img.shields.io/badge/providers-6-a78bff.svg)](#ai-providers)
+[![node](https://img.shields.io/badge/node-%E2%89%A522.22.2-5AB4E8.svg)](#install-and-quick-start)
+[![providers](https://img.shields.io/badge/providers-6-a78bff.svg)](#providers-and-your-own-keys)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-f5a623.svg)](CONTRIBUTING.md)
 
 <p align="center">
   <img src="assets/readme/cascade-reel.webp" width="100%" alt="Cascade AI in 36 seconds: one prompt becomes an organization of AI agents. T1 plans, T2 managers delegate, T3 workers execute in parallel, with web, browser, media, document and code tools, from the CLI, desktop app, cloud, self-host or API.">
 </p>
 
-Cascade runs your prompt through a hierarchical three-tier agent system — **T1 plans → T2 manages → T3 executes**, sized to the task — auto-routing each step to the best-value model, running tools, and compiling one coherent result. Think Claude Code / Gemini CLI / Copilot CLI, but built around **orchestration**.
-
-```
-cascade "Refactor the auth module to use JWT, add tests, and open a PR"
-```
-
-### Where you can use it
-
-| Surface | What it is | Get it |
-|---------|------------|--------|
-| **CLI** | Interactive REPL and one-shot runs in your terminal | `npm install -g cascade-ai` — [Quick Start](#quick-start) |
-| **Desktop app** | Chat, a live Cockpit of the agent tree, a code editor with a terminal, and a browser the agent can drive | [cascadeai.in/download](https://cascadeai.in/download) |
-| **Cascade Cloud** | Hosted chat, bring your own keys — files, memory, generated documents, browser control | [cascadeai.in](https://cascadeai.in) |
-| **Self-host** | The Cloud web app on your own machine | `docker compose up` — [Self-host](#self-host) |
-| **OpenAI-compatible API** | `POST /v1/chat/completions` for any OpenAI SDK | [OpenAI-compatible API](#openai-compatible-api) |
-| **SDK** | `runCascade()` / `createCascade()` from Node | [SDK](#sdk--programmatic-use) |
-
-The CLI, desktop app and Cascade Cloud share one account. Settings can follow you between them through opt-in, end-to-end-encrypted sync: you push and pull by hand, with a passphrase.
-
-## ✨ Highlights
-
-- 🧠 **Live benchmark Auto-routing** — set a tier to `Auto` and Cascade fuses *live* public benchmark scores with *live* pricing to pick the best-**value** model for each task, then learns from how each model actually did.
-- 🌐 **Browser control** (desktop app and web) — the agent drives a real browser: the desktop's own, or on the web your own Chrome through the Cascade extension or `cascade relay` ([how](docs/browser-relay.md)), a Chrome over CDP, or a hosted Steel session. You watch it live and can take the wheel and hand it back. On the web the agent reads each page as a list of its controls, each with a ref like `e14`, and acts on them by ref; a model that can see images can also get a screenshot (`tools.browserVision`).
-- 🙋 **Asks instead of guessing** (Cascade Cloud and self-hosted web) — when a request is genuinely ambiguous, Cascade asks one structured question rather than inventing an answer.
-- 🤖 **Autonomous mode** (`/auto`) — hands-off runs: safe tools run silently, dangerous ones still ask, budget caps stay the hard stop.
-- 📋 **Boardroom plan review** — pause to review, **edit**, or steer T1's plan (with an AI reviewer's critique) before any worker spawns.
-- ⏯️ **Run resumability** (`/continue`) — hit the token budget on a big task? Resume from the partial state instead of redoing it.
-- 👥 **Workers recruit help** — a worker can ask its manager to spawn bounded sibling workers when the work fans out — dynamic parallelism, no rigid plan.
-- 💸 **Delegation savings** — every run shows what the hierarchy saved you (`saved $5.63 — 90% vs. all-T1`); no flat-agent tool can show this number.
-- 🛡️ **Safe by default** — permission escalation (T3→T2→T1→you), SSRF-guarded fetch, loopback-only dashboard, and a budget kill-switch.
-
-## Why Cascade is one of a kind
-
-Other AI CLIs run a single agent. Cascade runs a visible **organization** — and the terminal shows you the org at work:
-
-- **Delegation savings** — the status bar and every run receipt show what the hierarchy saved you (`$0.031 · saved $0.094 — 75% vs. all-T1`), because cheap T3 workers (free, when they are local) do the heavy lifting while a premium T1 model only administrates. No flat-agent tool can show this number.
-- **Agent comms feed** (`/comms`) — live radio chatter between workers: peer messages, broadcasts, file locks, barrier syncs. No other CLI has agent-to-agent communication at all, let alone on screen.
-- **`/why`** — every run can explain itself: the complexity verdict and the classifier's reasoning, which model served each tier, failovers, and escalations.
-- **The boardroom** (`planApproval: "always"`) — Complex runs pause so you can approve T1's proposed org chart and budget ("3 managers · 7 workers · est. $0.40") before anything spawns. You sit above T1.
-
----
-
-## Table of Contents
-
-- [What's New](#whats-new)
-- [How It Works](#how-it-works)
-- [Features](#features)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Self-host](#self-host)
-- [OpenAI-compatible API](#openai-compatible-api)
-- [Configuration](#configuration)
-- [AI Providers](#ai-providers)
-- [Tools](#tools)
-- [CLI Reference](#cli-reference)
-- [Slash Commands](#slash-commands)
-- [Themes](#themes)
-- [Web Dashboard](#web-dashboard)
-- [SDK / Programmatic Use](#sdk--programmatic-use)
-- [MCP Support](#mcp-support)
-- [Hooks](#hooks)
-- [Memory & Identity](#memory--identity)
-- [Security](#security)
-- [Shell Completions](#shell-completions)
-- [Architecture](#architecture)
-- [Roadmap](#roadmap)
-
----
-
-## What's New
-
-Cascade has shipped roughly 70 releases since v0.13.2 and is now at **v0.82.0**. Grouped by theme rather than listed one-by-one; [CHANGELOG.md](CHANGELOG.md) has every change.
-
-### v0.69 – v0.82 — the agent gets a browser, and every surface gets an API
-- **Browser control, in the desktop app and on the web.** The agent can drive a real browser — the desktop's own, where it can also act on the page you already have open, or on the web your Chrome over CDP or a hosted [Steel](https://steel.dev) session — and show it to you live. You can take the browser off the agent, use it yourself, and hand it back (v0.78 – v0.81). A Browser chip beside Web in the composer turns it on per message. The CLI does not have it.
-- **Asks instead of guessing.** On Cascade Cloud and self-hosted web, a run that needs a decision only you can make asks one structured question and waits, rather than guessing (v0.81). A run that *cannot* do something now says so instead of simulating the result (unreleased).
-- **An OpenAI-compatible API** — `POST /v1/chat/completions` and `GET /v1/models`, so any OpenAI SDK can call Cascade (v0.70) — and **one-command self-hosting** with `docker compose up` (v0.69).
-- **Routing that learns carefully.** Every model a tier used records the run's outcome, only models that actually ran are rated, one bad moment no longer writes a model off, and the router occasionally tries a plausible alternative so it can learn (v0.76). Benchmark data now covers every modality, not just text (v0.82).
-- **Failover that tells failures apart.** An exhausted quota, a rate limit, a model your key cannot use and a dead account are each handled as what they are — one Azure deployment's failure no longer disables the others, and a failed-over answer is credited to the model that actually ran (v0.76).
-- **Credentials handled as pairs.** A gateway bearer (`ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL`) and the endpoint that issued it are adopted, synced and sent together, never to another host; Claude subscription tokens are refused everywhere (v0.75).
-- **Security hardening.** The SSRF guard re-checks the address at connect time and blocks IPv6 forms that carry an IPv4 address (v0.77); dependency advisories went from 33 to 25 (v0.82); secret redaction catches more (unreleased).
-- **Chat polish.** Generated PowerPoint decks animate (v0.76). Unreleased: maths is typeset whichever way the model writes it (`\(…\)`, `\[…\]`, `$…$`, bare `\begin{align*}`) while prices stay prices, and long answers stream without slowing the chat.
-
-### v0.68 — a typed task graph, durable resume, and mechanical verification
-- **One dependency scheduler for the whole hierarchy.** T1's section dispatch and T2's subtask execution now both compile onto the same typed task graph (`compileTaskGraph` + `DependencyScheduler`) instead of two separate hand-rolled implementations — pinned by a parity harness across 600 generated graphs so ordering didn't silently change.
-- **Failure-aware dependency contracts.** A section that depends on one that failed is now skipped rather than run into the same wall — reported with the chain that blocked it, and costing no tokens, instead of starting anyway and billing for a run that was doomed before it began. A degraded (`PARTIAL`) result doesn't block; only a hard failure does.
-- **Durable resume across crashes, cancellation, and budget caps.** Checkpoints are now written for every way a run can stop, not just the budget cap, so `/continue` picks a run back up after a crash or Ctrl-C — finished sections are restored as fact and only the remainder gets re-planned.
-- **A deterministic rung on the verification ladder.** Acceptance criteria that can be checked mechanically ("file exists," "contains X") are now settled by looking, before a model is ever asked to grade them — cheaper, faster, and immune to a model believing its own claim that a file was written. Ambiguous criteria still fall through to the model.
-- **The desktop app is now a real download from the site**, not a GitHub releases page listing twenty build artifacts — platform and architecture are detected, size and version are shown, and stable per-platform links (`/download/mac-arm64`, `/download/win-x64`) mean a shared link never goes stale.
-
-### Cascade Cloud, native login, and one identity across CLI, desktop, and web (v0.20 – v0.45)
-- **Cascade Cloud** launched as a hosted, bring-your-own-key chat surface (now at [cascadeai.in](https://cascadeai.in)) — multimodal input, persistent memory, and file generation that now produces real, editable Office documents and charts (`.docx`/`.pptx`/`.xlsx`), not markdown text saved under the wrong extension.
-- **Native login**, rolled out server → CLI → desktop, so `cascade login`, the desktop app, and the web app all authenticate against one account with no OAuth secret shipped in a native client.
-- **Key sync** — provider keys, MCP servers and preferences can be pushed and pulled end-to-end encrypted between web, desktop and CLI, on request and with a passphrase; the server holds only ciphertext it cannot read. The web app carries provider keys and web-search settings only.
-- **MCP connectors gained OAuth** — connecting a server can run a real login-and-authorize flow instead of pasting a token, across cloud web, desktop, and CLI alike.
-- **One visual identity** — a single azure → sky → teal system, matching T1 → T2 → T3, now runs through the CLI banner, the desktop theme, and the web app instead of three different palettes.
-
-### Cost-aware Auto-routing keeps adding sources and nuance (v0.6 – v0.46)
-- Model-value ranking moved from one hand-curated benchmark table to an aggregator over multiple public sources (Artificial Analysis, LMArena, public leaderboards), normalized onto a common scale and scored conservatively where sources disagree.
-- Point releases now route as their own families (`gpt-5.5` vs. `gpt-5.4-mini`) instead of folding into one shared, less accurate score, and models a provider newly makes available compete in ranking instead of waiting on a hand-edited catalog.
-- Azure deployments with opaque names now get an inferred capability score (size/cost keywords + version), so a multi-deployment setup auto-assigns the strongest model to T1 and the cheapest to T3 instead of handing every tier the same "first available" deployment.
-
-<details><summary>Earlier — building the agent hierarchy and a flicker-free TUI (v0.5.2 – v0.13.2)</summary>
-
-### v0.6 → v0.13.2 — the agentic releases
-- Live benchmark Auto-routing (`Auto` picks the best-value model per task from live public benchmarks + live pricing), a boardroom plan-review gate (pause to approve or edit T1's plan before anything spawns), and autonomous `/auto` mode (safe tools run silently, dangerous ones still ask).
-- `/continue` run resumability, and workers recruiting bounded sibling workers (`request_workers`) when a task fans out mid-run.
-- The desktop Cockpit gained live streaming, a tool-approval modal, a manual tier override, and a click-to-inspect node detail panel.
-
-### v0.5.x — the visible organization
-- The delegation-savings counter (`saved $X vs. all-T1`), the `/comms` peer-traffic feed, `/why` run explanations, and the boardroom approval gate.
-- A dedicated security hardening pass — loopback-only dashboard, SSRF-guarded fetch, sandboxed code execution — and the Ink 6 / React 19 rewrite that fixed the terminal flicker.
-
-</details>
-
----
-
-## How It Works
-
-A Complex task runs through all three agent tiers:
-
-```
-User prompt
-    │
-    ▼
-┌─────────────────────────────────────────────┐
-│  T1  Administrator                          │
-│  • Analyzes complexity                      │
-│  • Selects models for all tiers             │
-│  • Decomposes task into n sections          │
-│  • Compiles final output                    │
-└──────────────┬──────────────────────────────┘
-               │  dispatches in parallel
-    ┌──────────┼──────────┐
-    ▼          ▼          ▼
-┌───────┐  ┌───────┐  ┌───────┐
-│  T2   │  │  T2   │  │  T2   │   Managers
-│ Sec.1 │  │ Sec.2 │  │ Sec.3 │   • Own one section
-└───┬───┘  └───┬───┘  └───┬───┘   • Spawn T3 workers
-    │          │          │        • Aggregate results
-  T3s        T3s        T3s        Workers
-  execute    execute    execute    • Run tools
-  subtasks   subtasks   subtasks   • Self-test output
-                                   • Escalate if needed
-```
-
-**Complexity decides how much of the organization a task gets.** A classifier (with cheap heuristics first) grades each prompt, and only the tiers the work needs are spun up:
-
-| Complexity     | Tiers in play | Shape |
-|----------------|---------------|-------|
-| Simple         | T3            | One worker answers directly — small talk gets a direct answer with no worker at all |
-| Moderate       | T2 → T3       | One manager and its workers, no planner |
-| Complex        | T1 → T2 → T3  | T1 plans 3–5 sections, one T2 manager each |
-| Highly Complex | T1 → T2 → T3  | 5+ sections |
-
-`/why` shows the verdict and the reasoning for the last run.
-
----
-
-## Features
-
-### Core
-- **Hierarchical orchestration** — T1/T2/T3 agents with structured escalation
-- **Token-by-token streaming** — live output as agents work
-- **Live agent tree** — real-time T1→T2→T3 execution graph in the terminal
-- **Approval prompts** — explicit y/n for destructive tool operations
-- **Provider failover** — auto-switches provider on rate limits (exponential backoff); automatically re-enables recovered providers on success
-- **Context auto-summarization** — compresses history when the context window fills
-- **Conversation branching** — fork a session to try parallel approaches
-- **Task cancellation** — pass an `AbortSignal` to stop any run mid-flight; all tiers halt at the next safe checkpoint and emit `run:cancelled` with partial output
-
-### AI Providers
-- Anthropic (Claude), including gateways reached through `ANTHROPIC_BASE_URL`
-- OpenAI (GPT)
-- Google Gemini
-- Azure OpenAI (any number of deployments, across resources)
-- OpenAI-compatible endpoints (OpenRouter, Groq, DeepSeek, xAI, Mistral, Together, Fireworks, llama.cpp, vLLM, LM Studio…)
-- Ollama — local models, used when they are what you have, when you pin them, or when a `privacy.paths` rule forces local-only
-
-Models are discovered from each provider at startup, so new releases compete in routing without a Cascade update.
-
-### Tools (T3 Workers)
-- **Shell and code** — shell commands with allowlist/blocklist, and a `run_code` interpreter (Python/Node)
-- **Files and search** — read, write, edit, delete, list, glob, grep, and — opt-in, with `"codeIndex": { "enabled": true }` and `cascade index` — `code_search` over a local code index
-- **Git / GitHub / GitLab** — status, diff, commit, push; open PRs, list and comment on issues
-- **Web** — `web_search` and SSRF-guarded `web_fetch`
-- **Browser** — Playwright automation; in the desktop app and on the web, `browser_control` of a real browser, and in the desktop app `read_current_page`
-- **Media** — analyze images; generate images, speech and video; transcribe audio
-- **Documents** — real `.docx` / `.pptx` / `.xlsx` and PDFs, with charts and embedded images
-- **Collaboration** — `peer_message` between workers, `knowledge_graph_search` over project facts once the project has learned some, and on Cascade Cloud `ask_user` for a structured question
-- **Your own** — MCP servers' tools, plugins, and tools the agent writes for itself — on by default, off with `"enableToolCreation": false`. Those always run confined: in a hard V8 isolate when the optional `isolated-vm` addon is installed, and otherwise in a WebAssembly sandbox that ships with Cascade. Either way the code sees no filesystem, network or processes, only `callTool` (which asks before anything dangerous) and an SSRF-guarded `fetch`
-
-### Developer Experience
-- **6 color themes** — midnight (default), aurora, daybreak, bloom, tide, ember
-- **`CASCADE.md`** — project-level instructions for agents
-- **`.cascadeignore`** — files agents' file and search tools cannot read or change
-- **MCP support** — connect any Model Context Protocol server
-- **Hooks** — shell scripts on pre/post tool use *(configured, not yet run by the engine — see [Hooks](#hooks))*
-- **Session history** — searchable, exportable (markdown / JSON)
-- **Audit log** — every tool call, file change, and agent decision
-- **Cost tracker** — real-time per-session token + USD cost
-- **Scheduled tasks** — cron-based automated runs, run by the dashboard server
-
-### Web Dashboard
-- Real-time agent execution graph (ReactFlow)
-- **Peer communication edges** — animated dashed lines between agents as they exchange messages
-- **Agent Inspector** — click any node to see live output stream and peer communications
-- Session browser with cost/token stats
-- Config viewer
-- JWT auth (password-protected)
-- URL hash routing (`#topology`, `#sessions`, `#logs`, `#settings`)
-- WebSocket live updates
-
----
-
-## Installation
+Cascade runs your request through a three-tier team of agents: **T1 plans, T2 manages, T3 does the work**. It sizes the team to the task, picks a model for each agent, runs tools (shell, files, git, web, browser, documents, images), checks the results and hands you one finished answer. Think Claude Code or Gemini CLI, but built around **orchestration**: you can see the team work, steer it, and see what it saved you.
 
 ```bash
 npm install -g cascade-ai
+cascade "Refactor the auth module to use JWT, add tests, and open a PR"
 ```
 
-> Requires **Node.js ≥ 22**.
+**Links:** [cascadeai.in](https://cascadeai.in) (web app) · [Docs](https://cascadeai.in/docs) · [Download the desktop app](https://cascadeai.in/download) · [npm](https://www.npmjs.com/package/cascade-ai) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
+
+### What's new (v0.99)
+
+- **Workspaces.** A Cascade Cloud run can now work in a **folder on your own computer**, through the desktop app. Its models stay on the server; its shell, file and git calls run on your machine, after you say yes there. The folder's path never leaves your computer. [Details](#workspaces-a-cloud-run-in-your-own-folder)
+- **Choose where a chat works** from the message box in the web app, and see "Files changed in your workspace" with diffs.
+- **Thinking levels.** Pick Auto, Off, Low, Medium or High per run in the web and desktop apps (`thinking` in config for the CLI and SDK).
+- **Shared run memory.** Workers on one run share a board of facts about your machine and reuse each other's read-only command results, and a worker is told when a file it read has changed.
+- **Real pictures in reports.** `find_image` and `annotate_image` are free and used before generated images.
+- **Auto mode that asks only about what can't be undone**, and a checkpoint for every run so `/undo` can take it back.
+- **Memories and skills built from your chats**, a **live model leaderboard**, **free web search with no key**, **your own Chrome as the agent's browser**, an **OpenAI-compatible `/v1` API**, and **one-command self-hosting**.
+
+[CHANGELOG.md](CHANGELOG.md) has every release.
 
 ---
 
-## Quick Start
+## Table of contents
+
+- [Surfaces: where you can use it](#surfaces-where-you-can-use-it)
+- [How it works](#how-it-works)
+- [Install and quick start](#install-and-quick-start)
+- [Features in depth](#features-in-depth)
+  - [Providers and your own keys](#providers-and-your-own-keys)
+  - [Local models](#local-models-ollama-and-openai-compatible-endpoints)
+  - [Web search](#web-search)
+  - [Attachments](#attachments)
+  - [File generation](#file-generation)
+  - [Images](#images)
+  - [Memories](#memories)
+  - [Skills](#skills)
+  - [Connectors and MCP](#connectors-and-mcp)
+  - [Spend tracking and budgets](#spend-tracking-and-budgets)
+  - [Conversation branches](#conversation-branches)
+  - [The live model leaderboard](#the-live-model-leaderboard)
+  - [Workspaces](#workspaces-a-cloud-run-in-your-own-folder)
+  - [Browser relay](#browser-relay-your-own-chrome)
+  - [Checkpoints, `/undo` and `/checkpoints`](#checkpoints-undo-and-checkpoints)
+  - [Auto mode and approvals](#auto-mode-and-approvals)
+  - [Privacy paths and the process jail](#privacy-paths-and-the-process-jail)
+  - [The desktop app](#the-desktop-app)
+  - [Tools reference](#tools-reference)
+- [OpenAI-compatible API](#openai-compatible-api)
+- [CLI quick reference](#cli-quick-reference)
+- [Configuration](#configuration)
+- [SDK](#sdk)
+- [Self-hosting](#self-hosting)
+- [Privacy and security](#privacy-and-security)
+- [Development](#development)
+- [License](#license)
+
+---
+
+## Surfaces: where you can use it
+
+All surfaces share one Cascade account. Settings can follow you between them through opt-in, end-to-end-encrypted sync (see [Providers](#providers-and-your-own-keys)).
+
+| Surface | What it is | Get it | Docs |
+|---|---|---|---|
+| **Web app** | Hosted chat at [cascadeai.in](https://cascadeai.in): bring your own keys, files, memories, skills, connectors, spend report, your own Chrome as a browser, workspaces. | Sign in with GitHub or Google | [docs](https://cascadeai.in/docs) |
+| **Desktop app** | Chat, a live **Cockpit** of the agent tree, a code editor with terminal, an in-app browser, and the bridge that lets cloud runs use your folders and browser. | [cascadeai.in/download](https://cascadeai.in/download) | [docs](https://cascadeai.in/docs) |
+| **CLI** | Interactive REPL and one-shot runs in your terminal. | `npm install -g cascade-ai` | [docs](https://cascadeai.in/docs/cli) |
+| **SDK** | `runCascade()`, `createCascade()`, `streamCascade()` from Node. | `import … from 'cascade-ai'` | [SDK](#sdk) |
+| **OpenAI-compatible API** | `POST /v1/chat/completions` and `GET /v1/models` so any OpenAI SDK can call Cascade. | Your Cascade server | [below](#openai-compatible-api) |
+| **Self-host** | The web app and API on your own machine or server. | `docker compose up` | [Self-hosting](#self-hosting) |
+
+Which one should I use? The **web app** is the quickest start. The **desktop app** adds your own files and tools on your own machine. The **CLI** is for terminal work and scripts. **Self-host** if you want to run the server yourself.
+
+---
+
+## How it works
+
+Every prompt is graded for complexity first (cheap rules first, then a classifier). Only the tiers the work needs are started.
+
+```mermaid
+flowchart TD
+    U([Your prompt]) --> C{Complexity?}
+    C -->|Simple| W0[One T3 worker answers]
+    C -->|Moderate| M0[One T2 manager] --> W1[T3 workers]
+    C -->|Complex or highly complex| T1
+    subgraph T1["T1 Administrator"]
+      direction TB
+      A1[Analyzes the task] --> A2[Picks models for the tiers] --> A3[Splits it into sections]
+    end
+    A3 --> M1[T2 Manager: section 1]
+    A3 --> M2[T2 Manager: section 2]
+    A3 --> M3[T2 Manager: section 3]
+    M1 --> X1[T3 workers run tools]
+    M2 --> X2[T3 workers run tools]
+    M3 --> X3[T3 workers run tools]
+    X1 --> R[T1 compiles one answer]
+    X2 --> R
+    X3 --> R
+    R --> U2([Result, cost and savings])
+```
+
+| Complexity | Tiers in play | Shape |
+|---|---|---|
+| Simple | T3 | One worker answers directly. Small talk gets a direct answer with no worker at all. |
+| Moderate | T2 → T3 | One manager and its workers, no planner. |
+| Complex | T1 → T2 → T3 | T1 plans 3–5 sections, one T2 manager each. |
+| Highly complex | T1 → T2 → T3 | 5 or more sections. |
+
+- **T1 Administrator** plans, chooses models and writes the final answer. It uses a frontier-class model.
+- **T2 Manager** owns one section, breaks it into subtasks, spawns workers and checks their work. It uses a mid-size model.
+- **T3 Worker** runs the tools and tests its own output. It uses small, fast (often local) models. A worker can ask its manager for bounded sibling workers when work fans out.
+- **Permission escalation.** A worker that needs more than it has asks up the chain: T3 → T2 → T1 → you.
+
+### Routing: the best-value model for each step
+
+Set a tier to **Auto** (the default) and Cascade picks within that tier's class of model for each task. It combines live public benchmark scores for the task type with live pricing, then learns from how each model actually did. `autoBias` (`balanced`, `quality` or `cost`) sets the trade-off. Newly released models compete as soon as a provider lists them. You can pin any tier to a model instead. If a model fails, **failover** treats a rate limit, an exhausted quota, a model your key can't use and a dead account differently.
+
+`cascade stats` shows what the router has learned, and `/rate good|bad` teaches it.
+
+### "Why?" and cost savings
+
+Every run can explain itself: the complexity verdict and the classifier's reasoning, which model served each tier, any failovers and escalations. Use `/why` in the CLI, the **Why** panel in the desktop app, or **Why** from the web app's top bar.
+
+Every run also shows what the hierarchy **saved** versus running the whole thing on the top tier (for example `saved $0.094 – 75% vs. all-T1`), because the cheap T3 workers (free, when local) do the heavy lifting. Where a model has no published price, Cascade says "cost not tracked" instead of showing $0.
+
+### Thinking levels
+
+Choose how much each model thinks: **Auto**, **Off**, **Low**, **Medium** or **High**. Each provider gets the setting in the form its models take (Claude adaptive thinking and effort, OpenAI reasoning effort, Gemini thinking level or budget). Azure deployments, Ollama and OpenAI-compatible endpoints are never sent it. Where a model can't turn thinking off, "Off" means the least it does. Set it in the composer in the web and desktop apps, or with `thinking` in config.
+
+### Shared run memory and the board
+
+Workers on one run share a board so they don't each pay to find out the same thing:
+
+- **Facts about your machine** learned from commands that ran and failed (not a git repository here, a command that isn't installed) are passed to every worker before its next model call, and kept in the project's knowledge so the next run starts out knowing them. A fact that stops being true is taken back out.
+- **A read-only command run again** in the same folder reuses the earlier answer (for a minute at most, or until something changes). Commands whose answer moves by itself (`date`, `ps`) and all `git` commands are never reused.
+- **A worker is told when a file it read has changed** (by another worker, a command or you), and reads it again instead of trusting an old copy. Only paths are shared, never contents.
+- Only short facts in Cascade's own words are kept, never what a tool printed, and subtasks under `privacy.paths` local-only rules neither add to the board nor read from it. Turn fact keeping off with `knowledge.factsExtraction`.
+
+### Other ways to steer a run
+
+- **Boardroom plan review** (`planApproval: "always"`): Complex runs pause so you can approve or edit T1's sections, worker counts and estimated cost before anything spawns.
+- **Steering** (`/steer`, or the desktop Steer bar): send a correction to running workers.
+- **Resume** (`/continue`): pick a run back up after a token budget stop, a crash or Ctrl-C. Finished sections are restored and only the rest is re-planned.
+- **Paused sections** ask for your decision on one card: Guide (redo with your notes), Retry or Skip.
+- **Asks instead of guessing** (web and self-hosted web): when a request is genuinely ambiguous, Cascade asks one structured question.
+- **Verification**: acceptance criteria that can be checked mechanically ("file exists", "contains X") are settled by looking, before a model is asked to grade them.
+- **Cancellation**: stop any run mid-flight; every tier halts at the next safe checkpoint and the partial output is kept.
+
+---
+
+## Install and quick start
 
 ```bash
-# 1. Initialize a project
+npm install -g cascade-ai       # needs Node.js 22.22.2 or newer
 cd my-project
-cascade init
-
-# 2. Set API keys (or add to .env)
-export ANTHROPIC_API_KEY=sk-ant-...
-export OPENAI_API_KEY=sk-...
-export GOOGLE_API_KEY=AIza...
-
-# 3. Check everything is working
-cascade doctor
-
-# 4. Start the interactive REPL
-cascade
-
-# 5. Or run a one-shot prompt
-cascade run "explain the auth module in this repo"
+cascade init                    # creates CASCADE.md and config
+export ANTHROPIC_API_KEY=sk-ant-...   # or OPENAI_API_KEY, GOOGLE_API_KEY, or use Ollama
+cascade doctor                  # checks keys, Ollama and config
+cascade                         # interactive REPL
+cascade run "explain the auth module in this repo"   # one-shot
 ```
+
+Already use Claude Code, Codex, Gemini CLI or Copilot CLI? `cascade link` shows which credentials Cascade can reuse (see [Configuration](#configuration)).
+
+Prefer no install? Open [cascadeai.in](https://cascadeai.in), or [download the desktop app](https://cascadeai.in/download).
 
 ---
 
-## Self-host
+## Features in depth
 
-Run the Cascade Cloud web app (chat UI + API + socket) yourself, on one port, with no cloud account:
+### Providers and your own keys
+
+Cascade is **bring your own keys**: it never resells model access.
+
+| Provider | Notes |
+|---|---|
+| Anthropic (Claude) | Also gateways reached through `ANTHROPIC_BASE_URL` |
+| OpenAI (GPT) | |
+| Google Gemini | |
+| Azure OpenAI | Any number of deployments, across resources |
+| OpenAI-compatible endpoints | OpenRouter, Groq, DeepSeek, xAI, Mistral, Together, Fireworks, llama.cpp, vLLM, LM Studio and more |
+| Ollama | Local models |
+
+Models are discovered from each provider, so new releases compete in routing without a Cascade update.
+
+**Where keys live**
+
+- **Web app:** keys are kept in your browser (the Key Vault) and travel with each run request.
+- **CLI and desktop:** keys are stored once per machine in `~/.cascade-ai/credentials.json` (readable only by you) and shared by every project.
+- **Self-host:** the operator's `.env` keys serve the OpenAI-compatible API on a single-account instance.
+
+**Encrypted key sync.** Provider keys, web-search keys, MCP servers and preferences can follow you between web, desktop and CLI. You **push and pull by hand** with a passphrase (`cascade sync push|pull`, `/sync` in the REPL, Account sync in the web and desktop apps). The bundle is encrypted on your device (AES-256-GCM, PBKDF2-derived key). The server stores one opaque envelope and cannot read it. The web app carries provider keys and web-search settings only. Details: [docs/key-sync.md](docs/key-sync.md).
+
+### Local models (Ollama and OpenAI-compatible endpoints)
 
 ```bash
-cp .env.example .env
-echo "SESSION_SECRET=$(openssl rand -base64 32)" >> .env
-echo "CLOUD_DEV_BYPASS=1" >> .env    # local-only sign-in; see the warning below
-docker compose up                    # → http://localhost:8787
+ollama pull llama3.2:3b         # a good T3 worker
+cascade doctor                  # Cascade finds Ollama at localhost:11434
 ```
 
-`docker compose up` builds the image, serves the web UI straight from the server (no separate web container), and keeps the SQLite database + uploads in a named volume so a restart doesn't wipe them. `.env.example` documents every variable the server reads (from `cloud/server/src/env.ts`), grouped required-first, each with what it does and what breaks if it's unset.
+- Local models are used when they are all you have, when you pin them, or when a `privacy.paths` rule keeps a folder local-only.
+- For an OpenAI-compatible endpoint set `local: true` for your own hardware (calls cost $0) or `local: false` for a hosted one (priced from Cascade's pricing data; a model it can't price shows "cost not tracked"). Unset, Ollama and localhost or LAN endpoints count as local.
+- **Text-tool fallback.** A model with no native tool calling, or one whose chat template can't render tools, switches to a text tool format that Cascade parses itself. The switch is remembered for Ollama and OpenAI-compatible servers.
+- **Azure:** set `region` in the provider config to select the right price sheet.
 
-> **`CLOUD_DEV_BYPASS` is an authentication bypass, not a convenience toggle.** It adds a sign-in button that accepts any name with no credential, so anyone who can reach the port can sign in as anyone. That is why it ships commented out, why the step above is explicit rather than the default, and why `docker-compose.yml` publishes to `127.0.0.1` only. Before putting this on a network anyone else can reach: set `GITHUB_CLIENT_ID`/`GOOGLE_CLIENT_ID` for real OAuth, remove `CLOUD_DEV_BYPASS`, and only then change the port binding.
+```jsonc
+{ "providers": [{ "type": "openai-compatible", "baseUrl": "https://api.groq.com/openai/v1",
+                  "apiKey": "...", "model": "llama-3.1-70b-versatile", "local": false }] }
+```
 
-See the [Dockerfile](Dockerfile) and [docker-compose.yml](docker-compose.yml) for the build/runtime details.
+### Web search
+
+`web_search` and an SSRF-guarded `web_fetch` are built in. With **no key at all**, **Open Web** searches several free sources at once and merges the results, and it recognises bot checks and empty pages rather than reporting "nothing found". For better results add a backend: **SearXNG** (`SEARXNG_URL`), **Brave** (`BRAVE_SEARCH_API_KEY`) or **Tavily** (`TAVILY_API_KEY`); in the web and desktop apps add them in Settings. `web_search` with `read: true` searches and reads in one call, and `web_fetch` returns a page's main content the way a reader would. Turn it on per chat from the composer's Web toggle.
+
+### Attachments
+
+Attach files to a message in the web app (picker, drag and drop, or paste):
+
+- **Images:** JPEG, PNG, GIF or WebP, up to 5 MB each. Vision-capable models see them; T1 reads them as part of your request, and a T3 worker reads them when image work is the subtask.
+- **Documents:** PDF, Word (`.docx`) or text files (txt, md, csv, json and so on). They are turned into text on upload and added to the run's context. The size limit depends on your plan (5 MB on Free, 10 MB on Pro).
+- The desktop chat takes images and documents too.
+
+### File generation
+
+Cascade produces **real files**, not text saved under the wrong extension.
+
+- `generate_document` renders genuine `.docx`, `.pptx` and `.xlsx` files from Markdown or CSV, with embedded images and real, editable PowerPoint charts from a fenced ` ```chart:bar ` block (body: CSV). Decks can animate. `pdf_create` renders PDFs.
+- In the web app, a reply can include **file cards** (` ```file:name.ext ` blocks). **Download** is free (your browser makes the file); **Save to Cascade files** stores it in your account, metered by plan.
+- Mermaid diagrams and maths in replies are rendered.
+
+More: [docs/file-generation.md](docs/file-generation.md).
+
+### Images
+
+Reports prefer **real pictures** over generated ones, and the real-picture tools are free:
+
+- **`find_image`** finds a real picture of a real thing (a product, a place, a person) from the page itself or Wikimedia Commons. It is saved with a caption naming its source (site, author, licence), and the report keeps the caption.
+- **`annotate_image`** circles, boxes, points to, highlights, labels, numbers or blurs parts of a screenshot or picture and saves a marked copy. On a screenshot, a control can be marked by its ref (`e14`).
+- **`browser_control` `capture`** saves a screenshot (or one control) for a report.
+- **`generate_image`** (also `generate_speech` and `generate_video`) is for things that don't exist yet, and needs a provider key that supports it.
+- `image_analyze` describes images, and `transcribe_audio` turns audio into text.
+
+If a requested picture can't be made, you still get the answer plus a plain note about the missing picture.
+
+### Memories
+
+The web app keeps **memories about you** and brings them into every chat. Open the Memory panel: they are grouped as About you, Preferences, Projects & work, Goals, Instructions and Facts.
+
+- **Add one yourself** under a category. Mark it "True for now" if it will change, such as a current project.
+- **Build from my chats** reads chats you choose, with your own providers, after showing the model and an estimated cost. It suggests memories, each backed by a quote of your own words, and **nothing is saved until you keep it**. A suggestion matching a memory you have adds to it instead of duplicating, and earlier wordings are kept in its history. Its cost shows in your spend report, and you can stop it any time.
+- Import chats and memories from elsewhere, and delete them whenever you like.
+
+### Skills
+
+A skill is a reusable set of instructions (a persona or way of working) you pick per chat. The web app ships a few presets (such as Code reviewer and Research analyst), and you can create, edit and delete your own. With your own model's help, in the Skills panel:
+
+- **Write it with AI:** describe what it is for and the name, description and instructions are drafted for you to edit.
+- **Improve with AI:** say what should change; the proposal appears beside the current text and nothing changes until you accept.
+- **Suggest from my chats:** see the cost first; skills are suggested only from tasks that appear in at least two of the chats you choose.
+
+### Connectors and MCP
+
+Cascade is an MCP ([Model Context Protocol](https://modelcontextprotocol.io)) client. Connected servers' tools become available to workers.
+
+- **Web app:** a **Connectors** directory of hosted servers (GitHub, Notion, Linear, Sentry, Atlassian, Stripe and Cloudflare Docs), plus **Custom MCP server** for any remote endpoint. Servers that support **OAuth** sign in with one click (OAuth 2.1 with PKCE; tokens are encrypted at rest and refreshed before runs). GitHub uses a personal access token. Remote servers are https-only with an SSRF guard.
+- **CLI:** `cascade mcp connect <url>` runs the OAuth login in your browser; `cascade mcp list`, `cascade mcp remove <name>`. Tokens are stored locally (mode 0600) and refreshed at run time.
+- **Desktop:** a Connectors tab in Settings.
+- **Local (stdio) servers** go in config under `tools.mcpServers`, and each must also be named in `tools.mcpTrusted` or it won't start.
+
+More: [docs/mcp-oauth.md](docs/mcp-oauth.md), [docs/connectors-broker.md](docs/connectors-broker.md).
+
+### Spend tracking and budgets
+
+- **Spend & savings report** (web app): what your runs cost and saved, by day and period (today, 7 days, 30 days, all time), with a per-tier and per-model breakdown. Only numbers are stored, never prompts or replies. Memory building and skill suggestions show up there too.
+- **Live cost** in every surface: tokens, USD and delegation savings per run (`/cost` in the CLI).
+- **Per-run caps:** *Max tokens per run* (default 200k) and a *per-run cost cap*. A run plans within its cap, and at 80% starts no new work and writes the answer from what is done, so you still get one.
+- **Session and daily caps** (CLI and SDK config): `budget.sessionBudgetUsd`, `budget.dailyBudgetUsd` (`/budget set <$>`, `/budget clear`), with a warning at `budget.warnAtPct` (default 80). `/continue` resumes a run that hit its token cap.
+- **Plan limits** on Cascade Cloud: Free is 20 runs a day, Pro 200 (resets at midnight UTC), plus a daily allowance of hosted browser sessions where a deployment offers them.
+
+### Conversation branches
+
+A chat is a **tree**, so you can explore without losing anything. **Edit** a prompt to fork a new branch, **regenerate** a reply to get a sibling answer, and switch between versions with the `‹ n/m ›` navigator. Delete a message with its subtree. Cloud chats are shared across surfaces: signed in, the CLI and desktop app mirror each finished turn into a cloud conversation (opt out with `CASCADE_NO_CLOUD_SYNC=1` in the CLI), and you can manage them from the terminal:
+
+```bash
+cascade sessions                              # list your cloud chats
+cascade sessions show <id>                    # transcript with branch markers
+cascade sessions branch <chat> <message>      # switch to another branch
+```
+
+In the REPL, `/branch` forks the local session.
+
+### The live model leaderboard
+
+How each model has actually done on each kind of task across Cascade's runs is public on the landing page ([cascadeai.in](https://cascadeai.in)) and at `GET /api/leaderboard` on a server. It is built from counts in the shared learning pool only, never what a run said or whose it was. The same pool drives Auto routing.
+
+### Workspaces: a Cloud run in your own folder
+
+By default a hosted run has no shell and no files. **Workspaces** let a Cascade Cloud run work in **a folder on your own computer**, served by the desktop app. The agent loop stays on the server; only **tool calls** cross (`shell`, `file_read`, `file_write`, `file_edit`, `file_delete`, `file_list`, `glob`, `grep`, `git`, `run_code`). Cascade hosts no cloud sandboxes.
+
+**Set up**
+
+1. Self-hosters: set `WORKSPACE_RELAY=true` on the server. Without it none of the workspace endpoints exist.
+2. In the desktop app, sign in to Cascade Cloud and turn on **Settings → Workspaces** (off by default; it uses the same pairing as Cloud runs).
+3. In the web app, use the **Environment** button next to the tools in the message box. It lists "Cloud (no files)" (the default) and each of your computers, with a dot for whether it is serving. The choice is remembered per chat.
+
+**What you control, on your computer**
+
+- **Consent.** Nothing runs without a yes in the desktop app, where you pick the folder and the tools the run may have. A whole drive, your home folder or a folder that contains it can't be chosen.
+- **Tools presets.** *Read only* (list, read, glob, grep), *Read and edit files* (adds write, edit, delete), or *Everything* (adds shell, git and running code), or any mix. A call for any other tool is refused there, whatever the server sends.
+- **Approvals.** Risky calls (deleting, sending things off the machine, rewriting git history, installing software, changing files outside the folder) ask again in the desktop window before they run, with the command shown. Unanswered, they are refused. "Allow everything for this run" is a choice only you can make there.
+- **Stop.** A "Serving a Cloud run" banner with a **Stop** button is always visible while a run works. Stop ends its access at once.
+- **Undo.** The folder is checkpointed before the run's first change. Afterwards the banner offers **Undo this run's changes**. If no checkpoint can be taken, every change is asked about.
+- **Privacy.** `.cascadeignore` and `privacy.paths` are respected: protected and local-only files are never read for the run, since its models are cloud models. Commands run in the [process jail](#privacy-paths-and-the-process-jail).
+- **Your path stays private.** The run is told only a label you choose ("Workspace on <computer>", or the folder's name). The server logs none of the files, paths or command output.
+
+**In the web app**, the chat shows "Waiting for <computer> to allow this run…", then a chip "Working in <folder> on <computer>", a notice while a step waits for your approval on that computer, and a **Files changed in your workspace** list: an edit with a red and green diff, a write with the new content, a delete as "deleted", and a note for any file that changed on your computer since the run read it. Command output and file contents it read are never sent to this list.
+
+More: [docs/design/workspace-env.md](docs/design/workspace-env.md) · [Docs: workspaces](https://cascadeai.in/docs/workspaces)
+
+### Browser relay: your own Chrome
+
+A cloud run can use **a browser on your own machine** instead of one the server hosts. Your device opens one, asks you first, and serves the run a tab. Pick a device kind:
+
+- **Chrome extension.** Build it with `node extension/build.mjs`, load `extension/dist` unpacked at `chrome://extensions`, enter your server address and approve the pairing code. The run gets a new window, **private (incognito) by default** or a normal one.
+- **Desktop app:** Settings → Cloud runs makes the app a device (a **Cascade run** window with an empty, in-memory profile).
+- **CLI:** `cascade relay pair`, then `cascade relay serve`. Also `cascade relay devices` and `cascade relay forget`.
+
+In the web app, turn on **Browser** in the composer's Tools menu. Settings → Browser lists your devices (up to 10) and chooses where the browser comes from.
+
+What keeps it safe:
+
+- Every run asks first: you type the sites it may use, or tick **Any public site** for research. Your private network (`localhost`, `10.x`, `192.168.x`, `.local`) is blocked.
+- **Take over / Hand back:** pause the run to use its tab yourself (to sign in, say), then hand it back. Stop from the toolbar, by closing the window, or with Ctrl-C.
+- **Screenshots are off by default.** You must tick "Let Cascade take screenshots of these sites for your report" when you approve, and your device blurs password, card and one-time-code fields.
+- Several tabs can run at once (four by default, up to eight), each under the same rules.
+
+The agent reads each page as a **list of its controls with refs** (like `e14`) and acts by ref. `tools.browserVision` sets how much a model sees: `off`, `list` (default), `image` or `marked`. Approvals name the element and the site, and a click on anything labelled pay, buy, delete, send, publish and the like asks every time.
+
+Operators can instead give runs a hosted browser (`REMOTE_BROWSER_*`, a CDP endpoint or Steel) or let users bring their own CDP endpoint (`BROWSER_ENDPOINTS`). The Chrome extension's privacy policy is [extension/PRIVACY.md](extension/PRIVACY.md). Full design and limits: [docs/browser-relay.md](docs/browser-relay.md) · [Docs: browser relay](https://cascadeai.in/docs/browser-relay)
+
+### Checkpoints, `/undo` and `/checkpoints`
+
+Every CLI and desktop run is **checkpointed** before and after, in a git repository of Cascade's own in the project's state folder. **Your own git is never touched.**
+
+- `/undo` puts back the files the last run changed and removes the ones it made. `/undo 3` takes back three runs.
+- A file you changed by hand since is left alone unless you add `--force`.
+- `/checkpoints` lists runs. The last 50 are kept.
+- Files your `.gitignore` leaves out aren't recorded.
+- `/rollback` undoes every file the file tools changed in this session.
+
+### Auto mode and approvals
+
+Dangerous tools ask for approval before they run (`tools.requireApprovalFor`, default `shell`, `file_write`, `file_delete`). **Auto mode** (`/auto on|off|status`) works on its own and judges each call by what it does, not by which tool it uses. Reading, and changes a checkpoint can put back (editing project files, running tests and builds, commits), go ahead. It stops to ask before:
+
+- deleting files;
+- sending anything off the computer (push, publish, deploy, POST, email);
+- rewriting or discarding git history;
+- installs and system changes (packages, sudo, services, scheduled tasks);
+- writing outside the project;
+- destroying database data;
+- stopping processes or containers;
+- changing permissions or ownership;
+- commands it can't read before they run (`eval`, `curl | sh`);
+- writing a file a checkpoint doesn't record.
+
+The question says who asks, exactly what, why, and whether `/undo` can take it back. Budget caps remain the hard stop.
+
+### Privacy paths and the process jail
+
+**`.cascadeignore`** (`.gitignore` syntax) lists files agents cannot read or change. Secrets (`.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa`, `id_ed25519`) are always protected. Agents can read `.cascadeignore` but not change it. Cascade's own files live outside your project, where no file tool reaches.
+
+**`privacy.paths`** marks folders `local-only`. A worker whose job names a matching path runs on a private model from the start (one whose endpoint is on your machine or private network). One that reads such a file on the way moves to a private model before the content reaches any model, or is refused if none is configured. Its output is withheld from the tiers above, its approvals come to you, tools that send data elsewhere (web, browser, GitHub, media, MCP, plugins) are refused to it, and what it makes goes to a private folder outside the project.
+
+```jsonc
+"privacy": { "paths": [{ "pattern": "secrets/**", "policy": "local-only" }] }
+```
+
+**Process jail.** `shell`, `run_code` and `git` run in **bubblewrap on Linux** where it works, with provider keys, Cascade's own files and common credential locations (`~/.ssh`, `~/.aws`, `~/.kube` and the like) hidden from them. Where no supported jailer exists (Windows, macOS, or Linux without bubblewrap), `shell` and `run_code` are refused rather than run unprotected, and the `git` tool uses its own checks. `tools.processJail` can be `auto`, `bwrap` or `off`. Agent-written tools always run in a confined sandbox (an `isolated-vm` isolate, or a WebAssembly sandbox that ships with Cascade) with no filesystem, network or processes.
+
+### The desktop app
+
+Download from [cascadeai.in/download](https://cascadeai.in/download). Highlights:
+
+- **Cockpit:** the live agent graph. Click a node to inspect its output, model, thinking and peer messages. Tool-approval modal, tier override, boardroom plan review, escalation cards for paused sections.
+- **Code view:** a Monaco editor with file tree and an integrated **terminal**. Previews open images (PNG, JPG, GIF, WebP, SVG, BMP, ICO, AVIF), PDFs (built-in viewer), audio and video; other binaries offer "Open in default app" and "Show in folder". Previews are read-only.
+- **Comms panel:** a live feed of worker-to-worker messages, broadcasts, file locks and your steering injections.
+- **Why panel** and a **Models used** section; **diff review** with per-file revert of what a session changed; **Steer bar**.
+- **Command palette** (Ctrl/Cmd+K) to jump to any view, action or past session.
+- **A browser inside the app** the agent can drive, with live view, take over and hand back, and `read_current_page` for the page you have open.
+- **Cloud runs on this computer:** Settings → Cloud runs (browser device) and Settings → Workspaces (folder serving), with a Stop button and an Undo banner.
+- **Continue elsewhere:** open a chat from the web or hand one off between web and desktop; cloud-backed sessions with branch navigation.
+- A **Thinking** setting, multi-deployment Azure settings, live model lists per provider, and downloads that detect your platform and architecture.
+
+### Tools reference
+
+Workers use these tools (MCP servers' tools, plugins and tools the agent writes for itself join at runtime). Tools marked ✓ are dangerous and need approval unless disabled.
+
+| Tool | What it does | |
+|---|---|---|
+| `shell` | Shell commands (allowlist and blocklist) | ✓ |
+| `run_code` | Run Python or Node code | ✓ |
+| `file_read` · `file_list` | Read a file (optional line range); list a directory | |
+| `file_write` · `file_edit` · `file_delete` | Write, exact-string edit, delete | ✓ |
+| `glob` · `grep` | Find files by pattern; search contents | |
+| `code_search` | Search a local code index. Opt in with `"codeIndex": { "enabled": true }` and run `cascade index` | |
+| `git` · `github` | git status, diff, commit, push and more; open PRs, list and comment on issues (GitHub / GitLab) | ✓ |
+| `web_search` · `web_fetch` | Search the web; fetch a page (SSRF-guarded) | |
+| `browser` | Headless Playwright automation (off unless `tools.browserEnabled`) | ✓ |
+| `browser_control` | Drive a real browser (desktop app and web), including `capture` for report screenshots | ✓ |
+| `read_current_page` | Read the page you have open (desktop app) | |
+| `image_analyze` · `find_image` · `annotate_image` | See, find and mark up images | |
+| `generate_image` · `generate_speech` · `generate_video` · `transcribe_audio` | Media generation and speech-to-text | |
+| `generate_document` · `pdf_create` | Real `.docx`, `.pptx`, `.xlsx` and PDF files | ✓ |
+| `knowledge_graph_search` | Query the project's learned facts (appears once there are some) | |
+| `peer_message` | Message a sibling worker | |
+| `ask_user` | Ask you one structured question (web and self-hosted web) | |
 
 ---
 
 ## OpenAI-compatible API
 
-Anything that already talks to OpenAI can talk to Cascade. Point the client's `base_url` at your server's `/v1` and use a Cascade access token as the API key — `POST /v1/chat/completions` and `GET /v1/models` work with the official SDKs, streaming and not.
+Anything that already talks to OpenAI can talk to Cascade. Point the client's `base_url` at your server's `/v1` and use a Cascade access token as the API key. `POST /v1/chat/completions` and `GET /v1/models` work with the official SDKs, streaming or not.
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(api_key=CASCADE_ACCESS_TOKEN, base_url="http://localhost:8787/v1")
-
 reply = client.chat.completions.create(
-    model="cascade",                                    # a routing mode, not a model
+    model="cascade",   # a routing mode, not a model
     messages=[{"role": "user", "content": "Compare Postgres and SQLite for a CLI tool."}],
 )
 print(reply.choices[0].message.content)
-print(reply.cascade)   # which tier + model actually served it, and what routing saved
+print(reply.cascade)   # which tier and model served it, and what routing saved
 ```
 
-`model` names a **routing mode**, because Cascade picks a model per subtask — that is the product:
-
-| `model` | what runs |
-| --- | --- |
-| `cascade` | full orchestration, balanced quality against cost |
-| `cascade-fast` | one mid-tier model, no orchestration |
-| `cascade-quality` | full orchestration, biased to quality |
-
-Anything else returns `404 model_not_found` rather than quietly running something you didn't ask for. Unsupported parameters (`n > 1`, `logprobs`, `tools`, `response_format`, …) are **rejected**, not ignored — a silently dropped parameter returns a response that looks successful and is wrong. `temperature` and `max_tokens` are honoured, applied across tiers.
-
-**Provider keys.** On a **single-account** instance — a self-host, where the operator and the caller are the same person — the endpoint uses the provider keys in your `.env` (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, …; the same names the CLI reads). The moment a second account exists this stops automatically, because the operator's key would otherwise pay for everyone else's runs. Any instance can also take keys per request via the SDK's `extra_body={"providers": [...]}`.
-
-`/v1` is for server-side clients: `Authorization` is not allowed cross-origin, so a browser-side SDK is deliberately not served. Tools/function calling and image inputs are not in v1 — Cascade's tools run server-side, and attachments go through `POST /api/uploads`.
-
----
-
-## Configuration
-
-Cascade keeps what it knows about a project outside the project, in a folder of its own:
-`~/.cascade-ai/projects/<folder name>-<hash>/` — its settings (`config.json`), sessions, audit trail, world state, code index and run checkpoints. Your provider keys are kept once for the machine, in `~/.cascade-ai/credentials.json`, and every project uses them; no project's config holds a key. The project itself holds only what is meant to be shared: `CASCADE.md` and `.cascadeignore`. These folders are readable by you alone: one open to others that Cascade cannot tighten, such as one owned by another account, is refused. Rename or move a project on the same disk and its state follows it, found by the folder's identity on disk; a copy, or a move to another disk, starts afresh, and Cascade says where the old state is. Delete a project and make or clone another at the same path, and its settings, local-only rules and own keys carry over, while what the earlier one did and knew — sessions, world state, the code index, private outputs — is set aside beside its state folder. A project that still has a `.cascade/` folder from an earlier version has it moved there the first time Cascade opens it, keys included (a `.cascade` that is a symlink is left alone) — a project whose key differed from the machine-wide one keeps using its own. `cascade doctor` prints where a project's config is.
-
-> **Prefer the picker over hand-editing config.** Inside the REPL, run `/model`
-> to walk through a three-step interactive picker (provider → tier → model,
-> with an Auto option at every step). The picker writes the project's config
-> for you and hot-swaps the running router — no restart needed.
-
-```json
-{
-  "version": "1.0",
-  "providers": [
-    { "type": "anthropic", "apiKey": "sk-ant-..." },
-    { "type": "openai",    "apiKey": "sk-..." },
-    { "type": "gemini",    "apiKey": "AIza..." },
-    { "type": "ollama"                          }
-  ],
-  "models": {
-    "t3": "llama3.2:3b"
-  },
-  "autoBias": "balanced",
-  "tools": {
-    "shellAllowlist":     [],
-    "shellBlocklist":     ["sudo rm", "rm -rf", "mkfs"],
-    "requireApprovalFor": ["shell", "file_write", "file_delete"],
-    "browserEnabled":     false,
-    "browserVision":      "list",
-    "mcpServers": [
-      { "name": "filesystem", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] }
-    ],
-    "mcpTrusted": ["filesystem"]
-  },
-  "dashboard": {
-    "host":     "127.0.0.1",
-    "port":     4891,
-    "auth":     true,
-    "teamMode": "single"
-  },
-  "theme":  "midnight",
-  "telemetry": { "enabled": false },
-  "plugins": ["./plugins/my-tool.js"],
-  "planApproval": "never",
-  "altScreen": false
-}
-```
-
-The file is strict JSON — no comments.
-
-- `models` pins a tier to a model; a tier left out stays on Auto.
-- `tools.mcpTrusted` names the MCP servers allowed to start; an untrusted one is refused.
-- `"codeIndex": { "enabled": true }` turns on the `code_search` tool; build its index with `cascade index`.
-- `autoBias` sets Auto's trade-off: `"balanced"`, `"quality"` or `"cost"`.
-- `thinking` sets how much a run's models think: `"auto"` (each model's default), `"off"`, `"low"`, `"medium"` or `"high"`. Each provider gets it in the form its models take; where a model can't turn thinking off, `"off"` is the least it does. Azure deployments, Ollama and OpenAI-compatible endpoints are never sent it. The web and desktop apps set it per run from the composer.
-- `planApproval: "always"` pauses Complex runs in the **boardroom**: approve T1's proposed sections, worker counts, and estimated cost before any T2 manager spawns. Headless/SDK runs auto-approve.
-- `altScreen: true` (or the `--alt-screen` flag) renders the TUI in the terminal's alternate screen buffer — vim-style, flicker-proof, shell restored on exit. History scrolls in-app with PgUp/PgDn since the alt screen has no native scrollback.
-
-API keys are also read from environment variables:
-
-| Provider | Environment Variable  |
-|----------|-----------------------|
-| Anthropic | `ANTHROPIC_API_KEY` — or a gateway's `ANTHROPIC_AUTH_TOKEN` with its `ANTHROPIC_BASE_URL` |
-| OpenAI    | `OPENAI_API_KEY`     |
-| Gemini    | `GOOGLE_API_KEY` (`GEMINI_API_KEY` via `cascade link`) |
-| Azure     | `AZURE_OPENAI_KEY`, with `AZURE_OPENAI_ENDPOINT` and `AZURE_OPENAI_DEPLOYMENT` (`AZURE_OPENAI_API_KEY` via `cascade link azure`) |
-
-### Linking credentials from other AI CLIs
-
-If you already use **Claude Code**, **OpenAI Codex**, **Gemini CLI**, or **GitHub Copilot CLI**, Cascade can reuse the credentials they store on your machine instead of asking you to paste keys again:
-
-```bash
-cascade link                      # list detected credentials
-cascade link anthropic            # adopt an API key for a provider
-cascade link groq                 # adopt a compatible service, with its endpoint
-```
-
-`cascade doctor` also reports what's linkable. How each credential is treated:
-
-| Source | Stored as | Reusable? |
-|--------|-----------|-----------|
-| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` env | API key | ✅ directly |
-| `AZURE_OPENAI_KEY` env | API key | ⚠️ needs routing — `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_DEPLOYMENT`, or deployments already configured |
-| `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `MISTRAL_API_KEY`, `TOGETHER_API_KEY`, `FIREWORKS_API_KEY` | API key | ✅ directly — adopted together with the service's endpoint |
-| `ANTHROPIC_AUTH_TOKEN` env | bearer token | ⚠️ needs the gateway that issued it — `ANTHROPIC_BASE_URL`, or `baseUrl` already configured |
-| Codex `~/.codex/auth.json` (API-key mode) | API key | ✅ directly |
-| Claude Code `~/.claude/.credentials.json` | subscription OAuth | ❌ detected only — Anthropic prohibits third-party use |
-| Codex ChatGPT login · Gemini CLI · Copilot CLI | vendor OAuth | ❌ detected only — locked to that vendor's backend |
-
-> ⚠️ **Subscription tokens are not adoptable.** Anthropic [does not permit](https://code.claude.com/docs/en/legal-and-compliance) third-party developers to route requests through Claude Free, Pro or Max credentials, and refuses them server-side; the Codex, Gemini CLI and Copilot tokens each target their own vendor's backend rather than the public API. Cascade detects them so you know what is on the machine and why it cannot use them, and declines to configure a provider that would fail on its first call. It only ever reads **your own** local files, and never transmits a credential anywhere except to that credential's own provider.
-
-### CASCADE.md
-
-Create a `CASCADE.md` in your project root to give agents project-specific instructions — just like `CLAUDE.md`. Run `cascade init` to generate a template.
-
-### .cascadeignore
-
-List files and directories agents cannot read or modify. Syntax is identical to `.gitignore`. Secrets (`.env`, `*.pem`, `*.key`) are protected always, whatever the file says, and Cascade's own files are outside the project, where no agent reaches. See [Security](#cascadeignore-1) for what it covers.
-
----
-
-## AI Providers
-
-### Model routing
-
-Each tier draws from its own class of model: frontier models for T1's planning, mid-size models for T2's management, and small, fast models for T3's work. With **Auto** (the default), Cascade picks within that class per task, by public benchmark scores for the task type weighed against live pricing (`autoBias` sets the trade-off), and adjusts from how each model actually performed. `cascade stats` shows what it has learned, and `/rate good | bad` teaches it.
-
-- **Pin a tier** with `"models"` in config, `/model` in the REPL, or `cascade models set t1 anthropic:<model>`.
-- **Local models** are used when they are all you have, when you pin them, or when a `privacy.paths` rule keeps a folder local-only.
-- **Failover** is per failure type: a rate limit backs off, an exhausted quota or a model your key cannot use is routed around, and a recovered provider is used again.
-
-### Multimodal / Vision
-
-Images are only processed by vision-capable models. When you attach an image:
-- **T1** analyzes it as part of understanding your top-level request
-- **T3** analyzes it when image processing is the actual subtask
-
-### Ollama (local models)
-
-```bash
-# Install Ollama then pull a model
-ollama pull llama3.2:3b    # T3 workers
-ollama pull llava           # T3 vision tasks
-ollama pull llama3:70b      # T2 managers
-
-# Cascade auto-detects Ollama at localhost:11434
-cascade doctor              # confirms detection
-```
-
-### Azure OpenAI
-
-```jsonc
-{
-  "providers": [{
-    "type":           "azure",
-    "apiKey":         "...",
-    "baseUrl":        "https://YOUR_RESOURCE.openai.azure.com",
-    "deploymentName": "gpt-4o",
-    "apiVersion":     "2024-08-01-preview",
-    "region":         "global"
-  }]
-}
-```
-
-`region` selects the right price sheet — Azure charges ~10% more for `us` and
-`eu` deployments than for `global` ones. Defaults to the global rates.
-
-### OpenAI-compatible endpoints (Groq, Together, etc.)
-
-```jsonc
-{
-  "providers": [{
-    "type":    "openai-compatible",
-    "apiKey":  "...",
-    "baseUrl": "https://api.groq.com/openai/v1",
-    "model":   "llama-3.1-70b-versatile",
-    "local":   false
-  }]
-}
-```
-
-### Is this endpoint free? (`local`)
-
-An OpenAI-compatible endpoint is either your own hardware — llama.cpp, LM
-Studio, vLLM — where inference genuinely costs nothing, or somebody's paid API.
-The same is true of Ollama, which is usually local but can be pointed at a
-rented box. `local` says which:
-
-| `local`   | Meaning                                                            |
-|-----------|--------------------------------------------------------------------|
-| `true`    | Self-hosted. Calls cost **$0**, and Cascade reports $0.            |
-| `false`   | Hosted. Cascade prices calls from its pricing dataset; a model it can't price reports **"cost not tracked"**, never $0.00. |
-| *(unset)* | Inferred: Ollama is local; an OpenAI-compatible endpoint is local when `baseUrl` points at localhost or your LAN. |
-
-Set it explicitly whenever the default guesses wrong — a hosted endpoint
-mistaken for a local one is how real spend gets reported as free.
-
----
-
-## Tools
-
-T3 workers have access to the following tools. All destructive operations require explicit approval unless disabled in config.
-
-| Tool | Description | Dangerous |
-|------|-------------|-----------|
-| `shell` | Execute shell commands (allowlist / blocklist) | ✓ |
-| `run_code` | Run Python or Node code | ✓ |
-| `file_read` · `file_list` | Read a file (optional line range); list a directory | |
-| `file_write` · `file_edit` · `file_delete` | Write, exact-string edit, delete | ✓ |
-| `glob` · `grep` | Find files by pattern; search their contents | |
-| `code_search` | Search the workspace code index — needs `"codeIndex": { "enabled": true }` in config and `cascade index` | |
-| `git` | status, diff, log, add, commit, push, pull, … | ✓ |
-| `github` | Open PRs, list and comment on issues (GitHub / GitLab) | ✓ |
-| `web_search` | Search the web (SearXNG, Brave or Tavily) | |
-| `web_fetch` | Fetch a page, SSRF-guarded | |
-| `browser` | Headless Playwright automation (off unless `tools.browserEnabled`) | ✓ |
-| `browser_control` | Drive a real browser — desktop app and web (your own Chrome through the relay, CDP or Steel). On the web: page views with refs, and screenshots for vision models (`tools.browserVision`; from your own Chrome only if you allow screenshots when you approve the run). `capture` saves a screenshot for a report | ✓ |
-| `read_current_page` | Read the page you have open — desktop app | |
-| `image_analyze` | Describe an image (vision-capable models) | |
-| `generate_image` · `generate_speech` · `generate_video` | Generate media, with a provider key that supports it | |
-| `find_image` | A real picture of a real thing, from the page it's on or Wikimedia Commons, saved with a caption naming its source. Free, so reports use it before `generate_image` | |
-| `annotate_image` | Circle, box, arrow, highlight, label, number or blur parts of a screenshot or picture (a screenshot's controls by ref), saved as a copy | |
-| `transcribe_audio` | Speech-to-text for an audio file | |
-| `generate_document` | Render a REAL `.docx` / `.pptx` / `.xlsx` from Markdown or CSV | ✓ |
-| `pdf_create` | Render a PDF | ✓ |
-| `knowledge_graph_search` | Query the project's knowledge graph of facts — appears once the project has learned some | |
-| `peer_message` | Message a sibling worker | |
-| `ask_user` | Ask you one structured question instead of guessing — Cascade Cloud and self-hosted web | |
-
-#### What the browser agent sees
-
-On the web (a CDP browser or Steel), `browser_control` describes each page as a **page view**: the controls on screen and further down, each under a ref.
-
-```
-[Page view 2]
-Page: Dine — https://dine.example/search
-Viewport 1280×800, scrolled 0 of 1,013
-
-On screen:
-[e5] button "Account"
-[e8] combobox "Party size": "2 people" (options "1 person", "2 people", "4 people")
-[e14] button "Reserve 7:30 pm"
-```
-
-The model acts by ref (`{"action":"click","ref":"e14"}`), and CSS selectors still work. On a ref, `select_option` chooses an option by its text as the view lists it, never by the value hidden in the page; text the view shortened still picks the option it came from. A page view never shows what is typed into a field, nor that text in the page's title or address, a search query included; the results a page lists for a search are its own text and stay visible. A ref is refused, never re-matched, once the page has loaded something else or the control it named has gone or been renamed, even past the part of its name the view shows. A ref inside an iframe is refused once a frame on the page has loaded another document.
-
-`tools.browserVision` sets how much it sees. It applies to a remote browser — Cascade Cloud and self-hosted deployments set it with `REMOTE_BROWSER_VISION`, and an SDK host that attaches one reads it from its config. The desktop's built-in browser keeps CSS selectors. Page views need Playwright 1.60 or later, the version Cascade installs; with an older one the agent is offered the original actions only, and reads page text and uses CSS selectors.
-
-| Setting | What the model gets |
+| `model` | What runs |
 |---|---|
-| `off` | Page text and CSS selectors only |
-| `list` (default) | Page views with refs, for every model |
-| `image` | Page views, plus a screenshot for models that can see images |
-| `marked` | Page views, plus a screenshot with each ref drawn on it (experimental) |
+| `cascade` | Full orchestration, balanced quality against cost |
+| `cascade-fast` | One mid-tier model, no orchestration |
+| `cascade-quality` | Full orchestration, biased to quality |
 
-When screenshots are on:
-- No screenshot is taken while a password, card or one-time-code field is on screen in any frame, when the page can't be checked for one, or right after you took control of the browser or hid it. The page is checked again once the picture is taken, and a picture taken as such a field came up, or as the page went to another, is dropped.
-- A screenshot is sent with one step and not kept: about 1.4k tokens a step on Claude at 1280×800 (Steel's size). A larger screen costs more. A step that leaves the page looking exactly as it did in the last one sends none.
-- A model that can't see images, one reached through a gateway, or one that would be charged more for a picture than a run allows for an image gets the page view alone.
-
-Approval prompts name the element and the site. A click on something labelled pay, buy, order, delete, remove, send, transfer, publish, confirm, approve, authorize, allow, withdraw, subscribe or donate asks every time, even after "always allow" — read past accents, invisible characters and lookalike letters. So does Enter or Space where it may submit a form, alone or in a key combination, and a click, fill or key press on something the page view did not name, such as a CSS selector or an icon-only button, or named only in part because its name was too long to show or had typed text hidden in it. An approved action runs only on the page it was approved on, not after the page has moved to another, even on the same site; one by CSS selector also stops when an app changes its route. Hosted deployments set `REMOTE_BROWSER_VISION`. `scripts/browser-vision-eval/` holds the side-by-side test that decides the default.
-
-MCP servers' tools, plugins and dynamic tools join this list at runtime.
-
-> `generate_document`, not `file_write`, is how a Word/PowerPoint/Excel file gets
-> made: those formats are ZIP archives of OOXML, so text saved under the
-> extension opens as a corrupted file. It embeds generated images
-> (`![alt](path)` on its own line) and turns a fenced ` ```chart:bar ` block
-> (body: CSV) into a real, editable PowerPoint chart — see
-> [docs/file-generation.md](docs/file-generation.md).
-
-### Shell allowlist / blocklist
-
-```jsonc
-"tools": {
-  "shellAllowlist": ["npm", "git", "python"],   // only these prefixes allowed
-  "shellBlocklist": ["sudo", "curl http://"]     // always blocked
-}
-```
+- Any other model name returns `404 model_not_found`. Unsupported parameters (`n > 1`, `logprobs`, `tools`, `response_format` and others) are **rejected**, not silently ignored. `temperature` and `max_tokens` are honoured.
+- **Provider keys:** on a **single-account** instance (a self-host) the endpoint uses the provider keys in your `.env`. Once a second account exists this stops, so the operator's key never pays for others. Any instance can take keys per request with `extra_body={"providers": [...]}`.
+- `/v1` is for server-side clients: browser-side SDKs are deliberately not served. Tools, function calling and image inputs are not part of v1.
 
 ---
 
-## CLI Reference
+## CLI quick reference
+
+Run `cascade --help` for everything. Full reference: [Docs: CLI](https://cascadeai.in/docs/cli).
 
 ```
 cascade [options]                    Start the interactive REPL
 cascade run <prompt>                 Run a single prompt and exit
 cascade init [path]                  Initialize Cascade in a directory
 cascade doctor                       Diagnose API keys, Ollama, config
-cascade link [provider]              Reuse credentials from Claude Code / Codex / Gemini / Copilot
+cascade link [provider]              Reuse credentials from other AI CLIs
 cascade models [action] [tier] [v]   List models per tier, or set/unset a tier's model
-cascade stats                        Auto-routing history: which models work best per task type
-cascade index [path]                 Build or refresh the code index (code_search also needs codeIndex.enabled)
-cascade export                       Export a session to Markdown or JSON
-cascade identity list|create|set-default   Manage identities
-cascade mcp connect <url>|list|remove      Connect remote MCP servers over OAuth
-cascade dashboard                    Launch the local web dashboard
+cascade stats                        What Auto-routing has learned
+cascade index [path]                 Build or refresh the code index
+cascade export                       Export a session (markdown or json)
+cascade identity list|create|set-default
+cascade mcp connect <url>|list|remove <name>
+cascade login | logout | whoami      Cascade Cloud account (shared with desktop and web)
+cascade sync push | pull             Encrypted settings sync, with a passphrase
+cascade sessions [show|branch|rm|rename|delete]   Manage cloud chats
+cascade relay pair|serve|devices|forget           Serve your browser to cloud runs
+cascade dashboard [-p <port>]        Local web dashboard
 cascade telemetry [on|off|status]    Anonymous usage telemetry (off by default)
 cascade update                       Update to the latest version
 ```
 
-**Cascade Cloud account** — the same account the desktop and web apps use:
+Options: `-p, --prompt`, `-t, --theme`, `-w, --workspace <path>`, `-i, --identity`, `--alt-screen` (vim-style, flicker-proof; PgUp/PgDn history), `--no-color`, `-v, --version`.
 
-```
-cascade login | logout | whoami      Sign in to Cascade Cloud on this machine
-cascade sync push | pull             Encrypt and upload / download your settings, with a passphrase
-cascade sessions                              List your cloud chats
-cascade sessions show <id>                    Print a chat transcript with branch markers
-cascade sessions branch <chat> <message>      Switch a chat to another branch
-cascade sessions rename <chat> <title>        Rename a chat
-cascade sessions rm <chat> <message>          Delete a message and its subtree
-cascade sessions delete <chat>                Delete a chat
-```
+### Slash commands (inside the REPL)
 
-**Options:**
-
-```
--p, --prompt <text>    Single prompt (non-interactive mode)
--t, --theme  <name>    Color theme (see Themes)
--w, --workspace <path> Workspace path (default: cwd)
--i, --identity <name>  Identity to run as
--v, --version          Show version
-    --alt-screen       Vim-style alternate screen (flicker-proof; PgUp/PgDn history)
-    --no-color         Disable colors
-```
-
----
-
-## Slash Commands
-
-Type any of these inside the REPL:
-
-| Command | Description |
-|---------|-------------|
+| Command | What it does |
+|---|---|
 | **Session** | |
 | `/help` · `/exit` · `/clear` | Commands, exit, clear the conversation |
 | `/sessions` · `/resume <id>` · `/search` | List, resume and search past sessions |
-| `/branch` | Fork the session into parallel branches |
-| `/compact` | Summarize and compress context now |
-| `/export [markdown\|json]` · `/copy [n]` | Export the session; copy the last (or nth-last) response |
-| `/retry` | Retry the last prompt |
-| `/undo [n] [--force]` · `/checkpoints` | Take back the last run (or the last n): files put back, files it made removed. Each run is checkpointed before and after |
-| `/rollback` | Undo every file the file tools changed in this session |
+| `/branch` · `/compact` · `/retry` | Fork the session; compress context now; retry the last prompt |
+| `/export [markdown\|json]` · `/copy [n]` | Export the session; copy a response |
+| `/undo [n] [--force]` · `/checkpoints` · `/rollback` | Take back runs; list checkpoints; undo this session's file changes |
 | **Running work** | |
-| `/plan <prompt>` | Preview the plan without running it |
-| `/replan [guidance]` | One corrective re-plan pass on the last task |
-| `/steer <correction>` | Steer the workers of a running task |
-| `/auto [on\|off\|status]` | Auto mode: Cascade works on its own and asks only before what `/undo` can't take back (deleting, pushing or publishing, rewriting git history, installs, writing outside the project, dropping data, stopping processes, permissions, unreadable commands) |
-| `/continue [tokens]` | Resume the last task that hit its token budget, with a raised one (a `/budget` session cap must be raised or cleared first) |
+| `/plan <prompt>` · `/replan [guidance]` | Preview a plan; one corrective re-plan |
+| `/steer <correction>` | Correct running workers |
+| `/auto [on\|off\|status]` | Auto mode |
+| `/continue [tokens]` | Resume the last task that hit its token budget |
 | `/budget [set <$> \| clear]` | Session budget cap |
 | **Seeing inside** | |
-| `/status` · `/tree` | Live agent tree; execution timeline panel |
-| `/comms` | Live agent-to-agent comms feed |
-| `/why` | How the last run was routed: complexity, models, failovers |
-| `/cost` | Session cost, tokens and delegation savings |
-| `/logs` · `/diagnose` | Recent runtime logs; a summary of configured providers, models and sessions (it does not test keys or connections) |
-| `/audit` | Check the audit log's hash chain |
-| **Models and setup** | |
-| `/settings [section \| name value]` | Every setting in one panel: models and keys, account and sync, autonomy, context, budget, tools, privacy, theme. `/settings mode auto` sets one directly |
-| `/login` · `/logout` · `/sync push\|pull` | Cascade Cloud account, and your keys synced between machines (encrypted with your passphrase) |
-| `/model` | Pick a provider and model for a tier (or Auto) |
-| `/model-info` · `/models` · `/providers` | Active models per tier; available models; configured providers |
-| `/rate good\|bad` | Rate the last task, to improve Auto-routing |
-| `/config` · `/mcp` · `/identity` · `/theme <name>` | Configuration summary, MCP servers, identity, theme |
+| `/status` · `/tree` · `/comms` | Live agent tree; timeline; agent-to-agent feed |
+| `/why` · `/cost` | How the last run was routed; cost, tokens and savings |
+| `/logs` · `/diagnose` · `/audit` | Runtime logs; setup summary; check the audit log's hash chain |
+| **Setup** | |
+| `/settings [section \| name value]` | Every setting in one panel (keys are typed masked) |
+| `/login` · `/logout` · `/sync push\|pull` | Cloud account and key sync |
+| `/model` · `/model-info` · `/models` · `/providers` | Pick models per tier; see what is active and available |
+| `/rate good\|bad` | Teach Auto-routing |
+| `/config` · `/mcp` · `/identity` · `/theme <name>` | Config summary, MCP servers, identity, theme |
 
-> **Selection & copy:** mouse capture stays off, so native drag-select and right-click copy work in your terminal. When idle, the screen never repaints under you; `/copy` covers the one case selection can't — grabbing text while output is still streaming (with an OSC 52 fallback that works over SSH).
+Mouse capture stays off so native select and copy work in your terminal; `/copy` covers grabbing text while output is streaming.
 
----
+**Themes:** `midnight` (default), `aurora`, `daybreak`, `bloom`, `tide`, `ember`.
 
-## Themes
-
-Switch with `/theme <name>` in the REPL or set `"theme"` in config.
-
-| Theme | Style | Former name |
-|-------|-------|-------------|
-| `midnight` | Default — azure → sky → teal, matching T1 → T2 → T3 | `cascade` |
-| `aurora` | Dark | `dark` |
-| `daybreak` | Light | `light` |
-| `bloom` | Dracula-like | `dracula` |
-| `tide` | Nord-like | `nord` |
-| `ember` | Solarized-like | `solarized` |
-
-The former names still work.
+**Shell completions** for bash, zsh and fish are in [`completions/`](completions). For example, bash: `source <path-to>/node_modules/cascade-ai/completions/cascade.bash`.
 
 ---
 
-## Web Dashboard
+## Configuration
 
-```bash
-cascade dashboard
-# → http://localhost:4891
+Cascade keeps what it knows about a project **outside** the project, in `~/.cascade-ai/projects/<folder name>-<hash>/`: `config.json`, sessions, audit trail, world state, code index and run checkpoints. Provider keys are kept once per machine in `~/.cascade-ai/credentials.json`. The project itself holds only `CASCADE.md` and `.cascadeignore`. `cascade doctor` prints where a project's config is. Prefer the picker over hand-editing: `/model` and `/settings` write the config and apply without a restart.
+
+```jsonc
+{
+  "providers": [
+    { "type": "anthropic" }, { "type": "openai" }, { "type": "gemini" }, { "type": "ollama" }
+  ],
+  "models": { "t3": "llama3.2:3b" },        // pin a tier; a tier left out stays on Auto
+  "autoBias": "balanced",                   // balanced | quality | cost
+  "thinking": "auto",                       // auto | off | low | medium | high
+  "planApproval": "never",                  // "always" turns on the boardroom
+  "budget": { "maxTokensPerRun": 200000, "sessionBudgetUsd": 5, "warnAtPct": 80 },
+  "tools": {
+    "shellBlocklist": ["sudo rm", "rm -rf", "mkfs"],
+    "requireApprovalFor": ["shell", "file_write", "file_delete"],
+    "browserVision": "list",
+    "mcpServers": [{ "name": "filesystem", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] }],
+    "mcpTrusted": ["filesystem"]
+  },
+  "privacy": { "paths": [{ "pattern": "secrets/**", "policy": "local-only" }] },
+  "codeIndex": { "enabled": false },
+  "dashboard": { "host": "127.0.0.1", "port": 4891, "auth": true },
+  "theme": "midnight",
+  "altScreen": false
+}
 ```
 
-Set `CASCADE_DASHBOARD_PASSWORD` (or `CASCADE_DASHBOARD_PASSWORD_HASH`) first: there is no default password, and with auth on and none set, sign-in is refused. The dashboard binds to `127.0.0.1` unless you change `dashboard.host`.
+The file is strict JSON (no comments in the real file). Full reference: [Docs: configuration](https://cascadeai.in/docs/configuration).
 
-**Features:**
-- Live agent execution graph powered by ReactFlow
-- Session browser (view, delete, inspect cost/tokens)
-- Real-time streaming log
-- Config inspector
-- JWT authentication
-- Team mode: `"single"` (shared workspace) or `"multi"` (per-user isolation)
+- **`CASCADE.md`** in the project root gives agents project-specific instructions (`cascade init` makes a template).
+- **`.cascadeignore`**: see [Privacy paths](#privacy-paths-and-the-process-jail).
+- **Reuse other CLIs' credentials:** `cascade link` lists what it found; `cascade link anthropic` adopts a key; `cascade link groq` adopts a compatible service with its endpoint. Claude subscription tokens (and other vendors' OAuth logins) are detected but **not usable**: Anthropic doesn't permit third-party use of them.
+- **Identities** are named personas with their own system prompts: `cascade identity create reviewer -s "Be strict."`, then `cascade -i reviewer`.
 
-**Custom port:**
-```bash
-cascade dashboard --port 8080
-```
+**Environment variables (CLI and SDK)**
+
+| Variable | Purpose |
+|---|---|
+| `ANTHROPIC_API_KEY` (or gateway `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL`) | Anthropic |
+| `OPENAI_API_KEY` | OpenAI |
+| `GOOGLE_API_KEY` / `GEMINI_API_KEY` | Gemini |
+| `AZURE_OPENAI_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT` | Azure OpenAI |
+| `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `MISTRAL_API_KEY`, `TOGETHER_API_KEY`, `FIREWORKS_API_KEY` | Adopted by `cascade link` with the service's endpoint |
+| `SEARXNG_URL`, `BRAVE_SEARCH_API_KEY`, `TAVILY_API_KEY` | Web search backends |
+| `CASCADE_DASHBOARD_PASSWORD` (or `_HASH`) | Local dashboard sign-in (no default; sign-in is refused without one) |
+| `CASCADE_NO_CLOUD_SYNC=1` | Don't mirror CLI turns into a cloud chat |
+| `CASCADE_RELAY_CHROMIUM` | Chromium for `cascade relay serve` |
+| `CASCADE_CLOUD_URL` | Cloud server for `cascade login` |
+
+### Local web dashboard
+
+`cascade dashboard` serves a local dashboard at `http://localhost:4891` (bound to `127.0.0.1`): a live ReactFlow agent graph with peer-message edges and a node inspector, a session browser with cost and token stats, a log stream and a config viewer, with JWT auth. Scheduled (cron) tasks run in the dashboard server.
+
+### Hooks
+
+The `hooks` config (`preToolUse`, `postToolUse`, `preTask`, `postTask`) is validated and `HooksRunner` is exported from the SDK, but as far as the code shows runs do **not** call it yet, so these scripts don't fire today. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ---
 
-## SDK / Programmatic Use
+## SDK
 
 ```typescript
 import { runCascade, createCascade, streamCascade } from 'cascade-ai';
 
-// Simple run
 const result = await runCascade('Write a Fibonacci function in TypeScript');
 console.log(result.output);
 
-// Streaming
 await streamCascade('Explain this codebase', (token) => process.stdout.write(token));
 
-// Full control
 const cascade = createCascade({
   providers: [{ type: 'anthropic', apiKey: process.env.ANTHROPIC_API_KEY }],
-  theme: 'dark',
 });
-
 await cascade.init();
 
-const result = await cascade.run({
+const controller = new AbortController();
+cascade.on('run:cancelled', ({ taskId, reason, partialOutput }) => console.log(taskId, reason, partialOutput));
+
+const out = await cascade.run({
   prompt: 'Refactor the auth module',
   workspacePath: '/my/project',
-  approvalCallback: async (req) => {
-    console.log(`Allow ${req.toolName}?`);
-    return true;
-  },
+  signal: controller.signal,                       // abort() stops all tiers at the next safe point
+  approvalCallback: async (req) => { console.log(`Allow ${req.toolName}?`); return true; },
   streamCallback: (chunk) => process.stdout.write(chunk.text),
 });
 ```
 
-### Cancellation
-
-Pass an `AbortSignal` to stop a run mid-execution. All active tiers (T1 → T2 → T3) halt at the next safe checkpoint, preventing further token spend. The `run()` call resolves with whatever partial output has been produced so far.
-
-```typescript
-import { createCascade, CascadeCancelledError } from 'cascade-ai';
-
-const cascade = createCascade({ /* config */ });
-await cascade.init();
-
-const controller = new AbortController();
-
-// Listen for the cancellation event
-cascade.on('run:cancelled', ({ taskId, reason, partialOutput }) => {
-  console.log(`Task ${taskId} cancelled: ${reason}`);
-  console.log('Partial output so far:', partialOutput);
-});
-
-// Start the run (non-blocking)
-const runPromise = cascade.run({
-  prompt: 'Perform a deep codebase audit',
-  signal: controller.signal,
-});
-
-// Cancel after 10 seconds (e.g. user pressed Ctrl-C)
-setTimeout(() => controller.abort('User requested stop'), 10_000);
-
-const result = await runPromise; // resolves gracefully, not rejected
-```
-
-**How it propagates:** The signal is threaded through `T1Administrator → T2Manager → T3Worker`. Each tier checks for cancellation before every LLM call so the run stops as soon as the current in-flight request completes — no mid-stream interruptions.
+An aborted run resolves (not rejects) with the partial output. Connect an MCP server programmatically with `McpClient`. Tools are added by extending `BaseTool` or bundling them as a `ToolPlugin` (see [Development](#development)).
 
 ---
 
-## MCP Support
+## Self-hosting
 
-Cascade supports the [Model Context Protocol](https://modelcontextprotocol.io). Connect any MCP server and its tools become available to T3 workers automatically.
+Run the web app (chat UI, API and socket) on one port with no Cascade account. The default Docker setup uses SQLite and keeps data in a named volume.
 
 ```bash
-cascade mcp connect https://mcp.example.com/sse   # remote server, OAuth login in your browser
-cascade mcp list
-cascade mcp remove <name>
+cp .env.example .env
+echo "SESSION_SECRET=$(openssl rand -base64 32)" >> .env
+echo "CLOUD_DEV_BYPASS=1" >> .env    # local-only sign-in; read the warning below
+docker compose up                    # → http://localhost:8787
 ```
 
-Local (stdio) servers go in config, under `tools.mcpServers` — see [Configuration](#configuration). List each one's name in `tools.mcpTrusted` too: a server that is not trusted is refused before it starts. `cascade mcp connect` trusts the servers it adds. Or connect one programmatically:
+`.env.example` documents every variable the server reads (straight from `cloud/server/src/env.ts`). Build files: [`Dockerfile`](Dockerfile) and [`docker-compose.yml`](docker-compose.yml) for the self-host quick start, [`Dockerfile.cloud`](Dockerfile.cloud) for the production image used on Railway. The full production walkthrough (volume, OAuth apps, domain, smoke test) is [cloud/DEPLOY.md](cloud/DEPLOY.md). Docs: [Self-hosting](https://cascadeai.in/docs/self-hosting).
 
-```typescript
-import { McpClient } from 'cascade-ai';
+> **`CLOUD_DEV_BYPASS` is an authentication bypass, not a convenience.** It adds a sign-in that accepts any name with no credential. It ships commented out and `docker-compose.yml` publishes to `127.0.0.1` only. Before exposing the server, set `GITHUB_CLIENT_ID`/`GOOGLE_CLIENT_ID` (and secrets) for real OAuth and remove the bypass.
 
-const mcp = new McpClient();
-await mcp.connect({
-  name:    'filesystem',
-  command: 'npx',
-  args:    ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'],
-});
-```
+**Key server settings**
+
+| Variable | What it does |
+|---|---|
+| `SESSION_SECRET` | Required, at least 16 characters |
+| `PORT` (8787), `DATA_DIR`, `WEB_ORIGIN` | Port, where the database and uploads live (mount a volume), and the public origin |
+| `GITHUB_CLIENT_ID/SECRET`, `GOOGLE_CLIENT_ID/SECRET` | Real sign-in |
+| `WORKSPACE_RELAY=true` | Lets runs work in a folder on a user's computer through the desktop app. Off by default; with it off the endpoints do not exist |
+| `BROWSER_RELAY=true` | Lets runs use a user's own browser through the extension, CLI or desktop. Off by default |
+| `BROWSER_ENDPOINTS=true` | Lets users give runs their own CDP endpoint (public addresses only unless `BROWSER_ENDPOINTS_PRIVATE`) |
+| `REMOTE_BROWSER_PROVIDER` (`cdp` or `steel`), `REMOTE_BROWSER_URL`, `REMOTE_BROWSER_API_KEY`, `REMOTE_BROWSER_VISION` | An operator-hosted browser. `HOSTED_BROWSER=off` retires it |
+| `MAX_COST_PER_RUN_USD` | Hard per-run cost ceiling (default 0.5) |
+| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `AZURE_OPENAI_*`, `OPENAI_COMPATIBLE_*`, `OLLAMA_BASE_URL` | Operator keys for the OpenAI-compatible API on a single-account instance |
+| `RAZORPAY_*` | Optional billing; disabled until set |
+| `CASCADE_DEPLOYMENT_MODE` | `self-hosted` (default) or `hosted` |
 
 ---
 
-## Hooks
+## Privacy and security
 
-> **Not active yet.** The `hooks` config below is validated, and the runner is exported from the SDK as `HooksRunner`, but runs do not call it yet — so these scripts do not fire today. Wiring it in is on the [Roadmap](#roadmap).
+- **Your keys are yours.** Bring-your-own-key only. Synced settings are end-to-end encrypted; the server holds ciphertext it cannot read. On the CLI and desktop, provider keys are written as **plain JSON** to `~/.cascade-ai/credentials.json` (mode `0600`). An encrypted keystore exists in the code but runs don't use it yet.
+- **Your files stay yours.** Cascade's own state lives outside your project. `.cascadeignore` protects files from every file and search tool, the code index and symlinked paths. `privacy.paths` keeps sensitive folders on private models.
+- **Workspaces and browser relay** work on your device, after you say yes there: nothing runs without it, the folder's path never leaves your computer, and Stop ends access immediately.
+- **Containment.** Process jail for `shell`, `run_code` and `git`; SSRF-guarded fetching (checked again at connect time); secret and PII redaction before a worker's output travels up the hierarchy; sandboxed agent-written tools; permission escalation T3 → T2 → T1 → you; a budget kill-switch.
+- **Audit log.** Every tool call, file change and agent decision, encrypted and SHA-256 hash-chained; `/audit` checks the chain. It catches an edited or removed entry in the middle, but not a removed tail or a chain recomputed by someone with write access.
+- **Telemetry is off by default** (`cascade telemetry`).
+- **Reporting a vulnerability:** see [SECURITY.md](SECURITY.md).
 
-Run shell scripts before or after tool use. Defined in the project's config:
-
-```jsonc
-"hooks": {
-  "preToolUse": [
-    {
-      "command": "echo 'Tool: $CASCADE_TOOL' >> tool-calls.log",
-      "tools":   ["shell", "file_write"]
-    }
-  ],
-  "postToolUse": [
-    {
-      "command": "npm run lint --silent || true",
-      "tools":   ["file_write", "file_edit"],
-      "timeout": 15000
-    }
-  ],
-  "postTask": [
-    { "command": "git add -A && git status" }
-  ]
-}
-```
-
-Once wired in, `preTask` will run before a task starts and `postTask` after it, and `HooksRunner` sets `CASCADE_TOOL`, `CASCADE_INPUT`, `CASCADE_OUTPUT` (and `CASCADE_PROMPT` for `preTask`) in the hook's environment.
+More: [Docs: privacy](https://cascadeai.in/docs/privacy) · [Docs: troubleshooting](https://cascadeai.in/docs/troubleshooting)
 
 ---
 
-## Memory & Identity
+## Development
 
-Cascade stores session history, identities, and audit logs in the project's `memory.db` (SQLite), in its folder under `~/.cascade-ai/projects/`.
-
-### Identities
-
-Create multiple named identities with different system prompts and default models:
-
-```bash
-cascade identity create reviewer -s "You are strict about best practices."
-cascade identity list
-cascade identity set-default reviewer
-cascade -i reviewer            # run as one identity for this session
-```
-
-### Memories in Cascade Cloud
-
-Cascade Cloud keeps memories about you and brings them into every chat. You can see them in the Memory panel, grouped as About you, Preferences, Projects & work, Goals, Instructions and Facts.
-
-- **Add one yourself** under a category. Mark it "True for now" if it will change, such as a current project.
-- **Build from my chats** reads chats you choose, with your own providers, after showing what it will cost. It suggests memories, each backed by a quote of your own words. Nothing is saved until you keep it. A suggestion that matches a memory you have adds to that memory instead of duplicating it, and earlier wordings are kept in its history.
-
-The builder lives in the SDK (`extractFromChat`, `reconcile` and `estimateBuild` in `core/knowledge/memory-builder.ts`), behind a small `MemoryBackend` interface, so another store can use it.
-
-### Session export
+### Repo layout
 
 ```
-/export markdown    → session-2026-04-02.md
-/export json        → session-2026-04-02.json
+src/                    The engine, published to npm as `cascade-ai`
+  core/                 Tiers (T1/T2/T3), orchestration, router, verification, knowledge, privacy, audit, permissions
+  providers/ tools/     Model providers; shell, files, git, web, browser, media, documents
+  workspace/            Workspace relay core: protocol, device and executor for cloud runs in your folder
+  browser/              Browser leases, remote sessions and the relay
+  cli/                  Ink REPL, slash commands, commands, themes
+  cloud/ config/ mcp/ memory/ retrieval/ sdk/ …
+app/                    Desktop app (Electron + React); app/electron has the workspace and relay code
+cloud/server/           Cascade Cloud API, auth, billing, /v1 API, relays, docs
+cloud/web/              Cascade Cloud chat UI (React + Vite)
+web/                    Local dashboard SPA (ReactFlow)
+extension/              Chrome extension for the browser relay
+docs/                   Design notes and technical docs
 ```
 
----
+### Build, test and lint
 
-## Security
-
-### Where your keys are stored
-
-Provider keys you add — through `cascade link`, the `/model` picker, desktop Settings or `cascade sync pull` — are written as **plain JSON** to one file, `~/.cascade-ai/credentials.json`, readable only by your user (mode `0600`), so a key entered once works in every project. A project's own config holds no key. A project that had its own key, different from the machine-wide one, when keys moved here keeps it — in the same file, under that project — and goes on using it.
-
-Keys in your environment (`ANTHROPIC_API_KEY`, …) are read at startup; `cascade link` is what copies one into these files. Settings you choose to sync through your Cascade account are end-to-end encrypted, so the server holds only ciphertext.
-
-Cascade also has an encrypted keystore — the OS keychain (macOS Keychain, Windows Credential Vault, libsecret), or `~/.cascade-ai/keystore.enc` under AES-256-GCM with a PBKDF2-derived key — but it is not wired in: runs neither write provider keys to it nor read them from it. Moving keys there is on the [Roadmap](#roadmap).
-
-### What else keeps a run contained
-
-- **Permission escalation** — a worker that needs more than it was given asks up the chain, T3 → T2 → T1 → you.
-- **SSRF-guarded fetching** — `web_fetch`, dynamic tools and hosted search backends cannot reach private or link-local addresses, checked again at connect time.
-- **Secret redaction** — secrets and PII are stripped from a worker's output before it travels up the hierarchy.
-- **Privacy paths** — `privacy.paths` keeps sensitive folders on private models: ones whose endpoint is on this machine or your private network, whatever their pricing says. That is read from the address — loopback, a private range, a `.local` name; a provider reached by a bare name like `http://ollama:11434` is declared with `"privateNetwork": true`. A worker whose assignment names a matching path — in its files, its description or the acceptance criteria it is graded against — runs on one from the start. One that reads a matching file on the way — with `file_read`, `file_edit`, `image_analyze`, or a `grep` of that file — moves to one at that moment, before what it read reaches any model, or is refused the read when no private model is configured; one that changes or deletes a matching file — `file_write`, `file_delete`, `pdf_create`, `generate_document` — does the same first. A `grep` across folders leaves local-only files out for a worker that is not local-only already, rather than let whether they matched say anything, and `file_list` and `glob` leave out their names — a name can carry what a local-only worker read. A file the assignment names is judged by what it is, so an artifact that links to a local-only file counts, and one that is protected is not read to check it. Either way its output is withheld from the tiers above, its approval requests go to you rather than to the T2 and T1 models — an "always" one of them gave earlier does not answer them — and nothing it knows leaves the machine through Cascade's tools: it cannot message its peers or ask for more workers, the tools that send their arguments elsewhere are refused to it — web and browser, GitHub, media generation and transcription, `code_search`, MCP, plugins, and any tool an embedder registers that does not declare `localOnlySafe` — and a tool the agent wrote cannot `fetch` once it has read such a file. Its output, tool results and streamed text stay out of the status and tool events the dashboard and audit log receive, and a tool name its model made up shows there as a placeholder. Local-only files are never put in the code index or shown to its reranker, nor copied into a document that is not itself local-only. What a local-only worker makes goes to its **private folder**, outside the project (`@private/…` to the file tools, `$CASCADE_PRIVATE_DIR` to its commands), where a name it chose — which could carry what it read — shows to no one else; only a local-only worker reaches that folder. A new file in a folder a local-only pattern covers whole stays there, since that folder's names are hidden with it. A file it changes stays where it is and becomes local-only, for later runs too, even if the pattern it fell under is removed (recorded in the project's folder, shared by every run in it; a write that fails leaves no record); siblings waiting on it are told it finished, not what it said, and nothing it said goes into the knowledge graph. `shell`, `run_code` and `git` run in the process jail below, which hides local-only paths from a worker that is not local-only, and cuts the network for one that is.
-- **Process jail** — `shell`, `run_code` and `git` run in bubblewrap on Linux wherever it works. macOS `sandbox-exec` is not accepted as a containment boundary. Cascade's own folder, the built-in secrets, `~/.cascade-ai`, the usual credential locations in your home folder (`~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.kube`, `~/.docker/config.json`, `~/.netrc`, `~/.npmrc` and the like — the `git` tool keeps what it pushes and pulls with) and — for a worker that is not local-only — local-only paths are hidden from them, and so is the repository's git store while its history holds any of those files, or while git keeps anything no branch reaches — a deleted branch, an amended commit, a file staged and then unstaged — until it prunes it (the `git` tool keeps working, leaves them out of its diffs and of what it stages or stashes, refuses a push that would send one — asking the destination through its own jailed git, since reaching a remote can run a program — and there runs none of your global git or ssh configuration, which a command could rewrite); a repository nested in the workspace, or a submodule, is checked and hidden the same way, and read-only to a local-only worker's commands; the `git` tool never runs hooks, and git's configuration files — a nested repository's, and every file one includes — are read-only to commands, so none can name a program for it to run with your credentials; tool calls wait while a command runs, and check their path again once their turn comes, so none can swap a checked path for a symlink before a tool opens it; a hard link to a hidden file is hidden too; each command gets its own process namespace, so Cascade's environment is not there to read; a symlink whose name is hidden hides what it leads to; and a local-only worker's commands have no network, cannot reach host services through Unix sockets, and write only into the workspace and its private folder — with a private `/tmp`, the git store and hard-linked files read-only, and every other tool call in the workspace, from any run or process, waiting until they end, when what they made is moved to the private folder, what they changed or deleted is marked local-only, and the folders they did not make get their mode and times back (they cannot set extended attributes at all) (a deletion by `file_delete` too, so the rest sees the path as local-only rather than missing). If that mark cannot be saved, what they changed or made is moved to the private folder rather than left where another process could read it. On macOS shell and code commands are refused: `sandbox-exec` cannot contain surviving children or isolate the parent process environment. Every command's environment has provider keys and credential-file hints taken out. Files named by standard credential variables, including `GOOGLE_APPLICATION_CREDENTIALS`, `AWS_SHARED_CREDENTIALS_FILE` and each `KUBECONFIG` entry, are hidden too, including hard-link aliases; Git retains its credential access. Without a supported jailer — Windows, macOS, or a Linux where bubblewrap is missing or cannot create user namespaces — `shell` and `run_code` are refused, since nothing would keep them from reading a protected file and handing it to a cloud model; the `git` tool, which checks its own operations, runs with the keys taken out and no configuration that can start a program: no global or system git configuration (the plain settings in it, such as line endings and your name, are passed on, and a filter it defines is marked required, so a file that needs one is not added unfiltered); a repository whose own configuration names a program — a diff or merge driver, a filter, a credential helper, an ssh command — is refused, with the setting named; and a commit your configuration would sign is not made. Pushing over HTTPS then has no credential helper, and ssh reads no `~/.ssh/config`. Agents' file tools cannot change anything in a `.git` folder, under any name. Set `tools.processJail` to `bwrap` to require bubblewrap; the retained `sandbox-exec` setting refuses commands. Set it to `off` to explicitly run commands with neither jail nor scrubbing.
-- **Hash-chained audit log** — entries are encrypted and chained with SHA-256; `/audit` checks the chain. That catches an edited or removed entry in the middle, but not a removed tail, a chain recomputed by someone with write access, or a deleted database: the chain has no key and no anchor outside the log.
-- **Budget kill-switch** — a run stops at its token budget, and `/continue` resumes it with a raised one. A session spending cap set with `/budget set` stops runs too; `/continue` does not lift it, so raise it or `/budget clear` first.
-
-> Agent-written tools always run confined — in the `isolated-vm` isolate where the addon is installed, and otherwise in a WebAssembly sandbox (QuickJS) that every install has, the desktop app included. On Windows the default (`auto`) uses the WebAssembly sandbox: `isolated-vm` is a native addon, and a crash in it closes Cascade with no chance to save. Set the sandbox to `isolate` to use it there anyway. It runs on a thread of its own, capped in memory and terminated at its deadline, and its code reaches the machine only through `callTool` and `fetch`. There is no unconfined fallback: if the sandbox cannot start, the tool does not run.
-
-### .cascadeignore
-
-Always protected, whatever `.cascadeignore` says — a `!` line cannot undo these:
-- `.env`, `.env.*`
-- `*.pem`, `*.key`, `id_rsa`, `id_ed25519`
-- the code index's database where `codeIndex.dbPath` puts it in the project
-- Cascade's own files under `.cascade/`, where an earlier version kept them
-
-Cascade's own files — settings, sessions, the audit trail, world state, the code index, run checkpoints — are outside the project, where no file tool reaches and no command sees them.
-
-The file and the built-ins apply to every file, search and listing tool (`file_*`, `grep`, `glob`, `image_analyze`, …), to the code index and `code_search`, and to paths reached through a symlink or a hard link. The [process jail](#what-else-keeps-a-run-contained) hides the built-ins from `shell`, `run_code` and `git` too, but not `.cascadeignore`'s own entries: that list commonly names `node_modules/` and `dist/`, which builds and tests have to read.
-
-Agents may read `.cascadeignore` but not change or remove it: the file tools refuse, and commands see it read-only — the file it links to, or another name for it, too — and it is put back as it was if one changes it anyway. Cascade reads it when a run starts, so a line taken out would unprotect a path from the next run on. Edit it yourself.
-
-### Approval prompts
-
-Any tool marked as dangerous requires explicit `y` / `n` before execution. Configure which tools require approval in the project's config, `tools.requireApprovalFor`.
-
-### Command allowlist/blocklist
-
-```jsonc
-"tools": {
-  "shellAllowlist": ["npm", "git", "python3"],
-  "shellBlocklist": ["sudo", "curl", "wget", "nc"]
-}
-```
-
----
-
-## Shell Completions
-
-**Bash** — add to `~/.bashrc`:
-```bash
-source /usr/local/lib/node_modules/cascade-ai/completions/cascade.bash
-```
-
-**Zsh** — add to `~/.zshrc`:
-```zsh
-fpath=(/usr/local/lib/node_modules/cascade-ai/completions $fpath)
-autoload -Uz compinit && compinit
-```
-
-**Fish**:
-```fish
-cp /usr/local/lib/node_modules/cascade-ai/completions/cascade.fish \
-   ~/.config/fish/completions/
-```
-
----
-
-## Architecture
-
-```
-src/                    The engine — published to npm as `cascade-ai`
-├── core/
-│   ├── tiers/          T1Administrator, T2Manager, T3Worker
-│   ├── orchestration/  Typed task graph, dependency scheduler, durable resume
-│   ├── router/         Auto-routing: benchmarks, pricing, learned outcomes, failover
-│   ├── verification/   Acceptance checks — mechanical first, a model only when needed
-│   ├── knowledge/      Project knowledge graph (world state) and session memory
-│   ├── privacy/        Per-path privacy tiers
-│   ├── audit/          Secret redaction and the hash-chained audit log
-│   ├── permissions/    Escalation T3 → T2 → T1 → you
-│   ├── steering/ peer/ Live steering; worker-to-worker messages
-│   ├── documents/      Shared Office/PDF renderers (also used by the web app)
-│   ├── markdown/       Shared chat Markdown steps (maths, streaming pace)
-│   └── cascade.ts      Main Cascade class (EventEmitter facade)
-├── providers/          Anthropic, OpenAI, Gemini, Azure, Ollama, OpenAI-compatible
-├── tools/              Shell, code, files, search, git, web, browser, media, documents
-├── browser/            Browser leases and remote (CDP / Steel) sessions
-├── retrieval/          Code index and retrieval behind code_search
-├── cli/                Ink REPL, slash commands, themes, commands
-├── cloud/              Cloud client and end-to-end-encrypted key sync
-├── config/             Config schema, keystore, credential discovery and linking
-├── memory/             SQLite store (sessions, identities, audit, scheduler)
-├── dashboard/          Local dashboard server (Express, JWT, Socket.io)
-├── audit/ hooks/ mcp/ scheduler/ notifications/ telemetry/
-├── sdk/                runCascade(), createCascade(), streamCascade()
-└── index.ts            Package exports
-
-app/                    Desktop app (Electron + React): chat, Cockpit, code editor, browser
-cloud/
-├── server/             Cascade Cloud API, auth, billing, OpenAI-compatible /v1, docs
-└── web/                Cascade Cloud chat UI (React + Vite)
-web/                    Local dashboard SPA (ReactFlow agent graph)
-```
-
----
-
-## Roadmap
-
-**Shipped**
-
-| Status | Feature |
-|--------|---------|
-| ✓ | T1/T2/T3 hierarchical orchestration, sized to the task |
-| ✓ | 6 AI providers + Ollama |
-| ✓ | Provider failover with automatic recovery |
-| ✓ | Streaming REPL (ink) |
-| ✓ | Live agent tree visualization |
-| ✓ | Web dashboard + WebSocket |
-| ✓ | MCP client, with OAuth for remote servers (`cascade mcp connect`) |
-| ✓ | Scheduled tasks (run by the dashboard server) |
-| ✓ | SDK |
-| ✓ | Plugin loading from config |
-| ✓ | Auto model specialization discovery |
-| ✓ | T3 text-tool fallback (Ollama support) |
-| ✓ | Peer communication visualization in dashboard |
-| ✓ | Conversational fast-path (bypass T1 for simple prompts) |
-| ✓ | Redaction layer — secrets/PII stripped from T3 output before it travels upstream |
-| ✓ | Per-path privacy tiers (`privacy.paths` — local models only, output withheld upstream — for work whose assignment names a sensitive path, and from the moment a worker reads one) |
-| ✓ | Hash-chained audit log (encrypted entries; `/audit`, `GET /api/audit/verify` check the chain) |
-| ✓ | Independent T2-critic reflection loop (`reflection.enabled`) |
-| ✓ | Live steering — `/steer` / desktop Steer bar injects corrections into running workers |
-| ✓ | Session rollback button (desktop) + `/rollback` (CLI) |
-| ✓ | Cost-per-feature attribution (`costByFeature` in results, CLI cost panel, desktop chat) |
-| ✓ | Project world state (encrypted local log feeding T1 planning) |
-| ✓ | Project knowledge graph (world-state v2) — queryable facts T1 plans from; `knowledge_graph_search` (v0.14) |
-| ✓ | Hard sandbox for agent-written tools — a V8 isolate via the optional `isolated-vm` addon (v0.14), and a WebAssembly sandbox on every install, so they never run unconfined |
-| ✓ | `.cascadeignore` enforced for every file and search tool and the code index; Cascade's own files and your keys kept outside the project |
-| ✓ | Process jail for `shell`, `run_code` and `git` — bubblewrap on Linux; arbitrary commands fail closed on macOS and Windows — on top of approvals |
-| ✓ | Cascade Cloud (hosted chat — GitHub/Google login, bring-your-own-key, [cascadeai.in](https://cascadeai.in)) |
-| ✓ | Cascade Cloud billing — Razorpay subscriptions, Free and Pro plans |
-| ✓ | Desktop app — chat, Cockpit, code editor + terminal, browser; downloads from the site |
-| ✓ | End-to-end-encrypted settings sync across CLI, desktop and web — manual push and pull, with a passphrase |
-| ✓ | Typed task graph with durable resume after a crash, cancel or budget cap (v0.68) |
-| ✓ | Self-host with `docker compose up` (v0.69) |
-| ✓ | OpenAI-compatible API — `/v1/chat/completions`, `/v1/models` (v0.70) |
-| ✓ | Browser control in the desktop app and on the web — live view, take over and hand back (v0.78 – v0.81) |
-| ✓ | Ask-before-guessing on Cascade Cloud — one structured question instead of an invented answer (v0.81) |
-| ✓ | Code index and `code_search` — opt-in: `codeIndex.enabled`, then `cascade index` |
-| ✓ | Media generation (image, speech, video) and audio transcription |
-
-**Next**
-
-| Status | Feature |
-|--------|---------|
-| 🔜 | Hooks — the config and `HooksRunner` exist; runs do not call them yet |
-| 🔜 | Provider keys in the encrypted keystore — it exists but runs do not use it; keys are written as plain JSON |
-| 🔜 | A tamper-evident audit log — a keyed or externally anchored chain head, so a truncated or rewritten log fails verification |
-| 🔜 | Task-completion notifications and webhooks (Slack / Discord / custom URL) — a `NotificationManager` exists but nothing sends through it |
-| 🔜 | The process jail on Windows, and a Docker fallback where no jailer works — see [docs/ROADMAP.md](docs/ROADMAP.md) |
-| 🔜 | Cross-session history research — a prior-work brief before T1 plans — see [docs/ROADMAP.md](docs/ROADMAP.md) |
-| 🔜 | VSCode extension (`cascade-vscode`) — see [docs/ROADMAP.md](docs/ROADMAP.md) |
-| 🔜 | JetBrains extension (`cascade-jetbrains`) — see [docs/ROADMAP.md](docs/ROADMAP.md) |
-| 🔜 | Multi-plan branching (T1 proposes N plans) — see [docs/ROADMAP.md](docs/ROADMAP.md) |
-| 🔜 | Plugin marketplace (plugins load from a config list today) |
-| 🔜 | Voice input in chat (audio files can already be transcribed with `transcribe_audio`) |
-| 🔜 | Multi-workspace support (the desktop switches its one workspace live today) |
-| 🔜 | Smaller follow-ups: steering history in the transcript, custom redaction patterns, a per-run privacy report — see [docs/ROADMAP.md](docs/ROADMAP.md) |
-
----
-
-## Contributing
-
-### Prerequisites
-
-| Tool | Required Version |
-|------|-----------------|
-| Node.js | ≥ 22.x |
-| npm | ≥ 10.x |
-
-### Setup
+Requires Node.js ≥ 22.22.2 and npm.
 
 ```bash
 git clone https://github.com/Varun-SV/Cascade-AI.git
 cd Cascade-AI
-npm install               # CLI dependencies (uses the committed package-lock.json)
-npm --prefix web install  # web dashboard dependencies (needed by `npm run build`)
-npm run build
+npm install              # installs the workspaces too (web, app, cloud/server, cloud/web)
+npm run build            # dashboard web + CLI/SDK
+npm test                 # vitest
+npm run lint             # tsc --noEmit, including the desktop app
 ```
 
-### Upgrading an existing checkout (v0.5.7+: Ink 6 / React 19)
+| Command | What it does |
+|---|---|
+| `npm run dev` | Watch mode for the CLI |
+| `npm run dev:web` · `dev:app` · `dev:cloud` · `dev:cloud-web` | Dashboard, desktop app, Cloud server, Cloud web UI |
+| `npm run build:app` | Build the desktop app (after the CLI build) |
+| `npm test -w cascade-cloud-server` · `npm test -w cascade-cloud-web` | Cloud server and web tests |
 
-v0.5.7 moved from Ink 5 / React 18 to **Ink 6.8 / React 19** and raised the
-Node.js floor to **20**. The repo now commits `package-lock.json`, so after a
-pull a plain `npm install` upgrades even a stale `node_modules` in place —
-then rebuild with `npm run build` so `dist/` matches the source (the CLI warns
-on startup when it detects a stale build).
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs lint, tests, the web and CLI build and the desktop build, then the Cloud server typecheck and the server and web tests. Co-locate `*.test.ts` next to the code, and mock external I/O.
 
-If `git pull` refuses because your old untracked `package-lock.json` would be
-overwritten, or `npm install` still reports `ERESOLVE` (this happens on
-checkouts that predate the committed lockfile — npm keeps the installed
-`react@18` in place while `ink@6` needs `react>=19`), do a clean install:
+To add a tool, extend `BaseTool` in `src/tools/`, register it in `src/tools/registry.ts`, and add it to `DEFAULT_APPROVAL_REQUIRED` in `src/constants.ts` if it needs approval. To bundle tools, use `ToolPlugin`.
 
-```bash
-rm -rf node_modules web/node_modules package-lock.json web/package-lock.json
-git pull
-npm install
-npm --prefix web install
-npm run build
-```
+### Contributing
 
-### Development commands
-
-```bash
-npm run dev            # watch mode for the CLI
-npm run build          # build CLI + web dashboard
-npm run dev:web        # hot-reload dashboard at web/
-npm run dev:app        # desktop app (Electron) in dev mode
-npm run build:app      # build the desktop app
-npm run dev:cloud      # Cascade Cloud server
-npm run dev:cloud-web  # Cascade Cloud web UI
-npm test               # vitest (engine, desktop logic)
-npm test -w cascade-cloud-web   # Cloud web UI tests
-npm run lint           # tsc --noEmit, including the desktop app
-```
-
-### Architecture notes
-
-**Permission escalation.** When a T3 Worker needs to execute a dangerous tool the
-request travels `T3 → PermissionEscalator → T2 → T1 → User`. Read-only tools are
-auto-approved by rule; dangerous ones use a max-10-token LLM inference at each
-tier. Session-wide approvals are cached by `${t2Id}:${toolName}`.
-
-**Adding a tool.** Create `src/tools/my-tool.ts` extending `BaseTool`; implement
-`getDefinition()`, `execute()`, and optionally `isDangerous()`; register in
-`src/tools/registry.ts` → `registerDefaults()`; if approval is required, add the
-tool name to `DEFAULT_APPROVAL_REQUIRED` in `src/constants.ts`.
-
-**Adding a plugin.** Use the `ToolPlugin` interface from
-`src/tools/registry.ts` to bundle one or more tools.
-
-### Testing
-
-- Coverage target: 80% lines, 75% functions, 70% branches.
-- Co-locate `*.test.ts` alongside the source file they test.
-- Mock external I/O (`fs`, network) with `vi.mock()`; don't mock internal logic.
-
-### Code style
-
-- TypeScript strict mode is enforced.
-- Use `async/await`, not `.then()` chains.
-- Wrap external calls (shell, git, GitHub API) with `withRetry()` from
-  `src/utils/retry.ts`.
-- Raise tool failures as `CascadeToolError` so they carry a `.userMessage`.
-
-### Pull request checklist
-
-- [ ] Tests added / updated for changed code
-- [ ] `npm test` passes
-- [ ] `npm run build` succeeds
-- [ ] New public APIs have JSDoc
-- [ ] No hardcoded API keys or secrets
-- [ ] `.cascadeignore` patterns respected for file tools
+Bug reports, docs fixes and features are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first (and open an issue before anything big). For security problems, use [SECURITY.md](SECURITY.md), not a public issue. Planned work is in [docs/ROADMAP.md](docs/ROADMAP.md). To cite Cascade, see [CITATION.cff](CITATION.cff).
 
 ---
 

@@ -219,6 +219,18 @@ describe('cloud/server app', () => {
     expect(await spaRoute.text()).toContain('fixture');
   });
 
+  // /docs moved into the SPA (cloud/web/src/docs). The server registers nothing
+  // for it, so the page, every topic and the old #hash links reach index.html.
+  it('serves /docs and /docs/<topic> through the SPA catch-all, with no server-rendered page', async () => {
+    for (const route of ['/docs', '/docs/', '/docs/workspaces', '/docs/privacy', '/docs/not-a-topic']) {
+      const res = await fetch(`${baseUrl}${route}`, { redirect: 'manual' });
+      expect(res.status, route).toBe(200);
+      expect(res.headers.get('cache-control'), route).toBe('no-cache');
+      expect(res.headers.get('content-type'), route).toContain('text/html');
+      expect(await res.text(), route).toContain('fixture');
+    }
+  });
+
   it('renames a conversation (owner-scoped) via PATCH /api/conversations/:id/title', async () => {
     const alice = await login('Alice');
     const bob = await login('Bob');

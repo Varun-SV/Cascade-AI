@@ -44,10 +44,13 @@ the hosted cloud service (`cascadeai.in`).
 
 Especially interesting to us:
 
-- **Credential exposure.** Provider API keys are meant to stay on your machine
-  (encrypted at rest; account sync relays only ciphertext the server can't
-  read). Any path that leaks a key to a log, to disk in plaintext, or to our
-  server is a valid report.
+- **Credential exposure.** Provider API keys are meant to stay on your machine.
+  The CLI and desktop app keep them in `~/.cascade-ai/credentials.json`
+  (plain JSON, readable only by your user: mode `0600`); the web app keeps them
+  in your browser's local storage. Account sync encrypts them on your device
+  first and relays only ciphertext the server can't read. Any path that leaks a
+  key to a log, to our server, to another site, or to another user is a valid
+  report.
 - **Sandbox / permission escapes.** Tool execution is gated by an approval
   chain (T3→T2→T1→you) with dangerous tools always escalating to a human. A way
   to run a dangerous tool without that approval is a valid report.
