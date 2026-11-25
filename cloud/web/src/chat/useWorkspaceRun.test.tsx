@@ -146,6 +146,19 @@ describe('useWorkspaceRun', () => {
     expect(result.current.view?.label).toBe('proj');
   });
 
+  it("keeps a reload's replay that arrives before the config says workspaces are on", async () => {
+    const fake = fakeSocket();
+    const { result, rerender } = renderHook(({ on }) => useWorkspaceRun(fake.socket, on, 'c1', true), { initialProps: { on: false } });
+    act(() => {
+      fake.fire('workspace:attached', { conversationId: 'c1', runId: 'r1', label: 'proj', device: { id: 'd1', name: 'Work PC' }, tools: ['file_write'] });
+      fake.fire('workspace:waiting', { conversationId: 'c1', runId: 'r1', tool: 'shell', worker: 'T3-1' });
+    });
+    expect(result.current.view).toBeUndefined();
+    rerender({ on: true });
+    expect(result.current.view?.label).toBe('proj');
+    expect(result.current.view?.waitingTool).toBe('shell');
+  });
+
   it('stops listening when unmounted', async () => {
     const fake = fakeSocket();
     const { result, unmount } = renderHook(() => useWorkspaceRun(fake.socket, true, 'c1', true));

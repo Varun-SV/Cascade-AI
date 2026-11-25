@@ -87,7 +87,10 @@ export function useWorkspaceRun(socket: Socket | null, enabled: boolean, convers
   }, [busy]);
 
   useEffect(() => {
-    if (!socket || !enabled) return;
+    // Listened for whether or not /api/config has answered yet: a reload's replay (the
+    // run's attachment first) can arrive before it, and is sent once. The server sends
+    // these only when it has workspaces on, and what is shown still waits for `enabled`.
+    if (!socket) return;
     const on = (type: WorkspaceEvent['type']) => (raw: unknown) => {
       const parsed = parseWorkspaceEvent(type, raw);
       if (!parsed) return;
@@ -104,7 +107,7 @@ export function useWorkspaceRun(socket: Socket | null, enabled: boolean, convers
     const handlers = (['attached', 'waiting', 'detached', 'call', 'result'] as const).map((t) => [`workspace:${t}`, on(t)] as const);
     for (const [name, fn] of handlers) socket.on(name, fn);
     return () => { for (const [name, fn] of handlers) socket.off(name, fn); };
-  }, [socket, enabled]);
+  }, [socket]);
 
   const selected = enabled ? choices[key] : undefined;
   const select = useCallback((deviceId: string | undefined) => {
