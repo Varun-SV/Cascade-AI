@@ -168,8 +168,13 @@ export class ChatGptAuth {
 
   async signIn(opts: SignInOptions): Promise<SignInResult> {
     const hostId = this.hostId();
-    const saved = opts.accountId ? findAccount(readStore(this.dir), opts.accountId) : undefined;
-    if (opts.accountId && !saved) throw new ChatGptAuthError('No such ChatGPT account.', 'no_account');
+    const selected = opts.accountId ? findAccount(readStore(this.dir), opts.accountId) : undefined;
+    if (opts.accountId && !selected) throw new ChatGptAuthError('No such ChatGPT account.', 'no_account');
+    // A registration OpenAI no longer recognises cannot be re-authorized: sign in
+    // with a NEW dynamic registration (same host ID, same display name), and
+    // retire the dead one when it turns out to be the same person.
+    const retiring = selected?.registration_invalid ? selected : undefined;
+    const saved = retiring ? undefined : selected;
 
     // Fresh state, nonce and PKCE for every attempt; the listener starts
     // before the browser opens, and the redirect URI is fixed from here on.
@@ -276,6 +281,10 @@ export class ChatGptAuth {
         };
         const i = s.accounts.findIndex((a) => a.client_id === clientId);
         if (i >= 0) s.accounts[i] = record; else s.accounts.push(record);
+        // The new registration replaces the dead one only for the same verified person.
+        if (retiring && retiring.subject === verified.subject && retiring.client_id !== clientId) {
+          s.accounts = s.accounts.filter((a) => a.client_id !== retiring.client_id);
+        }
         // Only a validated sign-in becomes active.
         s.active = clientId;
         const showWelcome = planUsageEnabled && s.welcome_shown !== true;
@@ -360,6 +369,15 @@ export class ChatGptAuth {
         throw new ChatGptAuthError('Your ChatGPT sign-in has expired or was disconnected. Sign in again: cascade chatgpt signin', 'sign_in_required', r.failure.status);
       }
       if (code === 'invalid_client') {
+        // The registration is dead, not the network: persist that, so the next
+        // sign-in (CLI or desktop button) registers afresh instead of trying to
+        // re-authorize a client OpenAI has forgotten. Skipped if another process
+        // already replaced the token we used.
+        updateStore(this.dir, (s) => {
+          const i = s.accounts.findIndex((a) => a.client_id === clientId);
+          const a = s.accounts[i];
+          if (a && a.refresh_token === used) s.accounts[i] = withoutTokens(a, 'registration_invalid');
+        });
         throw new ChatGptAuthError('OpenAI no longer recognises this Cascade registration (invalid_client). Sign in again to register it afresh: cascade chatgpt signin', 'invalid_client', r.failure.status);
       }
       // Anything else is unexplained: report it and keep the credentials.

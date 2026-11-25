@@ -215,6 +215,7 @@ export class ChatGptProvider extends OpenAIProvider {
       const it = item as unknown as Record<string, unknown>;
       if (it['role'] === 'system') return { ...it, role: 'developer' } as unknown as OpenAI.Responses.ResponseInputItem;
       if (it['type'] === 'function_call') {
+        // Same shape wire-profile.ts sizes (toResponsesFunctionCalls), plus the namespace.
         const ns = this.namespaceByCallId.get(String(it['call_id'])) ?? TOOL_NAMESPACE;
         return { ...it, namespace: ns } as unknown as OpenAI.Responses.ResponseInputItem;
       }

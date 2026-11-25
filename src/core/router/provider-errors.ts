@@ -32,6 +32,7 @@ export type ProviderErrorKind =
   | 'context_length'     // prompt too big — per-task (a smaller subtask may fit)
   | 'content_filter'     // safety refusal — per-task
   | 'network'            // transport blip — transient, per-task
+  | 'plan_blocked'       // ChatGPT plan limit/eligibility — systemic, and NEVER failed over: another provider would bill the user
   | 'unknown';
 
 /** Kinds that will hit every worker on this model, not just the one that failed. */
@@ -40,6 +41,7 @@ const SYSTEMIC: ReadonlySet<ProviderErrorKind> = new Set<ProviderErrorKind>([
   'quota_exhausted',
   'auth',
   'model_unavailable',
+  'plan_blocked',
 ]);
 
 export function isSystemicKind(kind: ProviderErrorKind): boolean {
@@ -205,12 +207,12 @@ export function classifyProviderError(err: unknown): ClassifiedError {
   const status = statusOf(err);
   const planCode = planCodeOf(err);
   if (planCode) {
-    // A spent plan limit does not ease within a run (it is a five-hour or app
-    // limit), so it is not retried on the backoff ladder; a plan that is not
-    // eligible or a rejected sign-in fails every worker the same way.
+    // A spent plan limit or an ineligible plan stops the request: the router
+    // must not carry the call to another provider, which would bill the user
+    // there instead (see CascadeRouter.generateCall).
     const kind: ProviderErrorKind =
-      planCode === 'subscription_sharing_usage_limit_exceeded' ? 'quota_exhausted'
-      : planCode === 'subscription_sharing_user_not_eligible' || planCode === 'subscription_sharing_invalid_user' ? 'auth'
+      planCode === 'subscription_sharing_usage_limit_exceeded' || planCode === 'subscription_sharing_user_not_eligible' ? 'plan_blocked'
+      : planCode === 'subscription_sharing_invalid_user' ? 'auth'
       : 'unknown';
     return { kind, systemic: isSystemicKind(kind), status, code: planCode, raw };
   }

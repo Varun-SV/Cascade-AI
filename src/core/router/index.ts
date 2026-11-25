@@ -46,7 +46,7 @@ import { MIN_FINAL_OUTPUT_TOKENS, T2_CALLS_PER_SECTION, T3_CALLS_PER_SUBTASK, wo
 import { hasProviderCredential } from '../../config/index.js';
 import { estimateTokens, contentToText, CHARS_PER_TOKEN } from '../context/compaction.js';
 import { withTimeout, withTimeoutAbort, anySignal, CascadeCancelledError } from '../../utils/retry.js';
-import { wireProfile, geminiImageCopies } from './wire-profile.js';
+import { wireProfileFor, geminiImageCopies } from './wire-profile.js';
 import { ModelProfiler } from './model-profiler.js';
 import type { MemoryStore } from '../../memory/store.js';
 import { computeDelegationSavings, type DelegationSavings } from './savings.js';
@@ -1657,6 +1657,12 @@ export class CascadeRouter extends EventEmitter {
       // bare "429" with no status field and no other keyword classifies as
       // 'unknown', and would otherwise stop failing over at all.
       const classified = classifyProviderError(err);
+      // The ChatGPT plan's limit (or an account that may not use it) STOPS the
+      // request with its own typed error. Failing over would move the user's
+      // spend to a paid API provider without their say, which the plan's
+      // terms and our own rule forbid, even for a pinned plan model. Nothing is
+      // recorded either: a verdict would pull the plan from Auto for the run.
+      if (classified.kind === 'plan_blocked') throw err;
       // A dead key rides along with the spent wallet: same systemic class, same
       // "another provider can serve this" remedy, and the old code failed over
       // on neither — an auth failure fell straight through to `throw`.
@@ -2940,7 +2946,7 @@ export class CascadeRouter extends EventEmitter {
     // content that is discarded refuses runs that would have completed, and
     // skipping content that is sent leaves the cap unenforced. The rules live
     // in wire-profile.ts, derived by reading each serializer end to end.
-    const wire = wireProfile(model.provider);
+    const wire = wireProfileFor(model, (options.tools?.length ?? 0) > 0);
     const countsImage = (img: { type?: string } | undefined): boolean =>
       wire.sendsUrlImages || img?.type === 'base64';
 

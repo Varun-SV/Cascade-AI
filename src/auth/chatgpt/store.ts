@@ -92,7 +92,13 @@ export interface ChatGptAccount {
   /** Tokens were cleared (signed out, or the refresh token is no longer usable): sign in again. */
   needs_sign_in?: boolean;
   /** Why `needs_sign_in` is set, for the status line. */
-  signed_out_reason?: 'signed_out' | 'refresh_failed';
+  signed_out_reason?: 'signed_out' | 'refresh_failed' | 'registration_invalid';
+  /**
+   * OpenAI no longer recognises this issued client (`invalid_client` on refresh).
+   * The next sign-in registers afresh with `dynamic_agent_client`, under this
+   * host's same host ID, instead of re-authorizing the dead client.
+   */
+  registration_invalid?: boolean;
 }
 
 export interface ChatGptStoreFile {
@@ -114,7 +120,9 @@ export interface PublicAccount {
   signedIn: boolean;
   planUsageEnabled: boolean;
   needsSignIn: boolean;
-  signedOutReason?: 'signed_out' | 'refresh_failed';
+  signedOutReason?: 'signed_out' | 'refresh_failed' | 'registration_invalid';
+  /** The registration itself is dead: signing in again registers a new one. */
+  registrationInvalid?: boolean;
   /** ISO time the current access token expires, when there is one. */
   accessTokenExpiresAt?: string;
 }
@@ -233,6 +241,7 @@ export function toPublic(store: ChatGptStoreFile, a: ChatGptAccount): PublicAcco
     planUsageEnabled: hasPlanScope(a),
     needsSignIn: a.needs_sign_in === true || !a.refresh_token,
     ...(a.signed_out_reason ? { signedOutReason: a.signed_out_reason } : {}),
+    ...(a.registration_invalid ? { registrationInvalid: true } : {}),
     ...(a.access_token ? { accessTokenExpiresAt: new Date(expiresAtMs(a)).toISOString() } : {}),
   };
 }
@@ -251,12 +260,13 @@ export const EXPECTED_ISSUER = CHATGPT_ISSUER;
  * stopped working keeps it, because it only names the account for the next
  * sign-in's `id_token_hint` and grants nothing.
  */
-export function withoutTokens(a: ChatGptAccount, reason: 'signed_out' | 'refresh_failed'): ChatGptAccount {
+export function withoutTokens(a: ChatGptAccount, reason: 'signed_out' | 'refresh_failed' | 'registration_invalid'): ChatGptAccount {
   const { access_token: _a, refresh_token: _r, id_token: idToken, earliest_refresh_at: _e, ...rest } = a;
   return {
     ...rest,
-    ...(reason === 'refresh_failed' && idToken ? { id_token: idToken } : {}),
+    ...(reason !== 'signed_out' && idToken ? { id_token: idToken } : {}),
     needs_sign_in: true,
     signed_out_reason: reason,
+    ...(reason === 'registration_invalid' ? { registration_invalid: true } : {}),
   };
 }

@@ -5,7 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MANAGE_USAGE_URL, createChatGptPlan, type PlanAuth } from './chatgpt-plan.js';
 import { ChatGptAuth } from '../../src/auth/chatgpt/manager.js';
 import { updateStore } from '../../src/auth/chatgpt/store.js';
-import { isPlanModel, isUsageLimitMessage, usingPlan } from '../src/lib/chatgpt-plan.js';
+import { isPlanModel, isUsageLimitMessage, refreshOnPlanChange, usingPlan } from '../src/lib/chatgpt-plan.js';
+import { syncPlanRow, type PlanRowFn } from './chatgpt-plan.js';
+import { hasUsableProvider, withChatGptPlan } from '../../src/config/index.js';
 
 let dir: string;
 beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cascade-chatgpt-app-')); });
@@ -120,5 +122,45 @@ describe('window helpers', () => {
   it('recognises the usage-limit failure', () => {
     expect(isUsageLimitMessage('Run failed: ChatGPT plan usage limit reached. Open https://chatgpt.com/settings/usage')).toBe(true);
     expect(isUsageLimitMessage('Run failed: rate limit')).toBe(false);
+  });
+});
+
+describe('onboarding with only the ChatGPT plan', () => {
+  const withPlan: PlanRowFn = (p) => withChatGptPlan(p as never, dir) as never;
+  it('is not finishable before a sign-in, and a successful sign-in is the usable provider', () => {
+    const config: { providers: Array<{ type: string }> } = { providers: [] };
+    syncPlanRow(config, withPlan);
+    expect(hasUsableProvider(config.providers)).toBe(false);
+    seed();
+    syncPlanRow(config, withPlan);
+    expect(config.providers.map((p) => p.type)).toEqual(['chatgpt']);
+    expect(hasUsableProvider(config.providers)).toBe(true);
+  });
+  it('keeps other providers and drops the row again once signed out', async () => {
+    seed();
+    const config = { providers: [{ type: 'openai' }] };
+    syncPlanRow(config, withPlan);
+    expect(config.providers.map((p) => p.type)).toEqual(['openai', 'chatgpt']);
+    await plan().p.signOut();
+    syncPlanRow(config, withPlan);
+    expect(config.providers.map((p) => p.type)).toEqual(['openai']);
+  });
+});
+
+describe('model lists follow the ChatGPT account', () => {
+  it('refetches on every sign-in, sign-out or switch, and stops once the view unmounts', () => {
+    let fire: (() => void) | undefined;
+    let listeners = 0;
+    const bridge = { onChanged: (cb: () => void) => { fire = cb; listeners++; return () => { fire = undefined; listeners--; }; } };
+    const refetch = vi.fn();
+    const off = refreshOnPlanChange(bridge as never, refetch);
+    fire?.(); fire?.();
+    expect(refetch).toHaveBeenCalledTimes(2);
+    off();
+    expect(listeners).toBe(0);
+    expect(fire).toBeUndefined();
+  });
+  it('is harmless without a desktop bridge', () => {
+    expect(() => refreshOnPlanChange(undefined, vi.fn())()).not.toThrow();
   });
 });

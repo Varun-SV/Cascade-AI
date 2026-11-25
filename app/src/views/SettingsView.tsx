@@ -11,6 +11,7 @@ import { RelaySettingsPanel } from './RelaySettingsPanel.js';
 import { WorkspaceSettingsPanel } from './WorkspaceSettingsPanel.js';
 import { UpdatesPanel } from './UpdatesPanel.js';
 import { ChatGptPlanSection } from '../components/ChatGptPlan.js';
+import { refreshOnPlanChange } from '../lib/chatgpt-plan.js';
 
 type Tab = 'keys' | 'models' | 'budget' | 'connectors' | 'cloudRuns' | 'workspaces' | 'advanced' | 'data' | 'appearance' | 'updates';
 type Bias = 'balanced' | 'quality' | 'cost';
@@ -376,6 +377,8 @@ export function SettingsView({ socket }: Props) {
     finally { setModelsLoading(false); }
   };
   useEffect(() => { fetchModels(); }, []);
+  // The model lists follow the ChatGPT account: a sign-in, sign-out or switch fetches them again.
+  useEffect(() => refreshOnPlanChange(window.cascade?.chatgpt, () => { void fetchModels(); }), []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Also listen to the live backend snapshot when a socket is connected.
   useEffect(() => {

@@ -17,6 +17,8 @@ interface Provider {
    */
   needsBaseUrl?: boolean;
   noKey?: boolean;
+  /** Signed in to in the browser rather than given a key (ChatGPT plan): its step is a button, not a field. */
+  viaSignIn?: boolean;
 }
 
 const PROVIDERS: Provider[] = [
@@ -59,6 +61,13 @@ const PROVIDERS: Provider[] = [
     needsBaseUrl: true,
   },
   {
+    id: 'chatgpt',
+    name: 'ChatGPT plan',
+    description: 'Use your paid ChatGPT plan: Continue with ChatGPT, no API key',
+    keyPlaceholder: '',
+    viaSignIn: true,
+  },
+  {
     id: 'ollama',
     name: 'Ollama',
     description: 'Local models — no API key needed',
@@ -94,6 +103,20 @@ export function OnboardingView({ notice, initialWorkspace }: { notice?: string; 
     setWorkspace(value);
   };
   const [saving, setSaving] = useState(false);
+  // ChatGPT plan: signed in (and approved for plan usage), which stands in for a key.
+  const [chatgptDone, setChatgptDone] = useState<string | null>(null);
+  const [chatgptBusy, setChatgptBusy] = useState(false);
+  const [chatgptNote, setChatgptNote] = useState('');
+  const continueWithChatGpt = async () => {
+    setChatgptBusy(true); setChatgptNote('');
+    const r = await window.cascade?.chatgpt?.signIn();
+    setChatgptBusy(false);
+    if (!r) { setChatgptNote('ChatGPT sign-in is not available in this build.'); return; }
+    if (!r.ok) { setChatgptNote(r.error); return; }
+    if (!r.planUsageEnabled) { setChatgptNote('Signed in, but ChatGPT plan use was not enabled, so Cascade cannot use it. Try again and approve it, or choose another provider.'); return; }
+    setChatgptDone(r.view.active?.label ?? 'ChatGPT');
+    setStep('workspace');
+  };
 
   /**
    * Whether this screen is showing an endpoint field for the current choice.
@@ -105,7 +128,7 @@ export function OnboardingView({ notice, initialWorkspace }: { notice?: string; 
    * release keeps tripping over, so the screen that renders it is the one that
    * says so.
    */
-  const endpointOffered = Boolean(selectedProvider && !selectedProvider.noKey);
+  const endpointOffered = Boolean(selectedProvider && !selectedProvider.noKey && !selectedProvider.viaSignIn);
 
   /**
    * Selecting a provider starts a NEW credential draft.
@@ -120,6 +143,7 @@ export function OnboardingView({ notice, initialWorkspace }: { notice?: string; 
     if (p.id !== selectedProvider?.id) {
       setApiKey('');
       setBaseUrl('');
+      setChatgptNote('');
       setVerifyError('');
       setSaveError(null);
     }
@@ -210,6 +234,7 @@ export function OnboardingView({ notice, initialWorkspace }: { notice?: string; 
 
   const canContinueFromProvider = !!selectedProvider;
   const canSaveKey = selectedProvider?.noKey || !!apiKey;
+  const signedInWithChatGpt = !!chatgptDone;
 
   return (
     <div style={{
@@ -350,7 +375,27 @@ export function OnboardingView({ notice, initialWorkspace }: { notice?: string; 
         )}
 
         {/* Step: API key */}
-        {step === 'apikey' && (
+        {step === 'apikey' && selectedProvider?.viaSignIn && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <p style={{ fontSize: 12.5, color: 'var(--text-muted)', margin: 0 }}>
+              Complete eligible AI requests with usage included in your ChatGPT plan. Your browser opens to approve it; no API key is needed.
+            </p>
+            {signedInWithChatGpt && <div style={{ fontSize: 12.5, color: 'var(--success)' }}>Signed in as {chatgptDone}.</div>}
+            {chatgptNote && <div role="alert" style={{ fontSize: 12, color: 'var(--danger, #e5484d)' }}>{chatgptNote}</div>}
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={() => setStep('provider')} style={{ padding: '9px 16px', background: 'transparent', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', color: 'var(--text-muted)', fontSize: 12.5, cursor: 'pointer' }}>Back</button>
+              <button
+                onClick={signedInWithChatGpt ? () => setStep('workspace') : continueWithChatGpt}
+                disabled={chatgptBusy}
+                style={{ flex: 1, padding: '9px 0', background: 'linear-gradient(135deg, var(--accent), var(--accent-2))', border: 'none', borderRadius: 'var(--radius-md)', color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}
+              >
+                {chatgptBusy ? 'Finish in your browser…' : signedInWithChatGpt ? 'Continue' : 'Continue with ChatGPT'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {step === 'apikey' && !selectedProvider?.viaSignIn && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             <div>
               <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'block', marginBottom: 8 }}>

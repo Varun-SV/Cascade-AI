@@ -170,10 +170,10 @@ describe('errors', () => {
     expect(seen).toHaveLength(1);
     // The router sees a spent limit that does not ease: not the 30s backoff ladder.
     const c = classifyProviderError(e);
-    expect(c.kind).toBe('quota_exhausted');
+    expect(c.kind).toBe('plan_blocked');
     expect(c.systemic).toBe(true);
     const wrapped = enrichProviderError(e, c, model.id);
-    expect(classifyProviderError(wrapped).kind).toBe('quota_exhausted');
+    expect(classifyProviderError(wrapped).kind).toBe('plan_blocked');
     expect(describeProviderError(classifyProviderError(wrapped), model.id)).toContain('chatgpt.com/settings/usage');
   });
 

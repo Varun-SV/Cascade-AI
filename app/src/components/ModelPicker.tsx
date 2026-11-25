@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { ChevronDown, Plus } from 'lucide-react';
+import { refreshOnPlanChange } from '../lib/chatgpt-plan.js';
 
 export interface ModelOption {
   provider: string;
@@ -75,6 +76,10 @@ export function ModelPicker({ value, onChange }: Props) {
       .catch(() => { if (!cancelled) setDynamic([]); });
     return () => { cancelled = true; };
   }, [open, dynamic]);
+
+  // A ChatGPT sign-in, sign-out or account switch changes which models exist: forget the
+  // list, so it is fetched again now (open) or on the next open.
+  useEffect(() => refreshOnPlanChange(window.cascade?.chatgpt, () => setDynamic(null)), []);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {

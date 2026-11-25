@@ -17,6 +17,7 @@ import { registerCloudAuthIpc, type CloudAuthHandle } from './cloudAuth';
 import { registerRelayIpc } from './relay-ipc';
 import { registerWorkspaceIpc } from './workspace-ipc';
 import { registerChatGptIpc } from './chatgpt-ipc';
+import { syncPlanRow, type PlanRowFn } from './chatgpt-plan';
 import { insideWorkspace, isRunnable } from './file-access';
 import { registerBrowserHandlers, readCurrentPage, actOnCurrentPage, setAgentControlEnabled, resumeAgentControl, agentRunEnded, agentActorEnded, setApprovalWaitCeiling, setLifecycleReleaseWired, approvalWaitCeilingFor } from './browser';
 
@@ -68,6 +69,8 @@ function mapProvider(id: string): { type: string | null; baseUrl?: string } {
     case 'groq': return { type: 'openai-compatible', baseUrl: 'https://api.groq.com/openai/v1' };
     case 'openai-compatible': return { type: 'openai-compatible' };
     case 'ollama': return { type: 'ollama' };
+    // No key to store: its row follows the sign-in (see syncPlanRow).
+    case 'chatgpt': return { type: 'chatgpt' };
     default: return { type: null };
   }
 }
@@ -569,6 +572,9 @@ function registerIPC(): void {
       // immediately with no backend restart.
       const mapped = mapProvider(cfg.provider);
       const type = mapped.type;
+      // Onboarding with the ChatGPT plan: the sign-in already happened, and IS the provider. Take it
+      // into the live config so the usable-provider check below sees it, and so the wizard can finish.
+      if (cfg.provider === 'chatgpt' && cascadeConfig) syncPlanRow(cascadeConfig, (loadCore() as unknown as { withChatGptPlan: PlanRowFn }).withChatGptPlan);
       // Prefer a user-supplied base URL (Azure / OpenAI-compatible endpoint) over
       // the provider's built-in default — onboarding used to drop it entirely.
       const baseUrl = cfg.baseUrl?.trim() || mapped.baseUrl;
@@ -860,8 +866,7 @@ function registerIPC(): void {
     // and the next run (each builds its own Cascade over this object) sees it.
     onChanged: () => {
       if (!cascadeConfig) return;
-      const { withChatGptPlan } = loadCore() as unknown as { withChatGptPlan: (p: unknown[]) => unknown[] };
-      cascadeConfig.providers = withChatGptPlan(cascadeConfig.providers ?? []);
+      syncPlanRow(cascadeConfig, (loadCore() as unknown as { withChatGptPlan: PlanRowFn }).withChatGptPlan);
     },
   });
   // A folder on this computer as a cloud run's workspace: serves with the same pairing; off until turned on.

@@ -180,7 +180,7 @@ declare global {
         switch(a: { accountId: string }): Promise<{ ok: true; needsSignIn: boolean; view: PlanViewState } | { ok: false; error: string }>;
         dismissWelcome(): Promise<{ ok: true }>;
         manageUsage(): Promise<{ ok: true }>;
-        onChanged(cb: (v: PlanViewState) => void): void;
+        onChanged(cb: (v: PlanViewState) => void): () => void;
       };
       workspace?: {
         status(): Promise<WorkspaceStatus>;

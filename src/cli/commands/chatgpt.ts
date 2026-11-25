@@ -39,6 +39,7 @@ function expiryText(iso: string | undefined): string {
 
 /** One account, as a status line. */
 function accountText(a: PublicAccount): string {
+  if (a.registrationInvalid) return `${a.label}: this registration is no longer recognised by OpenAI. Register again: cascade chatgpt signin`;
   if (a.needsSignIn) return `${a.label}: signed out. Sign in again: cascade chatgpt signin`;
   if (!a.planUsageEnabled) return `${a.label}: signed in, ChatGPT plan use NOT enabled. Enable it: cascade chatgpt signin --enable-plan`;
   return `${a.label}: signed in, ChatGPT plan use enabled`;

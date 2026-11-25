@@ -40,6 +40,7 @@ export interface PlanAccount {
   signedIn: boolean;
   planUsageEnabled: boolean;
   needsSignIn: boolean;
+  registrationInvalid?: boolean;
   accessTokenExpiresAt?: string;
 }
 
@@ -169,8 +170,21 @@ function strip(a: PlanAccount): PlanAccount {
   return {
     id: a.id, email: a.email, label: a.label, active: a.active, signedIn: a.signedIn,
     planUsageEnabled: a.planUsageEnabled, needsSignIn: a.needsSignIn,
+    ...(a.registrationInvalid ? { registrationInvalid: true } : {}),
     ...(a.accessTokenExpiresAt ? { accessTokenExpiresAt: a.accessTokenExpiresAt } : {}),
   };
 }
 
 export type ChatGptPlan = ReturnType<typeof createChatGptPlan>;
+
+/** The SDK's `withChatGptPlan`: the provider list with the plan's row in it exactly while a sign-in can serve. */
+export type PlanRowFn = (providers: Array<{ type: string }>) => Array<{ type: string }>;
+
+/**
+ * Make the live config's provider list follow the sign-in. Used after a sign-in
+ * or sign-out, and by onboarding, where a successful sign-in is the usable
+ * provider that lets the wizard finish.
+ */
+export function syncPlanRow(config: { providers?: Array<{ type: string }> }, withPlan: PlanRowFn): void {
+  config.providers = withPlan(config.providers ?? []);
+}

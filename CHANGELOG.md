@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **"Using ChatGPT plan" in the CLI status bar and the desktop composer, with Manage usage.** The first sign-in shows "You're using your ChatGPT plan" once. When you reach a usage limit, Cascade says so and points to chatgpt.com/settings/usage (the desktop app has **Manage usage** as the main button), and does not retry in a loop or switch billing path by itself.
 - **The sign-in is kept in `~/.cascade-ai/chatgpt-accounts.json`** (mode 0600, written atomically), with a per-machine host ID in `chatgpt-host.json`. The CLI and the desktop app can run at once: the access token is renewed before it expires by one process at a time (a lock file), so the rotating refresh token is never spent twice, and a network error or a 5xx never erases a sign-in. The desktop app signs in from its main process and the window never receives a token.
 
+### Fixed
+- **A ChatGPT plan limit never moves your run to a paid provider.** A usage-limit or not-eligible error now stops the request with its own message, even when another provider is configured and even for a pinned ChatGPT model; the desktop usage-limit notice appears every time.
+- **The desktop model lists follow the ChatGPT account.** Signing in, out or switching accounts refreshes the model picker and Settings, so the new account's models appear and the old one's go.
+- **The desktop setup can finish with only a ChatGPT plan.** The provider step offers "ChatGPT plan" with Continue with ChatGPT, and a successful sign-in counts as the usable provider.
+- **Token budgets count a ChatGPT (and Responses-only OpenAI) tool result in full.** The preflight used the Chat Completions rules and read a tool result array as empty, so `budget.maxTokensPerRun` could be passed with far more input than the cap.
+- **A ChatGPT registration OpenAI no longer recognises (`invalid_client`) is recoverable.** The account is marked as needing a new registration, and `cascade chatgpt signin` (or the desktop button) registers afresh under the same host ID instead of saying you are already signed in.
+
 ### Changed
 - **Docs and README:** providers and keys, the CLI reference, the desktop app and the FAQ describe the ChatGPT plan option: paid plans (Plus has a five-hour limit shared with your other apps), CLI and desktop only. The FAQ answer on subscriptions now says ChatGPT: yes there, Claude and Copilot: no.
 

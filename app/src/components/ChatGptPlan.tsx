@@ -12,7 +12,8 @@ export function useChatGptPlan(): { view: PlanViewState | null; refresh: () => v
   }, []);
   useEffect(() => {
     refresh();
-    window.cascade?.chatgpt?.onChanged((v) => setView(v));
+    const off = window.cascade?.chatgpt?.onChanged((v) => setView(v));
+    return () => { off?.(); };
   }, [refresh]);
   return { view, refresh };
 }
@@ -127,7 +128,7 @@ export function ChatGptPlanSection() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 12.5 }}>{active.label}</span>
           <span style={{ fontSize: 11, color: active.planUsageEnabled && active.signedIn ? 'var(--success)' : 'var(--text-muted)' }}>
-            {!active.signedIn ? 'signed out' : active.planUsageEnabled ? 'plan usage on' : 'plan usage not enabled'}
+            {active.registrationInvalid ? 'registration no longer recognised: sign in to register again' : !active.signedIn ? 'signed out' : active.planUsageEnabled ? 'plan usage on' : 'plan usage not enabled'}
           </span>
           <span style={{ flex: 1 }} />
           {active.signedIn && !active.planUsageEnabled && (

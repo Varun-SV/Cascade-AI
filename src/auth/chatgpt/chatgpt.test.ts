@@ -372,6 +372,58 @@ describe('sign-in', () => {
     expect(readStore(dir).active).toBe(CLIENT);
     expect(s.accounts.find((x) => x.client_id === CLIENT)!.subject).toBe('sub-1');
   });
+
+  describe('a registration OpenAI no longer recognises (invalid_client)', () => {
+    const seedDead = async (): Promise<Fake> => {
+      updateStore(dir, (st) => {
+        st.accounts.push({
+          email: 'ana@example.com', issuer: ISSUER, subject: 'sub-1', client_id: CLIENT, ext_agent_host_id: 'urn:uuid:x',
+          id_token: 'old.id.token', access_token: 'at-old', refresh_token: 'rt-old', token_type: 'Bearer', expires_in: 3600,
+          scopes: ALL_SCOPES.split(' '), saved_at: new Date(Date.now() - 3_500_000).toISOString(),
+        });
+        st.active = CLIENT;
+      });
+      const f = fake();
+      f.tokenResponses.push(() => json(401, { error: 'invalid_client' }));
+      await expect(auth(f).getAccessToken()).rejects.toMatchObject({ kind: 'invalid_client' });
+      return f;
+    };
+
+    it('is remembered, so the account no longer reads as signed in', async () => {
+      await seedDead();
+      const rec = readStore(dir).accounts[0]!;
+      expect(rec).toMatchObject({ registration_invalid: true, needs_sign_in: true, signed_out_reason: 'registration_invalid' });
+      expect(rec.refresh_token).toBeUndefined();
+      const pub = auth(fake()).status().active!;
+      expect(pub).toMatchObject({ signedIn: false, needsSignIn: true, registrationInvalid: true });
+    });
+
+    it('signing in registers afresh with dynamic_agent_client under the same host ID, and replaces the dead registration', async () => {
+      const f = await seedDead();
+      const hostBefore = auth(f).hostId();
+      const r = await run((u) => goodReply(u, { client_id: 'oaiapp_fresh' }), { accountId: CLIENT, respond: goodTokens({ aud: 'oaiapp_fresh' }) }, f);
+      const out = await r.result;
+      const u = r.b.seen[0]!;
+      expect(u.searchParams.get('client_id')).toBe('dynamic_agent_client');
+      expect(u.searchParams.get('agent_name_hint')).toBe('Cascade');
+      expect(u.searchParams.get('ext_agent_host_id')).toBe(hostBefore);
+      expect(u.searchParams.has('id_token_hint')).toBe(false);
+      expect(u.searchParams.has('login_hint')).toBe(false); // hints are for re-authorizing a live client
+      expect(out).toMatchObject({ newRegistration: true, planUsageEnabled: true });
+      const st = readStore(dir);
+      expect(st.accounts.map((a) => a.client_id)).toEqual(['oaiapp_fresh']);
+      expect(st.active).toBe('oaiapp_fresh');
+      expect(st.accounts[0]!.registration_invalid).toBeUndefined();
+      expect(st.accounts[0]!.ext_agent_host_id).toBe(hostBefore);
+    });
+
+    it('a different person signing in does not retire the dead registration', async () => {
+      const f = await seedDead();
+      const r = await run((u) => goodReply(u, { client_id: 'oaiapp_other' }), { accountId: CLIENT, respond: goodTokens({ aud: 'oaiapp_other', sub: 'sub-9' }) }, f);
+      await r.result;
+      expect(readStore(dir).accounts.map((a) => a.client_id).sort()).toEqual([CLIENT, 'oaiapp_other'].sort());
+    });
+  });
 });
 
 // ── The store ──
@@ -485,12 +537,12 @@ describe('refresh', () => {
     expect(JSON.stringify(readStore(dir))).toBe(before);
   });
 
-  it('invalid_client does not erase the tokens either', async () => {
+  it('invalid_client marks the registration invalid (the tokens belong to a client OpenAI forgot)', async () => {
     seed();
     const f = fake();
     f.tokenResponses.push(() => json(401, { error: 'invalid_client' }));
     await expect(auth(f).getAccessToken()).rejects.toMatchObject({ kind: 'invalid_client' });
-    expect(readStore(dir).accounts[0]!.refresh_token).toBe('rt-old');
+    expect(readStore(dir).accounts[0]).toMatchObject({ registration_invalid: true, client_id: CLIENT });
   });
 
   it('a terminal error is not applied when another process already rotated the token', async () => {

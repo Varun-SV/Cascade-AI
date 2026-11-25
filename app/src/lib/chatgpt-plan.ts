@@ -11,11 +11,23 @@ export const LIMIT_BODY = "Review your plan or this app's limit in ChatGPT setti
 
 export interface PlanAccountView {
   id: string; email: string; label: string; active: boolean; signedIn: boolean;
-  planUsageEnabled: boolean; needsSignIn: boolean; accessTokenExpiresAt?: string;
+  planUsageEnabled: boolean; needsSignIn: boolean; registrationInvalid?: boolean; accessTokenExpiresAt?: string;
 }
 export interface PlanViewState {
   accounts: PlanAccountView[]; active: PlanAccountView | null; planReady: boolean;
   welcomePending: boolean; signingIn: boolean; manageUsageUrl: string;
+}
+
+/** The one thing of the bridge that model lists need: to hear that the account changed. */
+export interface PlanChangeSource { onChanged?: (cb: (v: PlanViewState) => void) => () => void }
+
+/**
+ * Run `refetch` whenever a ChatGPT sign-in, sign-out or account switch happens,
+ * so the plan's models appear (or the previous account's disappear) without a
+ * restart. Returns the unsubscribe, for an effect's cleanup.
+ */
+export function refreshOnPlanChange(bridge: PlanChangeSource | undefined, refetch: () => void): () => void {
+  return bridge?.onChanged?.(() => refetch()) ?? (() => undefined);
 }
 
 /** A model the signed-in ChatGPT plan serves (the router names them `chatgpt:<slug>`). */

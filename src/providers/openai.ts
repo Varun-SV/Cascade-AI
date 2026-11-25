@@ -56,6 +56,15 @@ export function chatToolsNeedNoReasoning(id: string): boolean {
 /** How many tool calls' reasoning items a provider keeps for replay. */
 export const REASONING_REPLAY_LIMIT = 1000;
 
+/**
+ * An assistant turn's tool calls as Responses `function_call` ITEMS: the shape
+ * `convertToResponsesInput` submits, shared with the budget preflight so the
+ * estimate cannot drift from the request.
+ */
+export function toResponsesFunctionCalls(toolCalls: readonly ToolCall[]): Array<{ type: 'function_call'; call_id: string; name: string; arguments: string }> {
+  return toolCalls.map((tc) => ({ type: 'function_call' as const, call_id: tc.id, name: tc.name, arguments: JSON.stringify(tc.input) }));
+}
+
 /** Tool definitions in the Responses API's flat function shape. */
 export function toResponsesTools(tools: readonly ToolDefinition[]): OpenAI.Responses.FunctionTool[] {
   return tools.map((t) => ({
@@ -520,9 +529,7 @@ export class OpenAIProvider extends BaseProvider {
           ? m.content
           : m.content.map((b) => (b.type === 'text' ? b.text : '')).join('');
         if (text) out.push({ role: 'assistant', content: text });
-        for (const tc of m.toolCalls ?? []) {
-          out.push({ type: 'function_call', call_id: tc.id, name: tc.name, arguments: JSON.stringify(tc.input) });
-        }
+        out.push(...toResponsesFunctionCalls(m.toolCalls ?? []));
         continue;
       }
       if (typeof m.content === 'string') {

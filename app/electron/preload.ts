@@ -200,8 +200,11 @@ contextBridge.exposeInMainWorld('cascade', {
     switch: (a: { accountId: string }) => ipcRenderer.invoke('chatgpt:switch', a),
     dismissWelcome: () => ipcRenderer.invoke('chatgpt:dismissWelcome'),
     manageUsage: () => ipcRenderer.invoke('chatgpt:manageUsage'),
+    // Returns the way to stop listening: several parts of the window listen, and each leaves when it unmounts.
     onChanged: (cb: (v: unknown) => void) => {
-      ipcRenderer.on('chatgpt:changed', (_e, v) => cb(v));
+      const h = (_e: unknown, v: unknown): void => cb(v);
+      ipcRenderer.on('chatgpt:changed', h);
+      return () => { ipcRenderer.removeListener('chatgpt:changed', h); };
     },
   },
 

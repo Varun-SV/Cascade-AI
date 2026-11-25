@@ -8,7 +8,8 @@ import type {
 import { toAnthropicTools, toAnthropicToolUse } from '../../providers/anthropic.js';
 import { toGeminiTools, toGeminiFunctionCalls } from '../../providers/gemini.js';
 import { toOllamaTools, toOllamaToolCalls } from '../../providers/ollama.js';
-import { toOpenAITools, toOpenAIToolCalls } from '../../providers/openai.js';
+import { toOpenAITools, toOpenAIToolCalls, toResponsesFunctionCalls, toResponsesTools, requiresResponsesForTools } from '../../providers/openai.js';
+import { toNamespacedTools, TOOL_NAMESPACE } from '../../providers/chatgpt.js';
 
 /**
  * What each provider actually PUTS ON THE WIRE.
@@ -207,6 +208,39 @@ const OLLAMA: WireProfile = {
   sizeTools: toOllamaTools,
 };
 
+/**
+ * The Responses API's serializer (`convertToResponsesInput`), which is NOT the
+ * Chat Completions one:
+ *
+ *   - a tool turn is ALWAYS submitted, as `function_call_output.output`, and an
+ *     array there is JSON.stringify()d whole (images' base64 included);
+ *   - an assistant turn's tool calls are separate `function_call` items, sent
+ *     whatever type its content has;
+ *   - system and user arrays become input parts (text and images).
+ *
+ * Sizing a Responses request with the Chat Completions profile read a tool
+ * result array as 'dropped' and under-counted it, which let a request pass the
+ * `budget.maxTokensPerRun` preflight with its real input far over the cap.
+ */
+const RESPONSES: WireProfile = {
+  dropsMessage: () => false,
+  blockHandling: (m) => (m.role === 'tool' ? 'stringified' : 'blocks'),
+  sendsToolCalls: (m) => m.role === 'assistant',
+  sendsBlock: textAndImageOnly,
+  sendsToolCallId: true,
+  sizeToolCalls: toResponsesFunctionCalls,
+  sendsUrlImages: true,
+  readsTopLevelImages: false,
+  sizeTools: toResponsesTools,
+};
+
+/** The ChatGPT plan: the Responses serializer, with every tool and call in the `cascade` namespace. */
+const CHATGPT: WireProfile = {
+  ...RESPONSES,
+  sizeToolCalls: (calls) => toResponsesFunctionCalls(calls).map((c) => ({ ...c, namespace: TOOL_NAMESPACE })),
+  sizeTools: toNamespacedTools,
+};
+
 const PROFILES: Record<ProviderType, WireProfile> = {
   anthropic: ANTHROPIC,
   gemini: GEMINI,
@@ -216,8 +250,7 @@ const PROFILES: Record<ProviderType, WireProfile> = {
   azure: OPENAI,
   'openai-compatible': OPENAI,
   ollama: OLLAMA,
-  // ChatGptProvider extends OpenAIProvider and sends the same messages.
-  chatgpt: OPENAI,
+  chatgpt: CHATGPT,
 };
 
 /**
@@ -228,6 +261,19 @@ const PROFILES: Record<ProviderType, WireProfile> = {
  */
 export function wireProfile(provider: ProviderType): WireProfile {
   return PROFILES[provider] ?? OPENAI;
+}
+
+/**
+ * The profile for one REQUEST. First-party OpenAI calls go through the
+ * Responses API when they carry tools on a model that only calls tools there
+ * (openai.ts `requiresResponsesForTools`), and then the Responses rules apply.
+ */
+export function wireProfileFor(
+  model: { provider: ProviderType; id: string; baseModelId?: string },
+  hasTools: boolean,
+): WireProfile {
+  if (model.provider === 'openai' && hasTools && requiresResponsesForTools(model.baseModelId ?? model.id)) return RESPONSES;
+  return wireProfile(model.provider);
 }
 
 /**
