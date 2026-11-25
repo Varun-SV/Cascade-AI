@@ -10,7 +10,7 @@ export const GETTING_STARTED: DocPage[] = [
     title: 'What is Cascade',
     summary: 'A multi-tier AI orchestrator: a planner, managers and workers share one job, and you bring your own provider keys.',
     blocks: [
-      p('Cascade is an AI orchestrator. Instead of sending every request to one expensive model, it splits a job across three tiers and gives each tier a model that fits the work. Easy steps run on small, fast, cheap models. The strongest model is kept for planning and for the parts that need it.'),
+      p('Cascade is an AI orchestrator. Instead of sending every request to one model, it splits a job across three tiers and gives each tier a model that fits the work. Small, fast models take the worker steps; the strongest model you configure is kept for planning and for the parts that need it. Cascade is in early access: the orchestration controller is being reworked, and benchmarks will be published after that.'),
       h2('The three tiers'),
       table(
         ['Tier', 'Role', 'What it does'],
@@ -31,7 +31,7 @@ export const GETTING_STARTED: DocPage[] = [
         ['**OpenAI-compatible API**', 'Point any OpenAI SDK at a Cascade server.', '[The /v1 API](/docs/openai-api)'],
       ),
       p('The web app, desktop app and CLI share one account. Your keys and settings can follow you between them through end-to-end encrypted sync that you start yourself, and a chat you began on the web can be continued elsewhere.'),
-      note('Cascade shows its work. Every reply can show which tier and model handled each step, what it cost, and what the routing saved compared with running everything on the top model.', 'Receipts, not promises'),
+      note('Cascade shows its work. Every reply can show which tier and model handled each step and what it cost, next to an estimate of the same tokens priced at the top model\'s rate.', 'Receipts, not promises'),
     ],
   },
   {
@@ -45,7 +45,7 @@ export const GETTING_STARTED: DocPage[] = [
         '**Open the app.** Go to cascadeai.in and sign in with GitHub or Google. (A server you host may offer different sign-in options.)',
         '**Add a key.** Open **Settings** and choose **API keys**, then add a key for at least one provider: Anthropic, OpenAI, Google Gemini, Azure OpenAI, or an OpenAI-compatible endpoint. Each provider then offers the models it actually serves, so you pick from real ones.',
         '**Send a message.** Type in the box and send. Cascade decides how much of the hierarchy the request needs.',
-        '**Look at the receipt.** Under a reply, open **Why?** to see which tier and model did the work, what each tier cost, and what that saved compared with running it all on T1.',
+        '**Look at the receipt.** Under a reply, open **Why?** to see which tier and model did the work, what each tier cost, and the all-T1 comparison.',
       ),
       tip('No key yet? The composer says "Add an API key to start" until one is saved.'),
       h2('What you can turn on for a message'),
@@ -205,7 +205,7 @@ reply = client.chat.completions.create(
     messages=[{"role": "user", "content": "Compare Postgres and SQLite for a CLI tool."}],
 )
 print(reply.choices[0].message.content)
-print(reply.cascade)   # the tier and model that served it, and what routing saved`, 'python'),
+print(reply.cascade)   # the tier and model that served it, its cost, and the all-T1 comparison`, 'python'),
       h2('The model field is a routing mode'),
       p('Cascade picks a model for each subtask, so `model` does not name a model. It names how to run:'),
       table(
